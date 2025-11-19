@@ -1,35 +1,8 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-venv/
-env/
-ENV/
-.venv/
-*.egg-info/
-dist/
+# Build directories (all C++ build artifacts go here)
 build/
-.pytest_cache/
-.coverage
-uv.lock
+cmake-build-*/
 
-# C++
-*.o
-*.out
-*.exe
-*.app
-*.dSYM/
-poker_api
-build/
-CMakeCache.txt
-CMakeFiles/
-cmake_install.cmake
-Makefile.bak
-json.hpp
-
-# IDEs
+# IDE and Editor files
 .vscode/
 .idea/
 *.swp
@@ -37,7 +10,18 @@ json.hpp
 *~
 .DS_Store
 
-# Environment
-.env
-.env.local
+# Python artifacts (for website/)
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+env/
+*.egg-info/
+dist/
+*.egg
 
+# UV lock file (optional - uncomment if you don't want to track it)
+# uv.lock
