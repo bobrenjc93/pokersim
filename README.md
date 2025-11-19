@@ -1,31 +1,34 @@
 # Poker Simulator Monorepo
 
-A full-stack poker simulation system with a Python web interface and high-performance C++ API backend.
+A full-stack poker simulation system with a Python web interface, high-performance C++ API backend, and Reinforcement Learning training system.
 
 ## Project Overview
 
 This monorepo contains:
 - **Website**: Python Flask web server with modern UI for poker simulations
-- **API**: Pure C++ API server for fast game state simulations
+- **API**: Pure C++ API server for fast, stateless game simulations
+- **Training**: Reinforcement learning system (PPO) for training poker AI agents
+- **Playground**: Interactive web UI to play poker against trained AI models
+- **Arena**: Evaluation system for comparing model checkpoints
 
 ## Architecture
 
 ```
-┌─────────────────┐
-│   Web Browser   │
-└────────┬────────┘
-         │ HTTP
-         ▼
-┌─────────────────┐
-│  Python Flask   │  Port 5000
-│  Web Server     │
-└────────┬────────┘
-         │ HTTP
-         ▼
-┌─────────────────┐
-│   C++ API       │  Port 8080
-│   Server        │
-└─────────────────┘
+┌─────────────────────┐
+│   Web Browser       │
+└──────────┬──────────┘
+           │ HTTP
+           ▼
+┌─────────────────────┐
+│  Python Flask       │  Port 5000
+│  Web Server         │
+└──────────┬──────────┘
+           │ HTTP/JSON
+           ▼
+┌─────────────────────┐
+│  C++ Poker Engine   │  Port 8080
+│  (Stateless API)    │
+└─────────────────────┘
 ```
 
 The Python website serves the user interface and proxies requests to the C++ backend, which handles the computational work of simulating poker game states.
@@ -48,225 +51,200 @@ In a new terminal:
 
 ```bash
 cd website
-uv venv  # Create virtual environment
-uv pip install -r requirements.txt  # Install dependencies
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-python app.py
+./start.sh
 ```
 
-**Don't have uv?** Install it first:
+Or manually:
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
+cd website
+uv sync
+uv run python app.py
 ```
 
 You should see: `Running on http://0.0.0.0:5000`
 
 ### 3. Open the Website
 
-Navigate to `http://localhost:5000` in your browser and start simulating!
+Navigate to `http://localhost:5000` in your browser.
 
 ## Project Structure
 
 ```
 pokersim/
 ├── README.md              # This file
+├── run_tests.sh           # Master test script
 ├── website/               # Python Flask web server
-│   ├── app.py            # Flask application
-│   ├── requirements.txt  # Python dependencies
-│   ├── templates/
-│   │   └── index.html   # Web UI
-│   └── README.md        # Website documentation
-└── api/                  # C++ API server
-    ├── main.cpp         # Server implementation
-    ├── CMakeLists.txt   # CMake configuration
-    ├── Makefile         # Make configuration
-    └── README.md        # API documentation
+│   ├── app.py             # Flask application
+│   ├── pyproject.toml     # Python dependencies
+│   ├── start.sh           # Quick start script
+│   └── templates/
+│       └── index.html     # Web UI
+├── api/                   # C++ API server
+│   ├── src/               # Source files
+│   ├── tests/             # Test files
+│   ├── CMakeLists.txt     # CMake configuration
+│   ├── Makefile           # Make configuration
+│   └── README.md          # API & engine reference
+├── training/              # RL training system
+│   ├── train.py           # RL training script (PPO)
+│   ├── eval.py            # Model evaluation script
+│   ├── ppo.py             # PPO algorithm
+│   ├── rl_model.py        # Neural network model
+│   ├── rl_state_encoder.py # State encoding
+│   └── start_rl_training_optimized.sh # Training script
+├── playground/            # Interactive poker playground
+│   ├── app.py             # Flask application
+│   ├── start.sh           # Quick start script
+│   └── templates/
+│       └── index.html     # Poker table UI
+└── arena/                 # AI vs AI Evaluation Arena
+    ├── engine.py          # Core arena logic
+    └── server.py          # Web server with real-time UI
 ```
 
 ## Features
 
-### Current Features
-- ✅ RESTful API for game state simulation
-- ✅ Deterministic simulation with seeded RNG
-- ✅ Modern, responsive web interface
-- ✅ JSON-based communication
-- ✅ CORS support for development
-- ✅ Error handling and validation
+- ✅ **Complete Texas Hold'em Engine**: Hand evaluation, side pots, game flow (C++)
+- ✅ **Stateless API**: Deterministic simulation based on seed + history
+- ✅ **Modern Web UI**: Flask-based interface for interaction
+- ✅ **Reinforcement Learning**: PPO agent training with self-play
+- ✅ **High Performance**: C++ backend for sub-millisecond simulations
 
-### Ready to Extend
-- 🎯 Implement full poker game rules
-- 🎯 Add multi-player support
-- 🎯 Track hand histories
-- 🎯 Calculate win probabilities
-- 🎯 Add AI opponents
-- 🎯 Visualization of game progression
+## Reinforcement Learning Training
 
-## Example Usage
+Train a neural network to learn poker strategy using Proximal Policy Optimization (PPO) and self-play.
 
-### Via Web Interface
-
-1. Open `http://localhost:5000`
-2. Enter a game state:
-   ```json
-   {"players": 2, "pot": 100, "cards": ["AS", "KD"]}
-   ```
-3. Enter a seed: `42`
-4. Click "Simulate Next State"
-
-### Via API (curl)
+### Quick Start (Optimized)
 
 ```bash
-curl -X POST http://localhost:8080/simulate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "gameState": {
-      "players": 2,
-      "pot": 100,
-      "cards": ["AS", "KD"]
-    },
-    "seed": 42
-  }'
+cd training
+./start_rl_training_optimized.sh
 ```
 
-Response:
-```json
-{
-  "success": true,
-  "nextGameState": {
-    "players": 2,
-    "pot": 130,
-    "cards": ["AS", "KD", "QH"],
-    "lastAction": "bet",
-    "lastBetAmount": 30,
-    "simulated": true,
-    "timestamp": 1700000000
-  }
-}
-```
+This uses recommended hyperparameters:
+- **Heads-up play** (2 players) for simpler learning
+- **Learning rate** 3e-4 with cosine annealing
+- **Entropy bonus** 0.02 for exploration
+- **Normalized rewards** for stability
 
-## Development
+### Manual Training
 
-### Prerequisites
-
-#### For Website
-- Python 3.8+
-- [uv](https://github.com/astral-sh/uv) (fast Python package manager)
-
-#### For API
-- C++ compiler with C++17 support
-- Make or CMake 3.10+
-
-### Running in Development Mode
-
-#### Website (with auto-reload)
 ```bash
-cd website
-FLASK_ENV=development python app.py
+cd training
+uv sync
+uv run python train.py --iterations 5000 --episodes-per-iter 50 --num-players 2
 ```
 
-#### API (rebuild after changes)
+### Evaluation
+
+To evaluate a trained model against random agents:
+
 ```bash
-cd api
-make clean && make
-./poker_api
+uv run python eval.py --model /path/to/model.pt --num-hands 100
 ```
 
-## Configuration
+### Advanced Evaluation (Arena)
+
+The Arena provides a real-time web interface for evaluating model checkpoints:
+
+```bash
+cd arena
+uv run python server.py
+```
+
+Open `http://localhost:5000` in your browser to access the evaluation UI.
+
+#### Features
+
+- **Real-time hand streaming** - Watch each hand play out live
+- **Live statistics** - Win rate, BB/100, and hand count update in real-time
+- **Round-robin tournaments** - All checkpoints play against each other
+- **Baseline comparisons** - Compare against Random and Heuristic agents
+- **Interactive charts** - Visualize performance progression over training
+
+### Playground (Play Against AI)
+
+The Playground provides an interactive web interface to play poker against trained AI models:
+
+```bash
+cd playground
+./start.sh
+```
+
+Open `http://localhost:5001` in your browser to play heads-up poker against any trained checkpoint.
+
+### Training Opponent Pool
+
+The RL model trains against a diverse pool of opponents to learn robust strategies:
+
+| Agent Type | Strategy | Purpose |
+|------------|----------|---------|
+| `CallingStation` | Calls most bets, especially all-ins | Punishes weak all-in plays |
+| `HeroCaller` | Calls down suspected bluffs | Teaches that bluffing has limits |
+| `TightAgent` | Only plays premium hands | Punishes over-aggression |
+| `HeuristicAgent` | Rule-based strategic play | Provides a baseline opponent |
+| `AggressiveAgent` | Frequent bets and raises | Teaches calling down bluffs |
+| `LoosePassive` | Calls too much, rarely raises | Rewards value betting |
+| `AlwaysCall` | Always checks or calls | Tests thin value bets |
+| `AlwaysRaise` | Always bets/raises max | Tests handling hyper-aggression |
+| `AlwaysFold` | Folds to any bet | Tests blind stealing |
+| `RandomAgent` | Random valid actions | Baseline exploration |
+
+Self-play against past model checkpoints (15%) and the current model (10%) is also used.
+
+### Convergence Notes
+- **Short-term (<500 iters)**: Win rate fluctuates but avoids 0%.
+- **Medium-term (500-2000 iters)**: Win rate stabilizes around 45-55%.
+- **Long-term (>2000 iters)**: Consistent performance against random opponents (EV > 0.7).
+
+## Website Configuration
 
 ### Environment Variables
-
-#### Website
 - `PORT`: Web server port (default: 5000)
 - `API_HOST`: C++ API hostname (default: localhost)
 - `API_PORT`: C++ API port (default: 8080)
 
 Example:
 ```bash
-PORT=3000 API_HOST=localhost API_PORT=8080 python app.py
+PORT=3000 API_HOST=localhost API_PORT=8080 uv run python app.py
 ```
 
-#### API
-Pass port as command line argument:
+### Production Mode
+For production, use a WSGI server like Gunicorn:
 ```bash
-./poker_api 9000
+uv run gunicorn -w 4 -b 0.0.0.0:5000 app:app
 ```
-
-## Extending the Poker Logic
-
-The current implementation includes basic example logic. To implement real poker rules:
-
-1. Edit `api/main.cpp` → `GameSimulator::simulateNextState()`
-2. Add your poker game logic:
-   - Hand evaluation
-   - Betting rounds
-   - Card dealing
-   - Winner determination
-3. Rebuild the API server
-4. Update the website UI as needed
 
 ## Testing
 
-### Test API Server
-```bash
-cd api
-# Build and run
-make && ./poker_api &
+The project includes comprehensive test suites. Run all tests with:
 
-# Test endpoint
-curl -X POST http://localhost:8080/simulate \
-  -H "Content-Type: application/json" \
-  -d '{"gameState": {"pot": 100}, "seed": 42}'
+```bash
+./run_tests.sh
 ```
 
-### Test Website
-```bash
-cd website
-python app.py &
-curl http://localhost:5000
-```
-
-## Troubleshooting
-
-### "Connection refused" errors
-- Ensure both servers are running
-- Check ports aren't already in use
-- Verify environment variables are set correctly
-
-### Build errors (C++)
-- Verify C++17 compiler support: `g++ --version` (need 7.0+)
-- The first build downloads dependencies (requires internet)
-
-### Python import errors
-- Activate virtual environment if using one
-- Install dependencies: `uv pip install -r requirements.txt`
+This runs:
+1. **C++ Unit Tests**: Card, Deck, Hand, Player, Game
+2. **API Snapshot Tests**: Validates complex scenarios (side pots, all-ins) via Python
+3. **RL Training Tests**: Unit tests for PPO and state encoder
+4. **Arena Tests**: Tests for the evaluation arena
 
 ## Performance
 
-The C++ backend provides:
-- Sub-millisecond response times for simulations
-- Efficient memory usage
-- Deterministic results with seeded RNG
+The C++ backend provides sub-millisecond response times. 
 
-## Contributing
+**Note on RL Training**: The training loop uses direct C++ bindings (pybind11) for high-performance communication with the poker engine, eliminating network overhead.
 
-When extending this project:
-1. Keep the website and API loosely coupled
-2. Use JSON for all communication
-3. Add error handling for edge cases
-4. Update documentation as you add features
+## Development
+
+### Prerequisites
+- **Python 3.9+** with [uv](https://github.com/astral-sh/uv)
+- **C++17 Compiler** (g++ 7+ or clang 5+)
+- **Make** or **CMake**
+
+### Why uv?
+We use `uv` for Python dependency management because it is significantly faster than pip, handles virtual environments automatically, and provides deterministic builds via `uv.lock`.
 
 ## License
 
 This project is provided as-is for poker simulation purposes.
-
-## Next Steps
-
-1. **Implement Poker Rules**: Add real poker game logic to `api/main.cpp`
-2. **Enhance UI**: Add visualizations for cards, chips, and players
-3. **Add Database**: Store hand histories and statistics
-4. **Implement AI**: Add computer opponents with different strategies
-5. **Add Authentication**: Support multiple users and sessions
-6. **Deploy**: Containerize with Docker for easy deployment
-
-Happy simulating! 🃏
-

@@ -1,0 +1,204 @@
+{
+  "gameState": {
+    "actionConstraints": {
+      "canAct": true,
+      "currentBet": 0,
+      "legalActions": [
+        "fold",
+        "check",
+        "bet",
+        "all_in"
+      ],
+      "minBet": 20,
+      "minRaise": 0,
+      "minRaiseTotal": 0,
+      "playerBet": 0,
+      "playerChips": 500,
+      "toCall": 0
+    },
+    "communityCards": [
+      "AD",
+      "KD",
+      "QD",
+      "JD",
+      "TD"
+    ],
+    "config": {
+      "bigBlind": 20,
+      "maxPlayers": 10,
+      "minPlayers": 2,
+      "seed": 0,
+      "smallBlind": 10,
+      "startingChips": 500
+    },
+    "currentBet": 0,
+    "currentPlayerId": "alice",
+    "dealerPosition": 1,
+    "handNumber": 1,
+    "history": [
+      {
+        "playerId": "alice",
+        "playerName": "Alice",
+        "type": "addPlayer"
+      },
+      {
+        "playerId": "bob",
+        "playerName": "Bob",
+        "type": "addPlayer"
+      },
+      {
+        "cards": [
+          "2H",
+          "3D"
+        ],
+        "playerId": "alice",
+        "type": "dealHoleCards"
+      },
+      {
+        "cards": [
+          "4S",
+          "5C"
+        ],
+        "playerId": "bob",
+        "type": "dealHoleCards"
+      },
+      {
+        "action": "raise",
+        "amount": 40,
+        "playerId": "alice",
+        "type": "playerAction"
+      },
+      {
+        "action": "call",
+        "amount": 0,
+        "playerId": "bob",
+        "type": "playerAction"
+      },
+      {
+        "cards": [
+          "AD",
+          "KD",
+          "QD"
+        ],
+        "type": "dealFlop"
+      },
+      {
+        "action": "bet",
+        "amount": 100,
+        "playerId": "alice",
+        "type": "playerAction"
+      },
+      {
+        "action": "call",
+        "amount": 0,
+        "playerId": "bob",
+        "type": "playerAction"
+      },
+      {
+        "card": "JD",
+        "type": "dealTurn"
+      },
+      {
+        "action": "bet",
+        "amount": 340,
+        "playerId": "alice",
+        "type": "playerAction"
+      },
+      {
+        "action": "call",
+        "amount": 0,
+        "playerId": "bob",
+        "type": "playerAction"
+      },
+      {
+        "card": "TD",
+        "type": "dealRiver"
+      },
+      {
+        "action": "check",
+        "amount": 0,
+        "playerId": "alice",
+        "type": "playerAction"
+      },
+      {
+        "action": "check",
+        "amount": 0,
+        "playerId": "bob",
+        "type": "playerAction"
+      },
+      {
+        "players": [
+          {
+            "amountWon": 490,
+            "bestFive": [
+              "AD",
+              "KD",
+              "QD",
+              "JD",
+              "TD"
+            ],
+            "handRanking": "Royal Flush",
+            "playerId": "bob"
+          },
+          {
+            "amountWon": 490,
+            "bestFive": [
+              "AD",
+              "KD",
+              "QD",
+              "JD",
+              "TD"
+            ],
+            "handRanking": "Royal Flush",
+            "playerId": "alice"
+          }
+        ],
+        "type": "showdown"
+      }
+    ],
+    "minRaise": 0,
+    "players": [
+      {
+        "bet": 0,
+        "canAct": true,
+        "chips": 500,
+        "holeCards": [
+          "2H",
+          "3D"
+        ],
+        "id": "alice",
+        "isBigBlind": false,
+        "isDealer": false,
+        "isInHand": true,
+        "isSmallBlind": true,
+        "lastAction": "check",
+        "name": "Alice",
+        "position": 0,
+        "state": "Active",
+        "totalBet": 490
+      },
+      {
+        "bet": 0,
+        "canAct": true,
+        "chips": 500,
+        "holeCards": [
+          "4S",
+          "5C"
+        ],
+        "id": "bob",
+        "isBigBlind": true,
+        "isDealer": true,
+        "isInHand": true,
+        "isSmallBlind": false,
+        "lastAction": "check",
+        "name": "Bob",
+        "position": 1,
+        "state": "Active",
+        "totalBet": 490
+      }
+    ],
+    "pot": 980,
+    "stage": "Complete"
+  },
+  "success": true
+}

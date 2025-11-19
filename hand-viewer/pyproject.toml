@@ -1,0 +1,13 @@
+[project]
+name = "pokersim-hand-viewer"
+version = "0.1.0"
+description = "Hand history viewer for Poker AI training with model predictions"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "flask>=3.0.0",
+]
+
+[project.scripts]
+hand-viewer = "server:main"
+
