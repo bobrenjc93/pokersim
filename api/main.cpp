@@ -1,7 +1,6 @@
 #include <iostream>
 #include <string>
 #include <sstream>
-#include <random>
 #include <cstring>
 #include <unistd.h>
 #include <sys/socket.h>
@@ -9,50 +8,6 @@
 #include "json.hpp"
 
 using json = nlohmann::json;
-
-class GameSimulator {
-private:
-    std::mt19937 rng;
-    
-public:
-    GameSimulator(unsigned int seed) : rng(seed) {}
-    
-    /**
-     * Simulates the next game state based on current state.
-     * This is a simple example - extend with your poker logic.
-     */
-    json simulateNextState(const json& currentState) {
-        json nextState = currentState;
-        
-        // Example simulation logic
-        if (nextState.contains("pot")) {
-            int pot = nextState["pot"].get<int>();
-            std::uniform_int_distribution<int> betDist(10, 50);
-            int newBet = betDist(rng);
-            nextState["pot"] = pot + newBet;
-            nextState["lastAction"] = "bet";
-            nextState["lastBetAmount"] = newBet;
-        }
-        
-        // Add a random card to the board if cards array exists
-        if (nextState.contains("cards") && nextState["cards"].is_array()) {
-            std::vector<std::string> suits = {"H", "D", "C", "S"};
-            std::vector<std::string> ranks = {"2", "3", "4", "5", "6", "7", "8", "9", "T", "J", "Q", "K", "A"};
-            
-            std::uniform_int_distribution<size_t> suitDist(0, suits.size() - 1);
-            std::uniform_int_distribution<size_t> rankDist(0, ranks.size() - 1);
-            
-            std::string newCard = ranks[rankDist(rng)] + suits[suitDist(rng)];
-            nextState["cards"].push_back(newCard);
-        }
-        
-        // Add simulation metadata
-        nextState["simulated"] = true;
-        nextState["timestamp"] = std::time(nullptr);
-        
-        return nextState;
-    }
-};
 
 class HTTPServer {
 private:
@@ -76,7 +31,9 @@ private:
         
         std::string statusText = (statusCode == 200) ? "OK" : 
                                 (statusCode == 400) ? "Bad Request" : 
-                                (statusCode == 500) ? "Internal Server Error" : "Error";
+                                (statusCode == 404) ? "Not Found" :
+                                (statusCode == 500) ? "Internal Server Error" : 
+                                (statusCode == 501) ? "Not Implemented" : "Error";
         
         response << "HTTP/1.1 " << statusCode << " " << statusText << "\r\n";
         response << "Content-Type: " << contentType << "\r\n";
@@ -92,7 +49,7 @@ private:
     }
     
 public:
-    HTTPServer(int p) : port(p), serverSocket(-1) {}
+    HTTPServer(int p) : serverSocket(-1), port(p) {}
     
     bool start() {
         serverSocket = socket(AF_INET, SOCK_STREAM, 0);
@@ -175,25 +132,14 @@ public:
             
             json requestData = json::parse(body);
             
-            if (!requestData.contains("gameState") || !requestData.contains("seed")) {
-                json errorResponse = {{"error", "Missing required fields: gameState and seed"}};
-                return createResponse(400, errorResponse.dump());
-            }
-            
-            unsigned int seed = requestData["seed"].get<unsigned int>();
-            json gameState = requestData["gameState"];
-            
-            GameSimulator simulator(seed);
-            json nextState = simulator.simulateNextState(gameState);
-            
+            // Poker engine integration point - API contract TBD
             json responseData = {
-                {"success", true},
-                {"nextGameState", nextState}
+                {"success", false},
+                {"error", "HTTP API integration pending"},
+                {"note", "Use poker engine classes directly via Game.h"}
             };
             
-            std::cout << "✓ Simulated game state with seed " << seed << std::endl;
-            
-            return createResponse(200, responseData.dump());
+            return createResponse(501, responseData.dump());
             
         } catch (const json::exception& e) {
             json errorResponse = {

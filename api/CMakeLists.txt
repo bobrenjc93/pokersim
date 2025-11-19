@@ -12,13 +12,23 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(json)
 
-# Add executable
-add_executable(poker_api main.cpp)
+# Source files
+set(POKER_SOURCES
+    Card.cpp
+    Deck.cpp
+    Hand.cpp
+    Player.cpp
+    Pot.cpp
+    Game.cpp
+)
 
-# Link json library
+# Add executables
+add_executable(poker_api main.cpp ${POKER_SOURCES})
+
+# Link json library to poker_api
 target_link_libraries(poker_api PRIVATE nlohmann_json::nlohmann_json)
 
-# Set output directory
+# Set output directories
 set_target_properties(poker_api PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )

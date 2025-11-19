@@ -1,6 +1,16 @@
 # Poker Simulation C++ API Server
 
-A high-performance C++ API server that simulates poker game state transitions.
+A high-performance C++ API server with a complete Texas Hold'em poker engine.
+
+## Features
+
+- ✅ Complete poker engine with Card, Deck, Hand, Player, Pot, and Game classes
+- ✅ Proper hand evaluation (High Card to Royal Flush)
+- ✅ Side pot management for all-in scenarios
+- ✅ Automatic game flow management
+- ✅ 2-10 player support
+- ✅ Deterministic simulation with seeded RNG
+- ✅ HTTP API server for remote game simulation
 
 ## Prerequisites
 
@@ -136,46 +146,69 @@ curl -X POST http://localhost:8080/simulate \
 }
 ```
 
-## Current Simulation Logic
+## Poker Engine
 
-The current implementation includes a basic example simulation that:
-1. Adds a random bet amount to the pot (10-50 chips)
-2. Adds a random card to the cards array
-3. Includes metadata (timestamp, simulation flag)
+The project includes a complete poker engine with the following classes:
 
-**This is meant to be extended with your actual poker game logic.**
+- **Card** - Playing card with rank and suit
+- **Deck** - 52-card deck with shuffle and deal
+- **Hand** - Poker hand evaluation and comparison
+- **Player** - Player state, chips, and actions
+- **Pot** - Pot management with side pots
+- **Game** - Complete Texas Hold'em game orchestrator
 
-## Extending the Simulation
+For detailed documentation, see [POKER_ENGINE.md](POKER_ENGINE.md).
 
-To implement custom poker logic, modify the `GameSimulator::simulateNextState()` method in `main.cpp`:
+### Quick Example
 
 ```cpp
-json simulateNextState(const json& currentState) {
-    json nextState = currentState;
+#include "Game.h"
+
+int main() {
+    Game game;
+    game.addPlayer("p1", "Alice");
+    game.addPlayer("p2", "Bob");
     
-    // Add your poker simulation logic here
-    // - Deal cards
-    // - Process betting rounds
-    // - Determine winners
-    // - Update pot and player stacks
+    game.startHand();
+    game.processAction("p1", Player::Action::RAISE, 60);
+    game.processAction("p2", Player::Action::CALL);
     
-    return nextState;
+    // Game automatically progresses through stages
+    return 0;
 }
 ```
 
-After making changes, rebuild:
+## Testing
+
+Test the poker engine:
+
 ```bash
-make clean && make
+make test
 ```
+
+This runs the test suite which validates:
+- Card operations
+- Deck shuffling and dealing
+- Hand evaluation
+- Player actions
+- Complete game flow
 
 ## Project Structure
 
 ```
 api/
-├── main.cpp           # Server implementation and game logic
+├── main.cpp           # HTTP API server
+├── Card.h/cpp         # Playing card class
+├── Deck.h/cpp         # Deck management
+├── Hand.h/cpp         # Hand evaluation
+├── Player.h/cpp       # Player state and actions
+├── Pot.h/cpp          # Pot and side pot management
+├── Game.h/cpp         # Game orchestrator
+├── test_*.cpp         # Individual test files
 ├── CMakeLists.txt     # CMake build configuration
 ├── Makefile           # Simple Make build configuration
-└── README.md          # This file
+├── README.md          # This file
+└── POKER_ENGINE.md    # Detailed poker engine documentation
 ```
 
 ## Dependencies
