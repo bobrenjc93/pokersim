@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+uv.lock
+
+# C++
+*.o
+*.out
+*.exe
+*.app
+*.dSYM/
+poker_api
+build/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile.bak
+json.hpp
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment
+.env
+.env.local
+
