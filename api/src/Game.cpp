@@ -1,4 +1,5 @@
 #include "Game.h"
+#include "JsonSerializer.h"
 
 Game::Game(const GameConfig& cfg) 
     : stage(Stage::WAITING), config(cfg), dealerPosition(0), 
@@ -11,6 +12,10 @@ Game::Game(const GameConfig& cfg)
     deck = Deck(currentSeed);
 }
 
+void Game::recordEvent(const json& event) {
+    history.push_back(event);
+}
+
 bool Game::addPlayer(std::string_view id, std::string_view name) {
     if (players.size() >= static_cast<size_t>(config.maxPlayers)) {
         return false;
@@ -20,8 +25,8 @@ bool Game::addPlayer(std::string_view id, std::string_view name) {
         return false;
     }
     
-    // Check for duplicate ID using O(1) lookup
-    if (playerLookup.count(std::string(id))) {
+    // Check for duplicate ID using O(1) lookup (C++20 heterogeneous lookup)
+    if (playerLookup.contains(id)) {
         return false;
     }
     
@@ -30,6 +35,13 @@ bool Game::addPlayer(std::string_view id, std::string_view name) {
     Player* playerPtr = player.get();
     playerLookup[player->getId()] = playerPtr;  // Store with actual string key
     players.push_back(std::move(player));
+    
+    // Record the event
+    recordEvent({
+        {"type", "addPlayer"},
+        {"playerId", std::string(id)},
+        {"playerName", std::string(name)}
+    });
     
     return true;
 }
@@ -60,8 +72,14 @@ bool Game::removePlayer(std::string_view id) {
 }
 
 Player* Game::getPlayer(std::string_view id) {
-    // O(1) lookup (requires string copy in C++17; C++20 would support heterogeneous lookup)
-    auto it = playerLookup.find(std::string(id));
+    // O(1) lookup with C++20 heterogeneous lookup (no string copy needed!)
+    auto it = playerLookup.find(id);
+    return (it != playerLookup.end()) ? it->second : nullptr;
+}
+
+const Player* Game::getPlayer(std::string_view id) const {
+    // O(1) lookup with C++20 heterogeneous lookup (no string copy needed!)
+    auto it = playerLookup.find(id);
     return (it != playerLookup.end()) ? it->second : nullptr;
 }
 
@@ -69,6 +87,15 @@ std::vector<Player*> Game::getPlayers() {
     std::vector<Player*> result;
     result.reserve(players.size());  // Avoid reallocation
     for (auto& player : players) {
+        result.push_back(player.get());
+    }
+    return result;
+}
+
+std::vector<const Player*> Game::getPlayers() const {
+    std::vector<const Player*> result;
+    result.reserve(players.size());  // Avoid reallocation
+    for (const auto& player : players) {
         result.push_back(player.get());
     }
     return result;
@@ -124,6 +151,17 @@ bool Game::startHand() {
     for (auto& player : players) {
         std::vector<Card> holeCards = deck.dealCards(2);
         player->dealHoleCards(holeCards);
+        
+        // Record the event
+        json cardsJson = json::array();
+        for (const auto& card : holeCards) {
+            cardsJson.push_back(card.toString());
+        }
+        recordEvent({
+            {"type", "dealHoleCards"},
+            {"playerId", player->getId()},
+            {"cards", cardsJson}
+        });
     }
     
     stage = Stage::PREFLOP;
@@ -152,9 +190,7 @@ bool Game::processAction(std::string_view playerId, Player::Action action, int a
             break;
             
         case Player::Action::CHECK:
-            if (player->getBet() == pot.getCurrentBet()) {
-                success = player->check();
-            }
+            success = player->check(pot.getCurrentBet());
             break;
             
         case Player::Action::CALL: {
@@ -200,6 +236,14 @@ bool Game::processAction(std::string_view playerId, Player::Action action, int a
     }
     
     if (success) {
+        // Record the event
+        recordEvent({
+            {"type", "playerAction"},
+            {"playerId", std::string(playerId)},
+            {"action", JsonSerializer::actionToString(action)},
+            {"amount", amount}
+        });
+        
         advanceToNextPlayer();
         checkBettingRoundComplete();
     }
@@ -208,6 +252,14 @@ bool Game::processAction(std::string_view playerId, Player::Action action, int a
 }
 
 Player* Game::getCurrentPlayer() {
+    if (currentPlayerIndex >= 0 && 
+        currentPlayerIndex < static_cast<int>(players.size())) {
+        return players[currentPlayerIndex].get();
+    }
+    return nullptr;
+}
+
+const Player* Game::getCurrentPlayer() const {
     if (currentPlayerIndex >= 0 && 
         currentPlayerIndex < static_cast<int>(players.size())) {
         return players[currentPlayerIndex].get();
@@ -242,45 +294,115 @@ void Game::advanceToNextPlayer() {
     } while (currentPlayerIndex != startIndex);
 }
 
-void Game::checkBettingRoundComplete() {
-    // Check if all players have acted and bets are equal
-    bool allActed = true;
-    int activePlayers = 0;
+bool Game::isBettingRoundComplete() const {
+    // Two-pass algorithm for clarity and performance:
+    // Pass 1: Quick count of active players (early exit if ≤1)
+    // Pass 2: Check if betting round is complete
+    // 
+    // A round is complete when:
+    // 1. All active players have acted (lastAction != NONE), AND
+    // 2. All active players have matching bets (or are all-in)
+    // 
+    // Special case: The player who raised last (lastRaiserIndex) has completed
+    // the round when action returns to them and they've had a chance to act again.
     
-    for (size_t i = 0; i < players.size(); i++) {
-        Player* player = players[i].get();
-        
+    // Pass 1: Count active players (fast path for fold-outs)
+    int activePlayers = 0;
+    for (const auto& player : players) {
         if (player->isInHand()) {
             activePlayers++;
-            
-            // Check if player needs to act
-            if (player->canAct()) {
-                if (player->getBet() < pot.getCurrentBet()) {
-                    allActed = false;
-                    break;
-                }
-                
-                // Check if they've had a chance to act
-                if (static_cast<int>(i) == lastRaiserIndex) {
-                    continue; // Raiser has acted
-                }
-                
-                if (player->getLastAction() == Player::Action::NONE) {
-                    allActed = false;
-                    break;
-                }
+            if (activePlayers > 1) {
+                break; // Early exit - we know there are at least 2 players
             }
         }
     }
     
-    // If only one player left, hand is over
+    // If only one player left, hand is over (everyone else folded)
+    if (activePlayers <= 1) {
+        return true; // Betting is "complete" since hand should end
+    }
+    
+    // Pass 2: Check if all players have acted and bets are equal
+    for (size_t i = 0; i < players.size(); i++) {
+        const Player* player = players[i].get();
+        
+        if (player->isInHand() && player->canAct()) {
+            // Condition 1: Check if bets are equal
+            if (player->getBet() < pot.getCurrentBet()) {
+                return false; // Round not complete
+            }
+            
+            // Condition 2: Check if player has acted
+            // Special handling for the last raiser: they've "completed" the round
+            // when action returns to them after their raise. Skip the NONE check for them.
+            if (static_cast<int>(i) == lastRaiserIndex &&
+                player->getLastAction() != Player::Action::NONE) {
+                continue; // Last raiser has acted, they're done
+            }
+            
+            // For everyone else, check if they've acted at all this round
+            if (player->getLastAction() == Player::Action::NONE) {
+                return false; // Round not complete
+            }
+        }
+    }
+    
+    return true; // All conditions met - betting round is complete
+}
+
+void Game::checkBettingRoundComplete() {
+    // Check if betting is done (using the shared logic)
+    if (!isBettingRoundComplete()) {
+        return; // Not done yet
+    }
+    
+    // Count active players to handle fold-outs
+    int activePlayers = 0;
+    for (const auto& player : players) {
+        if (player->isInHand()) {
+            activePlayers++;
+            if (activePlayers > 1) {
+                break;
+            }
+        }
+    }
+    
+    // If only one player left, hand is over (everyone else folded)
     if (activePlayers <= 1) {
         endHand();
         return;
     }
     
-    if (allActed) {
-        advanceStage();
+    // Otherwise advance to next stage
+    advanceStage();
+}
+
+bool Game::performStageTransition() {
+    // Performs the actual stage transition and card dealing
+    // Returns true if successfully transitioned, false if at terminal state
+    switch (stage) {
+        case Stage::PREFLOP:
+            dealFlop();
+            stage = Stage::FLOP;
+            return true;
+            
+        case Stage::FLOP:
+            dealTurn();
+            stage = Stage::TURN;
+            return true;
+            
+        case Stage::TURN:
+            dealRiver();
+            stage = Stage::RIVER;
+            return true;
+            
+        case Stage::RIVER:
+            stage = Stage::SHOWDOWN;
+            endHand();
+            return true;
+            
+        default:
+            return false;
     }
 }
 
@@ -290,32 +412,17 @@ void Game::advanceStage() {
     pot.collectBets(playerPtrs);
     pot.startNewRound();
     
-    switch (stage) {
-        case Stage::PREFLOP:
-            dealFlop();
-            stage = Stage::FLOP;
-            break;
-            
-        case Stage::FLOP:
-            dealTurn();
-            stage = Stage::TURN;
-            break;
-            
-        case Stage::TURN:
-            dealRiver();
-            stage = Stage::RIVER;
-            break;
-            
-        case Stage::RIVER:
-            stage = Stage::SHOWDOWN;
-            endHand();
-            return;
-            
-        default:
-            return;
+    // Perform stage transition
+    if (!performStageTransition()) {
+        return;
     }
     
-    // Reset to first player after dealer
+    // If we just ended the hand (reached SHOWDOWN), no need to reset player state
+    if (stage == Stage::SHOWDOWN) {
+        return;
+    }
+    
+    // Reset to first player after dealer for new betting round
     currentPlayerIndex = (dealerPosition + 1) % players.size();
     while (!players[currentPlayerIndex]->canAct() && 
            currentPlayerIndex != dealerPosition) {
@@ -323,23 +430,53 @@ void Game::advanceStage() {
     }
     
     lastRaiserIndex = -1;
+    
+    // Reset lastAction for all active players for the new betting round
+    for (auto& player : players) {
+        if (player->isInHand() && player->canAct()) {
+            player->resetLastAction();
+        }
+    }
 }
 
 void Game::dealFlop() {
     deck.burn();
+    json cardsJson = json::array();
     for (int i = 0; i < 3; i++) {
-        communityCards.push_back(deck.dealCard());
+        Card card = deck.dealCard();
+        communityCards.push_back(card);
+        cardsJson.push_back(card.toString());
     }
+    
+    // Record the event
+    recordEvent({
+        {"type", "dealFlop"},
+        {"cards", cardsJson}
+    });
 }
 
 void Game::dealTurn() {
     deck.burn();
-    communityCards.push_back(deck.dealCard());
+    Card card = deck.dealCard();
+    communityCards.push_back(card);
+    
+    // Record the event
+    recordEvent({
+        {"type", "dealTurn"},
+        {"card", card.toString()}
+    });
 }
 
 void Game::dealRiver() {
     deck.burn();
-    communityCards.push_back(deck.dealCard());
+    Card card = deck.dealCard();
+    communityCards.push_back(card);
+    
+    // Record the event
+    recordEvent({
+        {"type", "dealRiver"},
+        {"card", card.toString()}
+    });
 }
 
 void Game::endHand() {
@@ -356,11 +493,46 @@ void Game::endHand() {
             activePlayers[0]->winChips(totalPot);
         }
         pot.reset();
+        stage = Stage::COMPLETE;
     } else {
         // Normal showdown - distribute pots to winners based on hand evaluation
         pot.distributePots(playerPtrs, communityCards);
+        
+        // Stage handling: If we reached here from advanceGame() after the River,
+        // stage is already SHOWDOWN (set by advanceGame). Keep it as SHOWDOWN.
+        // If we reached here from processAction() when a player folds mid-hand,
+        // stage might be PREFLOP/FLOP/TURN/RIVER. Set it to COMPLETE in that case.
+        if (stage != Stage::SHOWDOWN) {
+            stage = Stage::COMPLETE;
+        }
+        // If stage == SHOWDOWN, leave it as SHOWDOWN to indicate hand went to showdown
+    }
+}
+
+bool Game::advanceGame() {
+    // Can't advance if waiting for players or already complete
+    if (stage == Stage::WAITING || stage == Stage::COMPLETE) {
+        return false;
     }
     
-    stage = Stage::COMPLETE;
+    // If at showdown, end the hand and move to complete
+    if (stage == Stage::SHOWDOWN) {
+        stage = Stage::COMPLETE;
+        return true;
+    }
+    
+    // Check if betting round is complete before allowing advancement
+    // This prevents skipping player actions during PREFLOP, FLOP, TURN, or RIVER
+    if (!isBettingRoundComplete()) {
+        return false; // Cannot advance - betting round not finished
+    }
+    
+    // Collect any bets from current round
+    auto playerPtrs = getPlayers();
+    pot.collectBets(playerPtrs);
+    pot.startNewRound();
+    
+    // Perform stage transition using shared logic
+    return performStageTransition();
 }
 

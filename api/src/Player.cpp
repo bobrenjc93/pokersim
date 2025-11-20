@@ -47,9 +47,10 @@ void Player::fold() {
     lastAction = Action::FOLD;
 }
 
-bool Player::check() {
-    if (bet != 0) {
-        return false; // Can't check if there's a bet to call
+bool Player::check(int currentBet) {
+    // Checking is only allowed when player's bet equals the current bet
+    if (bet != currentBet) {
+        return false;
     }
     lastAction = Action::CHECK;
     return true;
@@ -126,6 +127,10 @@ void Player::winChips(int amount) {
 
 void Player::resetBet() {
     bet = 0;
+}
+
+void Player::resetLastAction() {
+    lastAction = Action::NONE;
 }
 
 void Player::resetForNewHand() {

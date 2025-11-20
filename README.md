@@ -11,21 +11,21 @@ This monorepo contains:
 ## Architecture
 
 ```
-┌─────────────────┐
-│   Web Browser   │
-└────────┬────────┘
-         │ HTTP
-         ▼
-┌─────────────────┐
-│  Python Flask   │  Port 5000
-│  Web Server     │
-└────────┬────────┘
-         │ HTTP
-         ▼
-┌─────────────────┐
-│   C++ API       │  Port 8080
-│   Server        │
-└─────────────────┘
+┌─────────────────────┐
+│   Web Browser       │
+└──────────┬──────────┘
+           │ HTTP
+           ▼
+┌─────────────────────┐
+│  Python Flask       │  Port 5000
+│  Web Server         │
+└──────────┬──────────┘
+           │ HTTP/JSON
+           ▼
+┌─────────────────────┐
+│  C++ Poker Engine   │  Port 8080
+│  (Stateless API)    │
+└─────────────────────┘
 ```
 
 The Python website serves the user interface and proxies requests to the C++ backend, which handles the computational work of simulating poker game states.
@@ -86,63 +86,68 @@ pokersim/
 ## Features
 
 ### Current Features
-- ✅ RESTful API for game state simulation
+- ✅ Complete Texas Hold'em poker engine in C++
+- ✅ Full game management (2-10 players)
+- ✅ Proper hand evaluation (High Card to Royal Flush)
+- ✅ Side pot management for all-in scenarios
+- ✅ Automatic game flow management (preflop, flop, turn, river, showdown)
+- ✅ RESTful HTTP API with comprehensive game commands
 - ✅ Deterministic simulation with seeded RNG
 - ✅ Modern, responsive web interface
 - ✅ JSON-based communication
 - ✅ CORS support for development
 - ✅ Error handling and validation
+- ✅ Comprehensive test suites
 
 ### Ready to Extend
-- 🎯 Implement full poker game rules
-- 🎯 Add multi-player support
-- 🎯 Track hand histories
-- 🎯 Calculate win probabilities
-- 🎯 Add AI opponents
-- 🎯 Visualization of game progression
+- 🎯 Track hand histories and statistics
+- 🎯 Calculate win probabilities and equity
+- 🎯 Add AI opponents with different strategies
+- 🎯 Enhanced visualization of game progression
+- 🎯 Tournament mode with increasing blinds
+- 🎯 Multi-table support
 
 ## Example Usage
 
 ### Via Web Interface
 
 1. Open `http://localhost:5000`
-2. Enter a game state:
-   ```json
-   {"players": 2, "pot": 100, "cards": ["AS", "KD"]}
-   ```
-3. Enter a seed: `42`
-4. Click "Simulate Next State"
+2. Use the poker game interface to create games and play hands
+3. The website communicates with the C++ poker engine backend
 
 ### Via API (curl)
 
+The API supports complete poker game management with a **stateless architecture**. Here's a quick example:
+
 ```bash
+# Add players and start hand (hand starts automatically!)
 curl -X POST http://localhost:8080/simulate \
   -H "Content-Type: application/json" \
   -d '{
-    "gameState": {
-      "players": 2,
-      "pot": 100,
-      "cards": ["AS", "KD"]
-    },
-    "seed": 42
+    "config": {"seed": 42, "smallBlind": 10, "bigBlind": 20, "startingChips": 1000},
+    "history": [
+      {"type": "addPlayer", "playerId": "alice", "playerName": "Alice"},
+      {"type": "addPlayer", "playerId": "bob", "playerName": "Bob"}
+    ]
   }'
+# Result: Stage = "Preflop", hole cards dealt, blinds posted
+
+# Complete preflop betting to automatically advance to Flop
+curl -X POST http://localhost:8080/simulate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "config": {"seed": 42, "smallBlind": 10, "bigBlind": 20, "startingChips": 1000},
+    "history": [
+      {"type": "addPlayer", "playerId": "alice", "playerName": "Alice"},
+      {"type": "addPlayer", "playerId": "bob", "playerName": "Bob"},
+      {"type": "playerAction", "playerId": "alice", "action": "call", "amount": 0},
+      {"type": "playerAction", "playerId": "bob", "action": "check", "amount": 0}
+    ]
+  }'
+# Result: Stage = "Flop", 3 community cards dealt (automatic advancement!)
 ```
 
-Response:
-```json
-{
-  "success": true,
-  "nextGameState": {
-    "players": 2,
-    "pot": 130,
-    "cards": ["AS", "KD", "QH"],
-    "lastAction": "bet",
-    "lastBetAmount": 30,
-    "simulated": true,
-    "timestamp": 1700000000
-  }
-}
-```
+**For complete API documentation, see [`api/docs/README.md`](api/docs/README.md)**
 
 ## Development
 
@@ -191,31 +196,47 @@ Pass port as command line argument:
 ./poker_api 9000
 ```
 
-## Extending the Poker Logic
+## Poker Engine Details
 
-The current implementation includes basic example logic. To implement real poker rules:
+The poker engine is fully implemented with the following components:
 
-1. Edit `api/main.cpp` → `GameSimulator::simulateNextState()`
-2. Add your poker game logic:
-   - Hand evaluation
-   - Betting rounds
-   - Card dealing
-   - Winner determination
-3. Rebuild the API server
-4. Update the website UI as needed
+- **Card**: Playing card with rank (2-A) and suit (♣♦♥♠)
+- **Deck**: 52-card deck with shuffle, deal, and burn operations
+- **Hand**: Complete hand evaluation (High Card through Royal Flush)
+- **Player**: Player state, chips, hole cards, and actions
+- **Pot**: Main pot and side pot management for all-in scenarios
+- **Game**: Complete game orchestrator managing game flow
+
+For detailed documentation:
+- **Complete API & Engine Reference**: See [`api/docs/README.md`](api/docs/README.md)
 
 ## Testing
 
-### Test API Server
+### Test Poker Engine
+Test the core poker engine classes:
 ```bash
 cd api
-# Build and run
-make && ./poker_api &
+make test
+```
 
-# Test endpoint
-curl -X POST http://localhost:8080/simulate \
-  -H "Content-Type: application/json" \
-  -d '{"gameState": {"pot": 100}, "seed": 42}'
+This runs comprehensive unit tests for Card, Deck, Hand, Player, and Game classes.
+
+### Test API Integration
+Test the complete HTTP API with integrated poker engine:
+
+**Option 1: Bash script**
+```bash
+cd api
+./build/poker_api &  # Start server in background
+./test_api.sh        # Run comprehensive API tests
+```
+
+**Option 2: Python script**
+```bash
+cd api
+./build/poker_api &  # Start server in background
+pip3 install requests
+./test_api.py        # Run comprehensive API tests
 ```
 
 ### Test Website
@@ -261,12 +282,15 @@ This project is provided as-is for poker simulation purposes.
 
 ## Next Steps
 
-1. **Implement Poker Rules**: Add real poker game logic to `api/main.cpp`
-2. **Enhance UI**: Add visualizations for cards, chips, and players
-3. **Add Database**: Store hand histories and statistics
-4. **Implement AI**: Add computer opponents with different strategies
-5. **Add Authentication**: Support multiple users and sessions
-6. **Deploy**: Containerize with Docker for easy deployment
+The poker engine is fully integrated! Here are some ideas for further enhancement:
 
-Happy simulating! 🃏
+1. **Enhance Website UI**: Add rich visualizations for cards, chips, and players
+2. **Add Database**: Store hand histories and statistics  
+3. **Implement AI**: Add computer opponents with different strategies
+4. **Monte Carlo Simulations**: Calculate equity and win probabilities
+5. **Tournament Mode**: Add support for increasing blinds and multi-table
+6. **Add Authentication**: Support multiple users and sessions
+7. **Deploy**: Containerize with Docker for easy deployment
+
+The foundation is solid - build something amazing! 🃏🎰
 

@@ -49,9 +49,9 @@ void testBettingAndActions() {
     assert(player.getChips() == 850);
     assert(player.getBet() == 150);
     
-    // Test check action
+    // Test check action (check is valid when player's bet matches current bet)
     Player player2("p2", "Bob", 1000);
-    (void)player2.check();
+    (void)player2.check(0);  // Current bet is 0, player's bet is 0
     assert(player2.getActionName() == "Check");
     assert(player2.getBet() == 0);
     

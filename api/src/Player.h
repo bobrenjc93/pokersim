@@ -94,9 +94,11 @@ public:
     void fold();
     
     /**
-     * Performs a check action
+     * Performs a check action (when player's bet equals current bet)
+     * @param currentBet The current bet amount to validate against
+     * @return true if check is valid and performed, false otherwise
      */
-    [[nodiscard]] bool check();
+    [[nodiscard]] bool check(int currentBet);
     
     /**
      * Calls the current bet
@@ -127,6 +129,11 @@ public:
      * Resets bet at start of new betting round
      */
     void resetBet();
+    
+    /**
+     * Resets last action at start of new betting round
+     */
+    void resetLastAction();
     
     /**
      * Resets player for new hand

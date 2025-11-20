@@ -12,6 +12,27 @@
 #include <string_view>
 #include <stdexcept>
 #include <unordered_map>
+#include "json.hpp"
+
+using json = nlohmann::json;
+
+// C++20 transparent hash for string_view compatibility
+struct StringHash {
+    using is_transparent = void;
+    using hash_type = std::hash<std::string_view>;
+    
+    size_t operator()(std::string_view sv) const { return hash_type{}(sv); }
+    size_t operator()(const std::string& s) const { return hash_type{}(s); }
+    size_t operator()(const char* s) const { return hash_type{}(s); }
+};
+
+struct StringEqual {
+    using is_transparent = void;
+    
+    bool operator()(std::string_view lhs, std::string_view rhs) const {
+        return lhs == rhs;
+    }
+};
 
 /**
  * Main game orchestrator for Texas Hold'em poker.
@@ -44,7 +65,8 @@ public:
 
 private:
     std::vector<std::unique_ptr<Player>> players;
-    std::unordered_map<std::string, Player*> playerLookup;  // Fast O(1) player lookup by ID
+    // Fast O(1) player lookup by ID with C++20 heterogeneous lookup (no string copies)
+    std::unordered_map<std::string, Player*, StringHash, StringEqual> playerLookup;
     Deck deck;
     Pot pot;
     std::vector<Card> communityCards;
@@ -55,6 +77,7 @@ private:
     int lastRaiserIndex;
     unsigned int currentSeed;
     int handNumber;
+    std::vector<json> history;
 
 public:
     Game(const GameConfig& cfg = GameConfig());
@@ -70,23 +93,29 @@ public:
     
     /**
      * Adds a player to the game
+     * @return true if player was added, false if already exists or table is full
      */
     [[nodiscard]] bool addPlayer(std::string_view id, std::string_view name);
     
     /**
      * Removes a player from the game
+     * @return true if player was removed, false if player not found
      */
     [[nodiscard]] bool removePlayer(std::string_view id);
     
     /**
-     * Gets player by ID
+     * Gets player by ID (O(1) lookup)
+     * @param id Player ID to look up
+     * @return Non-owning pointer to player, or nullptr if not found
      */
     [[nodiscard]] Player* getPlayer(std::string_view id);
+    [[nodiscard]] const Player* getPlayer(std::string_view id) const;
     
     /**
      * Gets all players
      */
     [[nodiscard]] std::vector<Player*> getPlayers();
+    [[nodiscard]] std::vector<const Player*> getPlayers() const;
     
     /**
      * Gets active players (not folded or out)
@@ -105,13 +134,38 @@ public:
     
     /**
      * Gets current player whose turn it is
+     * @return Non-owning pointer to current player, or nullptr if invalid index
      */
     [[nodiscard]] Player* getCurrentPlayer();
+    [[nodiscard]] const Player* getCurrentPlayer() const;
     
     /**
      * Gets stage name as string
      */
     std::string getStageName() const;
+    
+    /**
+     * Advances the game automatically to the next stage
+     * Deals community cards and updates game state deterministically
+     * Returns true if game was advanced, false if game is complete or betting round not finished
+     */
+    [[nodiscard]] bool advanceGame();
+    
+    /**
+     * Checks if the current betting round is complete
+     * Returns true if all active players have acted and bets are matched
+     */
+    [[nodiscard]] bool isBettingRoundComplete() const;
+    
+    /**
+     * Gets the full event history
+     */
+    [[nodiscard]] const std::vector<json>& getHistory() const noexcept { return history; }
+    
+    /**
+     * Adds an event to the history (for event sourcing)
+     */
+    void recordEvent(const json& event);
 
 private:
     /**
@@ -128,6 +182,12 @@ private:
      * Advances to the next stage of the hand
      */
     void advanceStage();
+    
+    /**
+     * Helper: Performs the stage transition and card dealing
+     * Returns true if successfully advanced, false if at terminal state
+     */
+    bool performStageTransition();
     
     /**
      * Deals the flop (3 community cards)
