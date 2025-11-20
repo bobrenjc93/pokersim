@@ -1,0 +1,140 @@
+{
+  "gameState": {
+    "communityCards": [
+      "9H",
+      "TS",
+      "QD",
+      "3H",
+      "AH"
+    ],
+    "config": {
+      "bigBlind": 20,
+      "maxPlayers": 10,
+      "minPlayers": 2,
+      "seed": 3001,
+      "smallBlind": 10,
+      "startingChips": 500
+    },
+    "currentBet": 0,
+    "currentPlayerId": "villain",
+    "dealerPosition": 1,
+    "handNumber": 1,
+    "history": [
+      {
+        "playerId": "hero",
+        "playerName": "Hero",
+        "type": "addPlayer"
+      },
+      {
+        "playerId": "villain",
+        "playerName": "Villain",
+        "type": "addPlayer"
+      },
+      {
+        "cards": [
+          "AD",
+          "8S"
+        ],
+        "playerId": "hero",
+        "type": "dealHoleCards"
+      },
+      {
+        "cards": [
+          "8H",
+          "5H"
+        ],
+        "playerId": "villain",
+        "type": "dealHoleCards"
+      },
+      {
+        "action": "call",
+        "amount": 0,
+        "playerId": "hero",
+        "type": "playerAction"
+      },
+      {
+        "action": "check",
+        "amount": 0,
+        "playerId": "villain",
+        "type": "playerAction"
+      },
+      {
+        "cards": [
+          "9H",
+          "TS",
+          "QD"
+        ],
+        "type": "dealFlop"
+      },
+      {
+        "action": "check",
+        "amount": 0,
+        "playerId": "hero",
+        "type": "playerAction"
+      },
+      {
+        "action": "bet",
+        "amount": 480,
+        "playerId": "villain",
+        "type": "playerAction"
+      },
+      {
+        "action": "call",
+        "amount": 0,
+        "playerId": "hero",
+        "type": "playerAction"
+      },
+      {
+        "card": "3H",
+        "type": "dealTurn"
+      },
+      {
+        "card": "AH",
+        "type": "dealRiver"
+      }
+    ],
+    "players": [
+      {
+        "bet": 0,
+        "canAct": false,
+        "chips": 0,
+        "holeCards": [
+          "AD",
+          "8S"
+        ],
+        "id": "hero",
+        "isBigBlind": false,
+        "isDealer": false,
+        "isInHand": true,
+        "isSmallBlind": true,
+        "lastAction": "call",
+        "name": "Hero",
+        "position": 0,
+        "state": "Active",
+        "totalBet": 500
+      },
+      {
+        "bet": 0,
+        "canAct": false,
+        "chips": 1000,
+        "holeCards": [
+          "8H",
+          "5H"
+        ],
+        "id": "villain",
+        "isBigBlind": true,
+        "isDealer": true,
+        "isInHand": true,
+        "isSmallBlind": false,
+        "lastAction": "all_in",
+        "name": "Villain",
+        "position": 1,
+        "state": "All-in",
+        "totalBet": 500
+      }
+    ],
+    "pot": 1000,
+    "stage": "Showdown"
+  },
+  "success": true
+}

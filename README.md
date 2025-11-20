@@ -212,7 +212,20 @@ For detailed documentation:
 
 ## Testing
 
-### Test Poker Engine
+The project includes comprehensive test suites at multiple levels.
+
+### Run All Tests (Recommended)
+
+```bash
+./run_tests.sh
+```
+
+This runs:
+1. C++ unit tests (Card, Deck, Hand, Player, Game)
+2. Python snapshot tests (API integration with complex scenarios)
+
+### Test Poker Engine (C++ Unit Tests)
+
 Test the core poker engine classes:
 ```bash
 cd api
@@ -221,25 +234,31 @@ make test
 
 This runs comprehensive unit tests for Card, Deck, Hand, Player, and Game classes.
 
-### Test API Integration
-Test the complete HTTP API with integrated poker engine:
+### Test API Integration (Snapshot Tests)
 
-**Option 1: Bash script**
+The API test suite uses **snapshot testing** to validate complex poker scenarios:
+
 ```bash
-cd api
-./build/poker_api &  # Start server in background
-./test_api.sh        # Run comprehensive API tests
+cd api/tests
+python3 test_stateless_api.py
 ```
 
-**Option 2: Python script**
+Test cases include:
+- ✅ Side pots with multiple all-ins
+- ✅ All-in during preflop
+- ✅ All-in on the flop
+- ✅ All-in on the turn
+- ✅ All-in on the river
+
+**Update snapshots after intentional changes:**
 ```bash
-cd api
-./build/poker_api &  # Start server in background
-pip3 install requests
-./test_api.py        # Run comprehensive API tests
+python3 test_stateless_api.py --update-snapshots
 ```
+
+**For complete documentation on snapshot testing, see [`api/tests/README.md`](api/tests/README.md)**
 
 ### Test Website
+
 ```bash
 cd website
 python app.py &

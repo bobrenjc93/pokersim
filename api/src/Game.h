@@ -93,9 +93,12 @@ public:
     
     /**
      * Adds a player to the game
+     * @param id Player ID
+     * @param name Player name
+     * @param chips Starting chip count (0 means use config.startingChips)
      * @return true if player was added, false if already exists or table is full
      */
-    [[nodiscard]] bool addPlayer(std::string_view id, std::string_view name);
+    [[nodiscard]] bool addPlayer(std::string_view id, std::string_view name, int chips = 0);
     
     /**
      * Removes a player from the game

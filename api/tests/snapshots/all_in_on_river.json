@@ -1,0 +1,160 @@
+{
+  "gameState": {
+    "communityCards": [
+      "4H",
+      "QD",
+      "9D",
+      "KD",
+      "4C"
+    ],
+    "config": {
+      "bigBlind": 50,
+      "maxPlayers": 10,
+      "minPlayers": 2,
+      "seed": 5001,
+      "smallBlind": 25,
+      "startingChips": 2000
+    },
+    "currentBet": 0,
+    "currentPlayerId": "pro",
+    "dealerPosition": 1,
+    "handNumber": 1,
+    "history": [
+      {
+        "chips": 1500,
+        "playerId": "pro",
+        "playerName": "ProPlayer",
+        "type": "addPlayer"
+      },
+      {
+        "chips": 2500,
+        "playerId": "fish",
+        "playerName": "FishPlayer",
+        "type": "addPlayer"
+      },
+      {
+        "cards": [
+          "3C",
+          "8H"
+        ],
+        "playerId": "pro",
+        "type": "dealHoleCards"
+      },
+      {
+        "cards": [
+          "4S",
+          "6S"
+        ],
+        "playerId": "fish",
+        "type": "dealHoleCards"
+      },
+      {
+        "action": "raise",
+        "amount": 150,
+        "playerId": "pro",
+        "type": "playerAction"
+      },
+      {
+        "action": "call",
+        "amount": 0,
+        "playerId": "fish",
+        "type": "playerAction"
+      },
+      {
+        "cards": [
+          "4H",
+          "QD",
+          "9D"
+        ],
+        "type": "dealFlop"
+      },
+      {
+        "action": "check",
+        "amount": 0,
+        "playerId": "pro",
+        "type": "playerAction"
+      },
+      {
+        "action": "check",
+        "amount": 0,
+        "playerId": "fish",
+        "type": "playerAction"
+      },
+      {
+        "card": "KD",
+        "type": "dealTurn"
+      },
+      {
+        "action": "bet",
+        "amount": 200,
+        "playerId": "pro",
+        "type": "playerAction"
+      },
+      {
+        "action": "call",
+        "amount": 0,
+        "playerId": "fish",
+        "type": "playerAction"
+      },
+      {
+        "card": "4C",
+        "type": "dealRiver"
+      },
+      {
+        "action": "bet",
+        "amount": 1100,
+        "playerId": "pro",
+        "type": "playerAction"
+      },
+      {
+        "action": "call",
+        "amount": 0,
+        "playerId": "fish",
+        "type": "playerAction"
+      }
+    ],
+    "players": [
+      {
+        "bet": 0,
+        "canAct": true,
+        "chips": 25,
+        "holeCards": [
+          "3C",
+          "8H"
+        ],
+        "id": "pro",
+        "isBigBlind": false,
+        "isDealer": false,
+        "isInHand": true,
+        "isSmallBlind": true,
+        "lastAction": "bet",
+        "name": "ProPlayer",
+        "position": 0,
+        "state": "Active",
+        "totalBet": 1475
+      },
+      {
+        "bet": 0,
+        "canAct": true,
+        "chips": 3975,
+        "holeCards": [
+          "4S",
+          "6S"
+        ],
+        "id": "fish",
+        "isBigBlind": true,
+        "isDealer": true,
+        "isInHand": true,
+        "isSmallBlind": false,
+        "lastAction": "call",
+        "name": "FishPlayer",
+        "position": 1,
+        "state": "Active",
+        "totalBet": 1475
+      }
+    ],
+    "pot": 2950,
+    "stage": "Complete"
+  },
+  "success": true
+}

@@ -1,0 +1,128 @@
+{
+  "gameState": {
+    "communityCards": [
+      "7D",
+      "5H",
+      "KC",
+      "KD",
+      "TC"
+    ],
+    "config": {
+      "bigBlind": 10,
+      "maxPlayers": 10,
+      "minPlayers": 2,
+      "seed": 2001,
+      "smallBlind": 5,
+      "startingChips": 200
+    },
+    "currentBet": 0,
+    "currentPlayerId": "p2",
+    "dealerPosition": 1,
+    "handNumber": 1,
+    "history": [
+      {
+        "playerId": "p1",
+        "playerName": "Player1",
+        "type": "addPlayer"
+      },
+      {
+        "playerId": "p2",
+        "playerName": "Player2",
+        "type": "addPlayer"
+      },
+      {
+        "cards": [
+          "6D",
+          "8D"
+        ],
+        "playerId": "p1",
+        "type": "dealHoleCards"
+      },
+      {
+        "cards": [
+          "QC",
+          "AC"
+        ],
+        "playerId": "p2",
+        "type": "dealHoleCards"
+      },
+      {
+        "action": "raise",
+        "amount": 45,
+        "playerId": "p1",
+        "type": "playerAction"
+      },
+      {
+        "action": "raise",
+        "amount": 190,
+        "playerId": "p2",
+        "type": "playerAction"
+      },
+      {
+        "action": "call",
+        "amount": 0,
+        "playerId": "p1",
+        "type": "playerAction"
+      },
+      {
+        "cards": [
+          "7D",
+          "5H",
+          "KC"
+        ],
+        "type": "dealFlop"
+      },
+      {
+        "card": "KD",
+        "type": "dealTurn"
+      },
+      {
+        "card": "TC",
+        "type": "dealRiver"
+      }
+    ],
+    "players": [
+      {
+        "bet": 0,
+        "canAct": false,
+        "chips": 0,
+        "holeCards": [
+          "6D",
+          "8D"
+        ],
+        "id": "p1",
+        "isBigBlind": false,
+        "isDealer": false,
+        "isInHand": true,
+        "isSmallBlind": true,
+        "lastAction": "call",
+        "name": "Player1",
+        "position": 0,
+        "state": "Active",
+        "totalBet": 200
+      },
+      {
+        "bet": 0,
+        "canAct": false,
+        "chips": 0,
+        "holeCards": [
+          "QC",
+          "AC"
+        ],
+        "id": "p2",
+        "isBigBlind": true,
+        "isDealer": true,
+        "isInHand": true,
+        "isSmallBlind": false,
+        "lastAction": "all_in",
+        "name": "Player2",
+        "position": 1,
+        "state": "All-in",
+        "totalBet": 200
+      }
+    ],
+    "pot": 400,
+    "stage": "River"
+  },
+  "success": true
+}

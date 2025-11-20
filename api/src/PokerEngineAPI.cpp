@@ -96,11 +96,12 @@ bool PokerEngineAPI::applyAction(Game* game, const json& actionJson, std::string
     if (type == "addPlayer") {
         std::string playerId = actionJson.value("playerId", "");
         std::string playerName = actionJson.value("playerName", "");
+        int chips = actionJson.value("chips", 0);  // 0 means use config default
         if (playerId.empty() || playerName.empty()) {
             errorMsg = "addPlayer: missing playerId or playerName";
             return false;
         }
-        if (!game->addPlayer(playerId, playerName)) {
+        if (!game->addPlayer(playerId, playerName, chips)) {
             errorMsg = "addPlayer: failed to add player " + playerId;
             return false;
         }

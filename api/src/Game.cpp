@@ -16,7 +16,7 @@ void Game::recordEvent(const json& event) {
     history.push_back(event);
 }
 
-bool Game::addPlayer(std::string_view id, std::string_view name) {
+bool Game::addPlayer(std::string_view id, std::string_view name, int chips) {
     if (players.size() >= static_cast<size_t>(config.maxPlayers)) {
         return false;
     }
@@ -30,18 +30,25 @@ bool Game::addPlayer(std::string_view id, std::string_view name) {
         return false;
     }
     
-    auto player = std::make_unique<Player>(id, name, config.startingChips);
+    // Use provided chips or fall back to config default
+    int startingChips = (chips > 0) ? chips : config.startingChips;
+    
+    auto player = std::make_unique<Player>(id, name, startingChips);
     player->setPosition(players.size());
     Player* playerPtr = player.get();
     playerLookup[player->getId()] = playerPtr;  // Store with actual string key
     players.push_back(std::move(player));
     
     // Record the event
-    recordEvent({
+    json event = {
         {"type", "addPlayer"},
         {"playerId", std::string(id)},
         {"playerName", std::string(name)}
-    });
+    };
+    if (chips > 0) {
+        event["chips"] = chips;
+    }
+    recordEvent(event);
     
     return true;
 }

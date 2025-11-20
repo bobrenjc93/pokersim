@@ -1,33 +1,28 @@
 #!/usr/bin/env python3
 """
-Test script for the stateless poker engine API.
+Snapshot tests for the stateless poker engine API.
 
 This script:
 1. Builds the C++ poker engine server
 2. Starts the server in the background
-3. Tests the stateless API with various payloads
-4. Verifies responses are correct
+3. Tests various poker scenarios with snapshot testing
+4. Saves/compares full response snapshots to disk
 5. Kills the server
 
-The stateless API works by:
-- Client sends: config, history of actions, and optionally a new action
-- Server creates fresh game, replays history, applies new action, returns state
-- Server maintains NO state between requests
-
-Event Sourcing:
-- History includes player actions: addPlayer, playerAction
-- Card dealing events (dealHoleCards, dealFlop, etc.) are regenerated automatically from seed
-- The server's returned gameState includes full history with all events for transparency
-- Tests use simplified histories (no card events) since they're deterministically regenerated
+Snapshot testing allows us to:
+- Capture complete game state for complex scenarios
+- Easily review changes when updating game logic
+- Avoid brittle assertions on specific values
 """
 
 import subprocess
 import time
 import json
 import sys
-import signal
 import os
-from typing import Optional, Dict, Any, List
+from pathlib import Path
+from typing import Optional, Dict, Any
+from difflib import unified_diff
 
 # ANSI color codes for pretty output
 class Colors:
@@ -54,19 +49,26 @@ def print_header(msg: str):
     print(f"{Colors.BOLD}{Colors.CYAN}{msg}{Colors.END}")
     print(f"{Colors.BOLD}{Colors.CYAN}{'='*60}{Colors.END}\n")
 
-class StatelessPokerAPITester:
-    def __init__(self, port: int = 8080):
+def print_warning(msg: str):
+    print(f"{Colors.YELLOW}⚠{Colors.END} {msg}")
+
+class SnapshotTester:
+    def __init__(self, port: int = 8080, update_snapshots: bool = False):
         self.port = port
         self.base_url = f"http://localhost:{port}/simulate"
         self.server_process: Optional[subprocess.Popen] = None
         self.passed_tests = 0
         self.failed_tests = 0
+        self.update_snapshots = update_snapshots
+        
+        # Create snapshots directory
+        self.snapshot_dir = Path(__file__).parent / "snapshots"
+        self.snapshot_dir.mkdir(exist_ok=True)
         
     def build_server(self) -> bool:
         """Build the C++ server"""
         print_header("Building C++ Poker Engine Server")
         try:
-            # Run make from the api directory (parent of tests directory)
             api_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             result = subprocess.run(
                 ["make", "clean", "all"],
@@ -88,7 +90,6 @@ class StatelessPokerAPITester:
         """Start the server in the background"""
         print_header("Starting Server")
         try:
-            # Start server process from the api directory (parent of tests directory)
             api_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             self.server_process = subprocess.Popen(
                 [f"./build/poker_api", str(self.port)],
@@ -147,486 +148,236 @@ class StatelessPokerAPITester:
             print_error(f"Raw response: {result.stdout}")
             return {"error": "Invalid JSON response"}
     
-    def verify_response(self, response: Dict[str, Any], expected_success: bool, 
-                       test_name: str, checks: Optional[Dict[str, Any]] = None) -> bool:
-        """Verify a response matches expectations"""
-        if response.get("success") == expected_success:
-            if checks:
-                for key, expected_value in checks.items():
-                    actual = response
-                    for k in key.split('.'):
-                        actual = actual.get(k, {})
-                    
-                    if actual != expected_value:
-                        print_error(f"{test_name}: {key} = {actual}, expected {expected_value}")
-                        self.failed_tests += 1
-                        return False
-            
-            print_success(test_name)
+    def save_snapshot(self, name: str, data: Dict[str, Any]):
+        """Save a snapshot to disk"""
+        snapshot_path = self.snapshot_dir / f"{name}.json"
+        with open(snapshot_path, 'w') as f:
+            json.dump(data, f, indent=2, sort_keys=True)
+        print_info(f"Saved snapshot: {snapshot_path}")
+    
+    def load_snapshot(self, name: str) -> Optional[Dict[str, Any]]:
+        """Load a snapshot from disk"""
+        snapshot_path = self.snapshot_dir / f"{name}.json"
+        if not snapshot_path.exists():
+            return None
+        with open(snapshot_path, 'r') as f:
+            return json.load(f)
+    
+    def compare_snapshots(self, name: str, actual: Dict[str, Any]) -> bool:
+        """Compare actual response with saved snapshot"""
+        expected = self.load_snapshot(name)
+        
+        if expected is None:
+            if self.update_snapshots:
+                self.save_snapshot(name, actual)
+                print_warning(f"Created new snapshot: {name}")
+                return True
+            else:
+                print_error(f"Snapshot not found: {name}")
+                print_info("Run with --update-snapshots to create it")
+                return False
+        
+        # Compare JSON
+        if actual == expected:
+            return True
+        
+        # Show diff if they don't match
+        if self.update_snapshots:
+            self.save_snapshot(name, actual)
+            print_warning(f"Updated snapshot: {name}")
+            return True
+        
+        # Show diff
+        actual_str = json.dumps(actual, indent=2, sort_keys=True).splitlines(keepends=True)
+        expected_str = json.dumps(expected, indent=2, sort_keys=True).splitlines(keepends=True)
+        
+        diff = unified_diff(expected_str, actual_str, 
+                          fromfile=f"expected/{name}.json",
+                          tofile=f"actual/{name}.json",
+                          lineterm='')
+        
+        print_error(f"Snapshot mismatch: {name}")
+        print_info("Diff:")
+        for line in list(diff)[:50]:  # Limit diff output
+            if line.startswith('+'):
+                print(f"{Colors.GREEN}{line}{Colors.END}", end='')
+            elif line.startswith('-'):
+                print(f"{Colors.RED}{line}{Colors.END}", end='')
+            else:
+                print(line, end='')
+        
+        print_info("\nRun with --update-snapshots to update the snapshot")
+        return False
+    
+    def test_snapshot(self, name: str, description: str, payload: Dict[str, Any]) -> bool:
+        """Run a test and compare with snapshot"""
+        print_info(f"Test: {description}")
+        
+        response = self.curl_post(payload)
+        
+        # Check if response indicates success
+        if not response.get("success", False):
+            print_error(f"API returned error: {response.get('error', 'Unknown error')}")
+            self.failed_tests += 1
+            return False
+        
+        # Compare with snapshot
+        if self.compare_snapshots(name, response):
+            print_success(f"{description}")
             self.passed_tests += 1
             return True
         else:
-            error_msg = response.get("error", "Unknown error")
-            print_error(f"{test_name}: {error_msg}")
+            print_error(f"{description}")
             self.failed_tests += 1
             return False
     
-    def test_empty_game(self):
-        """Test 1: Create an empty game with just config"""
-        print_info("Test 1: Empty game creation")
-        
+    def test_side_pots(self):
+        """Test 1: Side pots with multiple all-ins"""
         payload = {
             "config": {
                 "smallBlind": 10,
                 "bigBlind": 20,
-                "startingChips": 1000,
-                "seed": 42
-            }
-        }
-        
-        response = self.curl_post(payload)
-        self.verify_response(
-            response, 
-            expected_success=True,
-            test_name="Empty game creation",
-            checks={
-                "gameState.stage": "Waiting",
-                "gameState.pot": 0,
-                "gameState.config.seed": 42
-            }
-        )
-        
-        return response.get("gameState")
-    
-    def test_add_players(self):
-        """Test 2: Add players via history"""
-        print_info("Test 2: Adding players")
-        
-        payload = {
-            "config": {
-                "smallBlind": 10,
-                "bigBlind": 20,
-                "startingChips": 1000,
-                "seed": 42
+                "startingChips": 1000,  # Default, but we override per player
+                "minPlayers": 3,  # Need 3 players before hand starts
+                "seed": 1001
             },
             "history": [
-                {"type": "addPlayer", "playerId": "alice", "playerName": "Alice"},
-                {"type": "addPlayer", "playerId": "bob", "playerName": "Bob"}
+                # Add players with different stack sizes
+                {"type": "addPlayer", "playerId": "short", "playerName": "ShortStack", "chips": 100},
+                {"type": "addPlayer", "playerId": "medium", "playerName": "MediumStack", "chips": 500},
+                {"type": "addPlayer", "playerId": "big", "playerName": "BigStack", "chips": 2000},
+                
+                # Preflop action order: medium (UTG), big (dealer/SB), short (BB)
+                # medium acts first (UTG position), then big, then short, back to medium
+                {"type": "playerAction", "playerId": "medium", "action": "raise", "amount": 90},  # Raise to 90
+                {"type": "playerAction", "playerId": "big", "action": "raise", "amount": 500},    # Re-raise to 500
+                {"type": "playerAction", "playerId": "short", "action": "call", "amount": 0},     # All-in for 100 total
+                {"type": "playerAction", "playerId": "medium", "action": "call", "amount": 0},    # All-in for 500 total
             ]
         }
         
-        response = self.curl_post(payload)
-        success = self.verify_response(
-            response,
-            expected_success=True,
-            test_name="Adding 2 players"
-        )
-        
-        if success:
-            game_state = response.get("gameState", {})
-            players = game_state.get("players", [])
-            if len(players) == 2:
-                print_success(f"  Players: {players[0]['name']}, {players[1]['name']}")
-            else:
-                print_error(f"  Expected 2 players, got {len(players)}")
-        
-        return response.get("gameState")
+        self.test_snapshot("side_pots", "Side pots with multiple all-ins", payload)
     
-    def test_start_hand(self):
-        """Test 3: Start a hand (implicit when enough players added)"""
-        print_info("Test 3: Starting hand")
-        
+    def test_all_in_preflop(self):
+        """Test 2: All-in during preflop"""
         payload = {
             "config": {
-                "smallBlind": 10,
-                "bigBlind": 20,
-                "startingChips": 1000,
-                "seed": 42
-            },
-            "history": [
-                {"type": "addPlayer", "playerId": "alice", "playerName": "Alice"},
-                {"type": "addPlayer", "playerId": "bob", "playerName": "Bob"}
-            ]
-            # Hand starts in Preflop - betting must complete before advancing
-        }
-        
-        response = self.curl_post(payload)
-        success = self.verify_response(
-            response,
-            expected_success=True,
-            test_name="Starting hand implicitly (stays in Preflop until betting complete)",
-            checks={
-                "gameState.stage": "Preflop"
-            }
-        )
-        
-        if success:
-            game_state = response.get("gameState", {})
-            print_success(f"  Stage: {game_state['stage']}, Pot: {game_state['pot']}")
-            
-            # Show hole cards
-            for player in game_state.get("players", []):
-                cards = ', '.join(player.get("holeCards", []))
-                print_success(f"  {player['name']}: {cards}")
-        
-        return response.get("gameState")
-    
-    def test_player_actions(self):
-        """Test 4: Process player actions (with implicit advancement)"""
-        print_info("Test 4: Player actions (call, check)")
-        
-        # After preflop betting completes, game advances to Flop automatically
-        # Card dealing events are regenerated from seed, no need to specify
-        payload = {
-            "config": {
-                "smallBlind": 10,
-                "bigBlind": 20,
-                "startingChips": 1000,
-                "seed": 42
-            },
-            "history": [
-                {"type": "addPlayer", "playerId": "alice", "playerName": "Alice"},
-                {"type": "addPlayer", "playerId": "bob", "playerName": "Bob"},
-                {"type": "playerAction", "playerId": "alice", "action": "call", "amount": 0},
-                {"type": "playerAction", "playerId": "bob", "action": "check", "amount": 0}
-            ]
-            # No action - preflop complete, auto-advances to Flop
-        }
-        
-        response = self.curl_post(payload)
-        success = self.verify_response(
-            response,
-            expected_success=True,
-            test_name="Player actions (auto-advances to Flop)",
-            checks={
-                "gameState.stage": "Flop"
-            }
-        )
-        
-        if success:
-            game_state = response.get("gameState", {})
-            community_cards = ', '.join(game_state.get("communityCards", []))
-            print_success(f"  Flop: {community_cards}")
-        
-        return response.get("gameState")
-    
-    def test_betting_round(self):
-        """Test 5: Complete betting round with bet and fold"""
-        print_info("Test 5: Betting round (bet, fold)")
-        
-        payload = {
-            "config": {
-                "smallBlind": 10,
-                "bigBlind": 20,
-                "startingChips": 1000,
-                "seed": 42
-            },
-            "history": [
-                {"type": "addPlayer", "playerId": "alice", "playerName": "Alice"},
-                {"type": "addPlayer", "playerId": "bob", "playerName": "Bob"},
-                {"type": "playerAction", "playerId": "alice", "action": "call", "amount": 0},
-                {"type": "playerAction", "playerId": "bob", "action": "check", "amount": 0},
-                # Flop - Alice (small blind) acts first post-flop
-                {"type": "playerAction", "playerId": "alice", "action": "check", "amount": 0},
-                {"type": "playerAction", "playerId": "bob", "action": "bet", "amount": 50},
-                {"type": "playerAction", "playerId": "alice", "action": "fold", "amount": 0}
-            ]
-        }
-        
-        response = self.curl_post(payload)
-        success = self.verify_response(
-            response,
-            expected_success=True,
-            test_name="Betting round (bet, fold)",
-            checks={
-                "gameState.stage": "Complete"
-            }
-        )
-        
-        if success:
-            game_state = response.get("gameState", {})
-            print_success(f"  Hand complete, final pot: {game_state['pot']}")
-            
-            # Show final chip counts
-            for player in game_state.get("players", []):
-                print_success(f"  {player['name']}: {player['chips']} chips")
-        
-        return response.get("gameState")
-    
-    def test_new_action_parameter(self):
-        """Test 6: Verify actions must be in history (no manual actions)"""
-        print_info("Test 6: Actions via history only (no manual actions)")
-        
-        # Build state up to preflop with p1's action in history
-        payload = {
-            "config": {
-                "smallBlind": 10,
-                "bigBlind": 20,
-                "startingChips": 1000,
-                "seed": 99
-            },
-            "history": [
-                {"type": "addPlayer", "playerId": "p1", "playerName": "Player1"},
-                {"type": "addPlayer", "playerId": "p2", "playerName": "Player2"},
-                {"type": "playerAction", "playerId": "p1", "action": "call", "amount": 0}
-            ]
-        }
-        
-        response = self.curl_post(payload)
-        success = self.verify_response(
-            response,
-            expected_success=True,
-            test_name="Action in history (p1 call)"
-        )
-        
-        if success:
-            game_state = response.get("gameState", {})
-            print_success(f"  Applied action from history, waiting for p2")
-        
-        return response.get("gameState")
-    
-    def test_deterministic_replay(self):
-        """Test 7: Verify deterministic replay with same seed"""
-        print_info("Test 7: Deterministic replay")
-        
-        # We'll verify that same seed + same history produces same results
-        payload = {
-            "config": {
-                "seed": 12345,
-                "smallBlind": 10,
-                "bigBlind": 20,
-                "startingChips": 1000
-            },
-            "history": [
-                {"type": "addPlayer", "playerId": "a", "playerName": "A"},
-                {"type": "addPlayer", "playerId": "b", "playerName": "B"},
-                {"type": "playerAction", "playerId": "a", "action": "call", "amount": 0},
-                {"type": "playerAction", "playerId": "b", "action": "check", "amount": 0}
-            ]
-            # Note: Betting round complete, no action field will auto-advance to Flop
-        }
-        
-        # Send same request twice
-        response1 = self.curl_post(payload)
-        response2 = self.curl_post(payload)
-        
-        if response1.get("success") and response2.get("success"):
-            state1 = response1.get("gameState", {})
-            state2 = response2.get("gameState", {})
-            
-            # Check complete state equality
-            errors = []
-            
-            # Check stage
-            if state1.get("stage") != state2.get("stage"):
-                errors.append(f"stage: {state1.get('stage')} vs {state2.get('stage')}")
-            
-            # Check pot
-            if state1.get("pot") != state2.get("pot"):
-                errors.append(f"pot: {state1.get('pot')} vs {state2.get('pot')}")
-            
-            # Check community cards
-            cards1_comm = state1.get("communityCards", [])
-            cards2_comm = state2.get("communityCards", [])
-            if cards1_comm != cards2_comm:
-                errors.append(f"community cards: {cards1_comm} vs {cards2_comm}")
-            
-            # Check hole cards
-            cards1_hole = [p["holeCards"] for p in state1.get("players", [])]
-            cards2_hole = [p["holeCards"] for p in state2.get("players", [])]
-            if cards1_hole != cards2_hole:
-                errors.append(f"hole cards: {cards1_hole} vs {cards2_hole}")
-            
-            # Check chip counts
-            chips1 = [p["chips"] for p in state1.get("players", [])]
-            chips2 = [p["chips"] for p in state2.get("players", [])]
-            if chips1 != chips2:
-                errors.append(f"chip counts: {chips1} vs {chips2}")
-            
-            if not errors:
-                print_success("Deterministic replay verified (complete state match)")
-                print_success(f"  Stage: {state1.get('stage')}, Pot: {state1.get('pot')}")
-                if cards1_comm:
-                    print_success(f"  Community: {', '.join(cards1_comm)}")
-                self.passed_tests += 1
-            else:
-                print_error("Replay not deterministic:")
-                for error in errors:
-                    print_error(f"  {error}")
-                self.failed_tests += 1
-        else:
-            print_error("Deterministic replay test failed")
-            self.failed_tests += 1
-    
-    def test_automatic_progression(self):
-        """Test 8: Implicit advancement (no explicit advance actions)"""
-        print_info("Test 8: Implicit advancement")
-        
-        # Test 8a: No advancement without completed betting
-        print_info("  8a: Cannot advance with incomplete betting round")
-        payload = {
-            "config": {
-                "seed": 999,
-                "smallBlind": 10,
-                "bigBlind": 20,
-                "startingChips": 1000
-            },
-            "history": [
-                {"type": "addPlayer", "playerId": "p1", "playerName": "Player1"},
-                {"type": "addPlayer", "playerId": "p2", "playerName": "Player2"}
-            ]
-            # No action - but betting round not complete, should stay in Preflop
-        }
-        
-        response = self.curl_post(payload)
-        success = self.verify_response(
-            response,
-            expected_success=True,
-            test_name="No advancement with incomplete betting",
-            checks={
-                "gameState.stage": "Preflop"
-            }
-        )
-        
-        if success:
-            self.passed_tests += 1
-        else:
-            self.failed_tests += 1
-        
-        # Test 8b: Implicit advancement WITH completed betting
-        print_info("  8b: Auto-advance with completed betting round")
-        payload = {
-            "config": {
-                "seed": 999,
-                "smallBlind": 10,
-                "bigBlind": 20,
-                "startingChips": 1000
-            },
-            "history": [
-                {"type": "addPlayer", "playerId": "p1", "playerName": "Player1"},
-                {"type": "addPlayer", "playerId": "p2", "playerName": "Player2"},
-                {"type": "playerAction", "playerId": "p1", "action": "call", "amount": 0},
-                {"type": "playerAction", "playerId": "p2", "action": "check", "amount": 0}
-            ]
-            # No action - betting round complete, should auto-advance to Flop
-        }
-        
-        response = self.curl_post(payload)
-        success = self.verify_response(
-            response,
-            expected_success=True,
-            test_name="Implicit advancement to Flop",
-            checks={
-                "gameState.stage": "Flop"
-            }
-        )
-        
-        if success:
-            game_state = response.get("gameState", {})
-            community_cards = game_state.get("communityCards", [])
-            if len(community_cards) == 3:
-                print_success(f"  3 community cards dealt: {', '.join(community_cards)}")
-                self.passed_tests += 1
-            else:
-                print_error(f"  Expected 3 community cards, got {len(community_cards)}")
-                self.failed_tests += 1
-        else:
-            # Already counted by verify_response
-            pass
-    
-    def test_error_handling(self):
-        """Test 9: Error handling"""
-        print_info("Test 9: Error handling")
-        
-        # Test 9a: Invalid action type
-        payload = {
-            "config": {"seed": 1},
-            "history": [{"type": "invalidAction"}]
-        }
-        response = self.curl_post(payload)
-        self.verify_response(
-            response,
-            expected_success=False,
-            test_name="Invalid action type"
-        )
-        
-        # Test 9b: Missing player info
-        payload = {
-            "config": {"seed": 1},
-            "history": [{"type": "addPlayer", "playerId": ""}]
-        }
-        response = self.curl_post(payload)
-        self.verify_response(
-            response,
-            expected_success=False,
-            test_name="Missing player info"
-        )
-        
-        # Test 9c: Empty request (missing config)
-        payload = {}
-        response = self.curl_post(payload)
-        self.verify_response(
-            response,
-            expected_success=False,
-            test_name="Empty request (missing config)"
-        )
-    
-    def test_complete_hand(self):
-        """Test 10: Complete hand from start to finish"""
-        print_info("Test 10: Complete hand playthrough")
-        
-        payload = {
-            "config": {
-                "seed": 777,
                 "smallBlind": 5,
                 "bigBlind": 10,
-                "startingChips": 500
+                "startingChips": 200,
+                "seed": 2001
+            },
+            "history": [
+                {"type": "addPlayer", "playerId": "p1", "playerName": "Player1"},
+                {"type": "addPlayer", "playerId": "p2", "playerName": "Player2"},
+                
+                # Heads-up: p1 is SB/dealer (acts first preflop), p2 is BB
+                # p1 has posted SB (5), so has 195 remaining. Raises by 45 more to make total bet 50.
+                {"type": "playerAction", "playerId": "p1", "action": "raise", "amount": 45},
+                # p2 has posted BB (10), so has 190 remaining. Raises by 190 more to go all-in (total bet 200).
+                {"type": "playerAction", "playerId": "p2", "action": "raise", "amount": 190},
+                # p1 needs to call 150 more (200 - 50 already in)
+                {"type": "playerAction", "playerId": "p1", "action": "call", "amount": 0},
+            ]
+        }
+        
+        self.test_snapshot("all_in_preflop", "All-in during preflop", payload)
+    
+    def test_all_in_on_flop(self):
+        """Test 3: All-in on the flop"""
+        payload = {
+            "config": {
+                "smallBlind": 10,
+                "bigBlind": 20,
+                "startingChips": 500,
+                "seed": 3001
             },
             "history": [
                 {"type": "addPlayer", "playerId": "hero", "playerName": "Hero"},
                 {"type": "addPlayer", "playerId": "villain", "playerName": "Villain"},
-                # Preflop - Hero is small blind and acts first
-                {"type": "playerAction", "playerId": "hero", "action": "raise", "amount": 30},
-                {"type": "playerAction", "playerId": "villain", "action": "call", "amount": 0},
-                # Flop - Hero (small blind) acts first post-flop
-                {"type": "playerAction", "playerId": "hero", "action": "check", "amount": 0},
-                {"type": "playerAction", "playerId": "villain", "action": "bet", "amount": 50},
+                
+                # Preflop: Both call
                 {"type": "playerAction", "playerId": "hero", "action": "call", "amount": 0},
-                # Turn - Hero acts first again
-                {"type": "playerAction", "playerId": "hero", "action": "check", "amount": 0},
                 {"type": "playerAction", "playerId": "villain", "action": "check", "amount": 0},
-                # River - Hero acts first again
+                
+                # Flop: Hero checks, Villain shoves, Hero calls
                 {"type": "playerAction", "playerId": "hero", "action": "check", "amount": 0},
-                {"type": "playerAction", "playerId": "villain", "action": "bet", "amount": 100},
-                {"type": "playerAction", "playerId": "hero", "action": "call", "amount": 0}
+                {"type": "playerAction", "playerId": "villain", "action": "bet", "amount": 480},
+                {"type": "playerAction", "playerId": "hero", "action": "call", "amount": 0},
             ]
         }
         
-        response = self.curl_post(payload)
-        # After all player actions complete, game goes to Showdown
-        # With no action field, it auto-advances from Showdown to Complete
-        success = self.verify_response(
-            response,
-            expected_success=True,
-            test_name="Complete hand (auto-advances to Complete)",
-            checks={
-                "gameState.stage": "Complete"
-            }
-        )
+        self.test_snapshot("all_in_on_flop", "All-in on the flop", payload)
+    
+    def test_all_in_on_turn(self):
+        """Test 4: All-in on the turn"""
+        payload = {
+            "config": {
+                "smallBlind": 10,
+                "bigBlind": 20,
+                "startingChips": 1000,
+                "seed": 4001
+            },
+            "history": [
+                {"type": "addPlayer", "playerId": "alice", "playerName": "Alice"},
+                {"type": "addPlayer", "playerId": "bob", "playerName": "Bob"},
+                
+                # Preflop
+                {"type": "playerAction", "playerId": "alice", "action": "call", "amount": 0},
+                {"type": "playerAction", "playerId": "bob", "action": "check", "amount": 0},
+                
+                # Flop: Small bet and call
+                {"type": "playerAction", "playerId": "alice", "action": "bet", "amount": 50},
+                {"type": "playerAction", "playerId": "bob", "action": "call", "amount": 0},
+                
+                # Turn: Alice shoves, Bob calls
+                {"type": "playerAction", "playerId": "alice", "action": "bet", "amount": 930},
+                {"type": "playerAction", "playerId": "bob", "action": "call", "amount": 0},
+            ]
+        }
         
-        if success:
-            game_state = response.get("gameState", {})
-            community_cards = ', '.join(game_state.get("communityCards", []))
-            print_success(f"  Board: {community_cards}")
-            print_success(f"  Pot: {game_state['pot']}")
-            
-            for player in game_state.get("players", []):
-                hole_cards = ', '.join(player.get("holeCards", []))
-                print_success(f"  {player['name']}: {hole_cards} ({player['chips']} chips)")
+        self.test_snapshot("all_in_on_turn", "All-in on the turn", payload)
+    
+    def test_all_in_on_river(self):
+        """Test 5: All-in on the river"""
+        payload = {
+            "config": {
+                "smallBlind": 25,
+                "bigBlind": 50,
+                "startingChips": 2000,
+                "seed": 5001
+            },
+            "history": [
+                {"type": "addPlayer", "playerId": "pro", "playerName": "ProPlayer", "chips": 1500},
+                {"type": "addPlayer", "playerId": "fish", "playerName": "FishPlayer", "chips": 2500},
+                
+                # Heads-up: pro is SB/dealer (acts first preflop), fish is BB
+                {"type": "playerAction", "playerId": "pro", "action": "raise", "amount": 150},  # Raise to 150
+                {"type": "playerAction", "playerId": "fish", "action": "call", "amount": 0},    # Call
+                
+                # Flop: pro acts first post-flop (SB acts first post-flop)
+                {"type": "playerAction", "playerId": "pro", "action": "check", "amount": 0},
+                {"type": "playerAction", "playerId": "fish", "action": "check", "amount": 0},
+                
+                # Turn: pro acts first
+                {"type": "playerAction", "playerId": "pro", "action": "bet", "amount": 200},
+                {"type": "playerAction", "playerId": "fish", "action": "call", "amount": 0},
+                
+                # River: Pro shoves remaining stack, Fish calls
+                {"type": "playerAction", "playerId": "pro", "action": "bet", "amount": 1100},  # Remaining chips
+                {"type": "playerAction", "playerId": "fish", "action": "call", "amount": 0},
+            ]
+        }
+        
+        self.test_snapshot("all_in_on_river", "All-in on the river", payload)
     
     def run_all_tests(self):
         """Run all tests"""
-        print_header("STATELESS POKER ENGINE API TESTS")
+        if self.update_snapshots:
+            print_header("SNAPSHOT UPDATE MODE")
+            print_warning("Snapshots will be created/updated")
+        else:
+            print_header("SNAPSHOT TEST MODE")
         
         # Build server
         if not self.build_server():
@@ -640,18 +391,13 @@ class StatelessPokerAPITester:
         
         try:
             # Run tests
-            print_header("Running Test Suite")
+            print_header("Running Snapshot Tests")
             
-            self.test_empty_game()
-            self.test_add_players()
-            self.test_start_hand()
-            self.test_player_actions()
-            self.test_betting_round()
-            self.test_new_action_parameter()
-            self.test_deterministic_replay()
-            self.test_automatic_progression()
-            self.test_error_handling()
-            self.test_complete_hand()
+            self.test_side_pots()
+            self.test_all_in_preflop()
+            self.test_all_in_on_flop()
+            self.test_all_in_on_turn()
+            self.test_all_in_on_river()
             
             # Print summary
             print_header("Test Summary")
@@ -678,14 +424,22 @@ class StatelessPokerAPITester:
 def main():
     """Main entry point"""
     port = 8080
-    if len(sys.argv) > 1:
-        try:
-            port = int(sys.argv[1])
-        except ValueError:
-            print_error("Invalid port number")
-            sys.exit(1)
+    update_snapshots = False
     
-    tester = StatelessPokerAPITester(port)
+    # Parse arguments
+    args = sys.argv[1:]
+    for arg in args:
+        if arg == "--update-snapshots" or arg == "-u":
+            update_snapshots = True
+        else:
+            try:
+                port = int(arg)
+            except ValueError:
+                print_error(f"Invalid argument: {arg}")
+                print_info("Usage: test_stateless_api.py [port] [--update-snapshots]")
+                sys.exit(1)
+    
+    tester = SnapshotTester(port, update_snapshots)
     success = tester.run_all_tests()
     
     sys.exit(0 if success else 1)

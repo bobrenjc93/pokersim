@@ -1,0 +1,159 @@
+{
+  "gameState": {
+    "communityCards": [
+      "JC",
+      "3C",
+      "4D"
+    ],
+    "config": {
+      "bigBlind": 20,
+      "maxPlayers": 10,
+      "minPlayers": 3,
+      "seed": 1001,
+      "smallBlind": 10,
+      "startingChips": 1000
+    },
+    "currentBet": 0,
+    "currentPlayerId": "big",
+    "dealerPosition": 1,
+    "handNumber": 1,
+    "history": [
+      {
+        "chips": 100,
+        "playerId": "short",
+        "playerName": "ShortStack",
+        "type": "addPlayer"
+      },
+      {
+        "chips": 500,
+        "playerId": "medium",
+        "playerName": "MediumStack",
+        "type": "addPlayer"
+      },
+      {
+        "chips": 2000,
+        "playerId": "big",
+        "playerName": "BigStack",
+        "type": "addPlayer"
+      },
+      {
+        "cards": [
+          "2S",
+          "4C"
+        ],
+        "playerId": "short",
+        "type": "dealHoleCards"
+      },
+      {
+        "cards": [
+          "JS",
+          "6S"
+        ],
+        "playerId": "medium",
+        "type": "dealHoleCards"
+      },
+      {
+        "cards": [
+          "KD",
+          "7H"
+        ],
+        "playerId": "big",
+        "type": "dealHoleCards"
+      },
+      {
+        "action": "raise",
+        "amount": 90,
+        "playerId": "medium",
+        "type": "playerAction"
+      },
+      {
+        "action": "raise",
+        "amount": 500,
+        "playerId": "big",
+        "type": "playerAction"
+      },
+      {
+        "action": "call",
+        "amount": 0,
+        "playerId": "short",
+        "type": "playerAction"
+      },
+      {
+        "action": "call",
+        "amount": 0,
+        "playerId": "medium",
+        "type": "playerAction"
+      },
+      {
+        "cards": [
+          "JC",
+          "3C",
+          "4D"
+        ],
+        "type": "dealFlop"
+      }
+    ],
+    "players": [
+      {
+        "bet": 0,
+        "canAct": false,
+        "chips": 0,
+        "holeCards": [
+          "2S",
+          "4C"
+        ],
+        "id": "short",
+        "isBigBlind": true,
+        "isDealer": false,
+        "isInHand": true,
+        "isSmallBlind": false,
+        "lastAction": "all_in",
+        "name": "ShortStack",
+        "position": 0,
+        "state": "All-in",
+        "totalBet": 100
+      },
+      {
+        "bet": 0,
+        "canAct": false,
+        "chips": 0,
+        "holeCards": [
+          "JS",
+          "6S"
+        ],
+        "id": "medium",
+        "isBigBlind": false,
+        "isDealer": true,
+        "isInHand": true,
+        "isSmallBlind": false,
+        "lastAction": "all_in",
+        "name": "MediumStack",
+        "position": 1,
+        "state": "All-in",
+        "totalBet": 500
+      },
+      {
+        "bet": 0,
+        "canAct": true,
+        "chips": 1490,
+        "holeCards": [
+          "KD",
+          "7H"
+        ],
+        "id": "big",
+        "isBigBlind": false,
+        "isDealer": false,
+        "isInHand": true,
+        "isSmallBlind": true,
+        "lastAction": "none",
+        "name": "BigStack",
+        "position": 2,
+        "state": "Active",
+        "totalBet": 510
+      }
+    ],
+    "pot": 1110,
+    "stage": "Flop"
+  },
+  "success": true
+}
