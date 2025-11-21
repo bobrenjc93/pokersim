@@ -80,11 +80,36 @@ void Pot::collectBets(std::vector<Player*>& players) {
     currentBet = 0;
 }
 
-std::unordered_map<std::string, int> Pot::distributePots(
+std::vector<Pot::ShowdownResult> Pot::distributePots(
     const std::vector<Player*>& players,
     const std::vector<Card>& communityCards) {
     
-    std::unordered_map<std::string, int> winnings;
+    // Pre-evaluate all hands once to avoid duplicate evaluations
+    std::unordered_map<std::string, Hand::EvaluatedHand> evaluatedHands;
+    evaluatedHands.reserve(players.size());
+    
+    std::unordered_map<std::string, ShowdownResult> resultsMap;
+    
+    // Initialize all players in the hand with their evaluated hands
+    for (auto* player : players) {
+        if (player->isInHand()) {
+            ShowdownResult result;
+            result.playerId = player->getId();
+            
+            // Evaluate the player's hand once and cache it
+            Hand::EvaluatedHand evalHand = player->evaluateHand(communityCards);
+            evaluatedHands[player->getId()] = evalHand;
+            result.handRanking = evalHand.getRankingName();
+            
+            // Convert best five cards to strings
+            for (const auto& card : evalHand.bestFive) {
+                result.bestFive.push_back(card.toString());
+            }
+            
+            result.amountWon = 0;
+            resultsMap[player->getId()] = result;
+        }
+    }
     
     for (const auto& pot : pots) {
         // Find eligible players who are still in the hand
@@ -94,30 +119,22 @@ std::unordered_map<std::string, int> Pot::distributePots(
             pot.eligiblePlayerIds.end()
         );
         
-        std::vector<Player*> eligiblePlayers;
-        eligiblePlayers.reserve(pot.eligiblePlayerIds.size());  // Avoid reallocation
+        std::vector<std::pair<Player*, Hand::EvaluatedHand>> eligiblePlayersWithHands;
+        eligiblePlayersWithHands.reserve(pot.eligiblePlayerIds.size());  // Avoid reallocation
         for (auto* player : players) {
             if (player->isInHand() && eligibleSet.count(player->getId())) {
-                eligiblePlayers.push_back(player);
+                // Use pre-evaluated hand from cache
+                eligiblePlayersWithHands.push_back({player, evaluatedHands[player->getId()]});
             }
         }
         
-        if (eligiblePlayers.empty()) {
+        if (eligiblePlayersWithHands.empty()) {
             continue;
         }
         
-        // Evaluate all hands
-        std::vector<std::pair<Player*, Hand::EvaluatedHand>> evaluatedHands;
-        for (auto* player : eligiblePlayers) {
-            evaluatedHands.push_back({
-                player,
-                player->evaluateHand(communityCards)
-            });
-        }
-        
         // Find the best hand(s)
-        Hand::EvaluatedHand bestHand = evaluatedHands[0].second;
-        for (const auto& [player, hand] : evaluatedHands) {
+        Hand::EvaluatedHand bestHand = eligiblePlayersWithHands[0].second;
+        for (const auto& [player, hand] : eligiblePlayersWithHands) {
             if (hand > bestHand) {
                 bestHand = hand;
             }
@@ -125,7 +142,7 @@ std::unordered_map<std::string, int> Pot::distributePots(
         
         // Find all players with the best hand (for splits)
         std::vector<Player*> winners;
-        for (const auto& [player, hand] : evaluatedHands) {
+        for (const auto& [player, hand] : eligiblePlayersWithHands) {
             if (hand == bestHand) {
                 winners.push_back(player);
             }
@@ -138,11 +155,18 @@ std::unordered_map<std::string, int> Pot::distributePots(
         for (size_t i = 0; i < winners.size(); i++) {
             int winAmount = amountPerWinner + (i == 0 ? remainder : 0);
             winners[i]->winChips(winAmount);
-            winnings[winners[i]->getId()] += winAmount;
+            resultsMap[winners[i]->getId()].amountWon += winAmount;
         }
     }
     
-    return winnings;
+    // Convert map to vector
+    std::vector<ShowdownResult> results;
+    results.reserve(resultsMap.size());
+    for (const auto& [playerId, result] : resultsMap) {
+        results.push_back(result);
+    }
+    
+    return results;
 }
 
 void Pot::startNewRound() {
@@ -157,4 +181,5 @@ void Pot::updateBet(int newBet, int previousBet) {
     }
     currentBet = newBet;
 }
+
 

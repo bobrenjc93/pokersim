@@ -2,6 +2,7 @@
 #define POT_H
 
 #include "Player.h"
+#include "Hand.h"
 #include <vector>
 #include <algorithm>
 #include <unordered_map>
@@ -88,11 +89,20 @@ public:
      */
     void collectBets(std::vector<Player*>& players);
     
+    struct ShowdownResult {
+        std::string playerId;
+        std::string handRanking;
+        std::vector<std::string> bestFive;
+        int amountWon;
+        
+        ShowdownResult() : amountWon(0) {}
+    };
+    
     /**
      * Distributes pots to winners
-     * Returns an unordered_map of player ID to amount won (O(1) lookups)
+     * Returns a vector of ShowdownResult with detailed information for each player
      */
-    std::unordered_map<std::string, int> distributePots(
+    std::vector<ShowdownResult> distributePots(
         const std::vector<Player*>& players,
         const std::vector<Card>& communityCards);
     

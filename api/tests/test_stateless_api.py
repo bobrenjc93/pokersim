@@ -371,6 +371,113 @@ class SnapshotTester:
         
         self.test_snapshot("all_in_on_river", "All-in on the river", payload)
     
+    def test_split_pot(self):
+        """Test 6: Split pot - both players have the same hand"""
+        # Use exact cards to guarantee a split pot
+        # Board will have a royal flush: AD KD QD JD TD
+        # Both players have low cards that don't play: p1 has 2H 3D, p2 has 4S 5C
+        # Order: p1 hole (2), p2 hole (2), burn, flop (3), burn, turn (1), burn, river (1)
+        payload = {
+            "config": {
+                "smallBlind": 10,
+                "bigBlind": 20,
+                "startingChips": 500,
+                "exactCards": [
+                    # Player 1 hole cards (dealer/SB)
+                    "2H", "3D",
+                    # Player 2 hole cards (BB)
+                    "4S", "5C",
+                    # Burn card before flop
+                    "6H",
+                    # Flop
+                    "AD", "KD", "QD",
+                    # Burn card before turn
+                    "7S",
+                    # Turn
+                    "JD",
+                    # Burn card before river
+                    "8C",
+                    # River
+                    "TD"
+                ]
+            },
+            "history": [
+                {"type": "addPlayer", "playerId": "alice", "playerName": "Alice"},
+                {"type": "addPlayer", "playerId": "bob", "playerName": "Bob"},
+                
+                # Preflop: alice is SB/dealer (acts first preflop), bob is BB
+                {"type": "playerAction", "playerId": "alice", "action": "raise", "amount": 40},  # Raise to 50
+                {"type": "playerAction", "playerId": "bob", "action": "call", "amount": 0},     # Call
+                
+                # Flop: alice acts first post-flop
+                {"type": "playerAction", "playerId": "alice", "action": "bet", "amount": 100},
+                {"type": "playerAction", "playerId": "bob", "action": "call", "amount": 0},
+                
+                # Turn: alice bets big
+                {"type": "playerAction", "playerId": "alice", "action": "bet", "amount": 340},
+                {"type": "playerAction", "playerId": "bob", "action": "call", "amount": 0},
+                
+                # River: both players check to trigger showdown
+                {"type": "playerAction", "playerId": "alice", "action": "check", "amount": 0},
+                {"type": "playerAction", "playerId": "bob", "action": "check", "amount": 0},
+            ]
+        }
+        
+        self.test_snapshot("split_pot", "Split pot with identical hands", payload)
+    
+    def test_three_way_all_in_split_pot(self):
+        """Test 7: Three players all-in with two players splitting the pot"""
+        # Use exact cards to create a scenario where two players tie for best hand
+        # Alice (BB): AH AS - pocket aces (will tie with Charlie)
+        # Bob (UTG): 2H 3H - low cards (will lose)
+        # Charlie (dealer/SB): AC AD - pocket aces (will tie with Alice)
+        # Board: KH KD KS QC JD - three kings
+        # Result: Alice and Charlie both have AAAKK (full house, aces full of kings)
+        #         Bob has KKK32 (three of a kind)
+        # Card order: alice hole (2), bob hole (2), charlie hole (2), burn, flop (3), burn, turn (1), burn, river (1)
+        payload = {
+            "config": {
+                "smallBlind": 10,
+                "bigBlind": 20,
+                "startingChips": 1000,
+                "minPlayers": 3,
+                "exactCards": [
+                    # Alice hole cards (BB)
+                    "AH", "AS",
+                    # Bob hole cards (UTG)
+                    "2H", "3H",
+                    # Charlie hole cards (dealer/SB)
+                    "AC", "AD",
+                    # Burn card before flop
+                    "6H",
+                    # Flop
+                    "KH", "KD", "KS",
+                    # Burn card before turn
+                    "7S",
+                    # Turn
+                    "QC",
+                    # Burn card before river
+                    "8C",
+                    # River
+                    "JD"
+                ]
+            },
+            "history": [
+                {"type": "addPlayer", "playerId": "alice", "playerName": "Alice"},
+                {"type": "addPlayer", "playerId": "bob", "playerName": "Bob"},
+                {"type": "addPlayer", "playerId": "charlie", "playerName": "Charlie"},
+                
+                # Preflop: charlie is dealer/SB, alice is BB, bob is UTG
+                # Action order: bob (UTG), charlie (SB), alice (BB), back to bob
+                {"type": "playerAction", "playerId": "bob", "action": "raise", "amount": 980},      # Bob raises to 1000
+                {"type": "playerAction", "playerId": "charlie", "action": "raise", "amount": 990},  # Charlie re-raises all-in
+                {"type": "playerAction", "playerId": "alice", "action": "call", "amount": 0},       # Alice calls all-in
+                {"type": "playerAction", "playerId": "bob", "action": "call", "amount": 0},         # Bob calls all-in
+            ]
+        }
+        
+        self.test_snapshot("three_way_all_in_split_pot", "Three-way all-in with two-way split pot", payload)
+    
     def run_all_tests(self):
         """Run all tests"""
         if self.update_snapshots:
@@ -398,6 +505,8 @@ class SnapshotTester:
             self.test_all_in_on_flop()
             self.test_all_in_on_turn()
             self.test_all_in_on_river()
+            self.test_split_pot()
+            self.test_three_way_all_in_split_pot()
             
             # Print summary
             print_header("Test Summary")

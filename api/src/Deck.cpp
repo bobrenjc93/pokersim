@@ -37,6 +37,29 @@ void Deck::shuffle(unsigned int seed) {
     shuffle();
 }
 
+void Deck::setExactOrder(const std::vector<std::string>& cardStrings) {
+    // Validate input size
+    if (cardStrings.empty()) {
+        throw std::invalid_argument("Cannot set exact order with empty card list");
+    }
+    
+    cards.clear();
+    currentCard = 0;
+    cards.reserve(cardStrings.size());
+    
+    // Create cards - Card constructor will validate format
+    try {
+        for (const auto& cardStr : cardStrings) {
+            cards.emplace_back(cardStr);
+        }
+    } catch (const std::exception& e) {
+        // If any card is invalid, restore to empty state
+        cards.clear();
+        currentCard = 0;
+        throw std::invalid_argument(std::string("Invalid card in exactCards: ") + e.what());
+    }
+}
+
 Card Deck::dealCard() {
     if (currentCard >= cards.size()) {
         throw std::runtime_error("No cards left in deck");

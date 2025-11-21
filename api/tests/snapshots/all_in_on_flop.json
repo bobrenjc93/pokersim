@@ -91,6 +91,35 @@
       {
         "card": "AH",
         "type": "dealRiver"
+      },
+      {
+        "players": [
+          {
+            "amountWon": 1000,
+            "bestFive": [
+              "8H",
+              "5H",
+              "9H",
+              "3H",
+              "AH"
+            ],
+            "handRanking": "Flush",
+            "playerId": "villain"
+          },
+          {
+            "amountWon": 0,
+            "bestFive": [
+              "AD",
+              "9H",
+              "TS",
+              "QD",
+              "AH"
+            ],
+            "handRanking": "One Pair",
+            "playerId": "hero"
+          }
+        ],
+        "type": "showdown"
       }
     ],
     "players": [
@@ -134,7 +163,7 @@
       }
     ],
     "pot": 1000,
-    "stage": "Showdown"
+    "stage": "Complete"
   },
   "success": true
 }

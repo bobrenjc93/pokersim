@@ -14,6 +14,15 @@ json PokerEngineAPI::processRequest(const json& request) {
             config.minPlayers = configJson.value("minPlayers", 2);
             config.maxPlayers = configJson.value("maxPlayers", 10);
             config.seed = configJson.value("seed", 0);
+            
+            // Extract exactCards if provided
+            if (configJson.contains("exactCards") && configJson["exactCards"].is_array()) {
+                for (const auto& card : configJson["exactCards"]) {
+                    if (card.is_string()) {
+                        config.exactCards.push_back(card.get<std::string>());
+                    }
+                }
+            }
         } else {
             return errorResponse("Must provide config with seed");
         }
@@ -62,6 +71,7 @@ json PokerEngineAPI::processRequest(const json& request) {
         // - If WAITING + enough players → auto-start hand
         // - If hand in progress and betting complete → auto-advance: PREFLOP→FLOP→TURN→RIVER→SHOWDOWN→COMPLETE
         // - If betting not complete → just return current state (waiting for action in history)
+        // - Keep advancing until can't advance anymore (useful for all-in situations)
         
         Game::Stage stage = game->getStage();
         
@@ -72,11 +82,12 @@ json PokerEngineAPI::processRequest(const json& request) {
             } else {
                 // Not enough players yet, that's okay - just return current state
             }
-        } else {
-            // Otherwise, try to advance the game to next stage
-            // If advancement fails (betting not complete), just return current state
-            // This is not an error - it means players still need to act
-            (void)game->advanceGame();
+        }
+        
+        // Keep advancing until we can't anymore (for all-in situations)
+        // This ensures we reach showdown when all players are all-in
+        while (game->advanceGame()) {
+            // Continue advancing
         }
         
         // Return the resulting game state

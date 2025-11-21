@@ -111,6 +111,35 @@
         "amount": 0,
         "playerId": "fish",
         "type": "playerAction"
+      },
+      {
+        "players": [
+          {
+            "amountWon": 2950,
+            "bestFive": [
+              "4S",
+              "4H",
+              "QD",
+              "KD",
+              "4C"
+            ],
+            "handRanking": "Three of a Kind",
+            "playerId": "fish"
+          },
+          {
+            "amountWon": 0,
+            "bestFive": [
+              "4H",
+              "QD",
+              "9D",
+              "KD",
+              "4C"
+            ],
+            "handRanking": "One Pair",
+            "playerId": "pro"
+          }
+        ],
+        "type": "showdown"
       }
     ],
     "players": [

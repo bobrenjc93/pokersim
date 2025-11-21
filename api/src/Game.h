@@ -57,6 +57,7 @@ public:
         int minPlayers;
         int maxPlayers;
         unsigned int seed; // 0 means random seed
+        std::vector<std::string> exactCards; // If provided, use these exact cards instead of shuffling
         
         GameConfig() 
             : smallBlind(10), bigBlind(20), startingChips(1000),

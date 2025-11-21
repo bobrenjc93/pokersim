@@ -77,10 +77,11 @@ pokersim/
 │   │   └── index.html   # Web UI
 │   └── README.md        # Website documentation
 └── api/                  # C++ API server
-    ├── main.cpp         # Server implementation
+    ├── src/             # Source files
+    ├── tests/           # Test files
     ├── CMakeLists.txt   # CMake configuration
     ├── Makefile         # Make configuration
-    └── README.md        # API documentation
+    └── README.md        # API & engine documentation
 ```
 
 ## Features
@@ -147,7 +148,7 @@ curl -X POST http://localhost:8080/simulate \
 # Result: Stage = "Flop", 3 community cards dealt (automatic advancement!)
 ```
 
-**For complete API documentation, see [`api/docs/README.md`](api/docs/README.md)**
+**For complete API documentation, see [`api/README.md`](api/README.md)**
 
 ## Development
 
@@ -208,7 +209,7 @@ The poker engine is fully implemented with the following components:
 - **Game**: Complete game orchestrator managing game flow
 
 For detailed documentation:
-- **Complete API & Engine Reference**: See [`api/docs/README.md`](api/docs/README.md)
+- **Complete API & Engine Reference**: See [`api/README.md`](api/README.md)
 
 ## Testing
 

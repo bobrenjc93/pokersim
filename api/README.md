@@ -183,7 +183,8 @@ Game configuration including the seed for deterministic randomness:
     "startingChips": 1000,
     "minPlayers": 2,
     "maxPlayers": 10,
-    "seed": 42
+    "seed": 42,
+    "exactCards": ["AS", "KH", "2D", "3C", "4H", ...]
   }
 }
 ```
@@ -193,6 +194,7 @@ Game configuration including the seed for deterministic randomness:
 - `smallBlind`, `bigBlind`: Blind amounts
 - `startingChips`: Initial chip stack for each player
 - `minPlayers`, `maxPlayers`: Player limits
+- `exactCards`: (Optional) Array of card strings in exact order for deterministic testing. If provided, these cards are used instead of shuffling. Useful for testing specific scenarios like split pots or specific board textures.
 
 #### 2. `history` (optional)
 
@@ -301,6 +303,48 @@ curl -X POST http://localhost:8080/simulate \
 - 📌 History grows as the game progresses - include all completed betting rounds
 - 📌 Same seed + same history = same result (deterministic replay)
 - 📌 All game state is determined by seed + history - no manual actions allowed
+
+#### Testing with Exact Cards
+
+For precise testing scenarios, you can override random shuffling by providing an `exactCards` array in the config:
+
+```bash
+curl -X POST http://localhost:8080/simulate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "config": {
+      "smallBlind": 10,
+      "bigBlind": 20,
+      "startingChips": 500,
+      "exactCards": [
+        "2H", "3D",   # Player 1 hole cards
+        "4S", "5C",   # Player 2 hole cards
+        "6H",         # Burn before flop
+        "AD", "KD", "QD",  # Flop
+        "7S",         # Burn before turn
+        "JD",         # Turn
+        "8C",         # Burn before river
+        "TD"          # River
+      ]
+    },
+    "history": [
+      {"type": "addPlayer", "playerId": "alice", "playerName": "Alice"},
+      {"type": "addPlayer", "playerId": "bob", "playerName": "Bob"}
+    ]
+  }'
+# Result: Royal flush on board - guaranteed split pot!
+```
+
+**Card Order:**
+1. Hole cards for each player (2 cards × number of players)
+2. Burn card (1)
+3. Flop (3 cards)
+4. Burn card (1)
+5. Turn (1 card)
+6. Burn card (1)
+7. River (1 card)
+
+This is especially useful for testing edge cases like split pots, specific hand matchups, or board textures.
 
 ### Player Actions
 
@@ -663,10 +707,11 @@ std::cout << "Side pots: " << pot.getSidePotCount();
 
 // At showdown, distribute to winners
 std::vector<Card> communityCards = game.getCommunityCards();
-auto winnings = pot.distributePots(players, communityCards);
+auto results = pot.distributePots(players, communityCards);
 
-for (const auto& [playerId, amount] : winnings) {
-    std::cout << playerId << " wins " << amount << " chips";
+for (const auto& result : results) {
+    std::cout << result.playerId << " wins " << result.amountWon 
+              << " chips with " << result.handRanking;
 }
 ```
 
@@ -690,16 +735,23 @@ void setMinRaise(int raise)
 // Operations
 void reset()
 void collectBets(std::vector<Player*>& players)
-std::map<std::string, int> distributePots(
+std::vector<ShowdownResult> distributePots(
     const std::vector<Player*>& players,
     const std::vector<Card>& communityCards)
 void startNewRound()
 void updateBet(int newBet, int previousBet)
 
-// SidePot structure
+// Structures
 struct SidePot {
     int amount;
     std::vector<std::string> eligiblePlayerIds;
+}
+
+struct ShowdownResult {
+    std::string playerId;
+    std::string handRanking;
+    std::vector<std::string> bestFive;  // Best 5 card hand as strings
+    int amountWon;
 }
 ```
 
@@ -762,12 +814,13 @@ Game(const GameConfig& config = GameConfig())
 
 // Configuration
 struct GameConfig {
-    int smallBlind;      // Default: 10
-    int bigBlind;        // Default: 20
-    int startingChips;   // Default: 1000
-    int minPlayers;      // Default: 2
-    int maxPlayers;      // Default: 10
-    unsigned int seed;   // Default: 0 (random)
+    int smallBlind;                    // Default: 10
+    int bigBlind;                      // Default: 20
+    int startingChips;                 // Default: 1000
+    int minPlayers;                    // Default: 2
+    int maxPlayers;                    // Default: 10
+    unsigned int seed;                 // Default: 0 (random)
+    std::vector<std::string> exactCards; // Optional: exact card order for testing
 }
 
 // Player management
@@ -913,7 +966,7 @@ std::cout << pot.getTotalPot();      // Total chips in pot
 std::cout << pot.getSidePotCount();  // Number of side pots
 
 // At showdown
-auto winnings = pot.distributePots(players, communityCards);
+auto results = pot.distributePots(players, communityCards);
 ```
 
 #### Game.h - Game Orchestrator
@@ -1074,10 +1127,10 @@ api/
 │   ├── test_hand.cpp       # Hand evaluation tests
 │   ├── test_player.cpp     # Player class tests
 │   ├── test_game.cpp       # Game integration tests
-│   └── test_stateless_api.py # Comprehensive API test suite
-├── docs/                   # Documentation
-│   └── README.md           # This file
+│   ├── test_stateless_api.py # Comprehensive API test suite
+│   └── snapshots/          # Test snapshots for regression testing
 ├── build/                  # Build artifacts (generated)
+├── README.md               # This file - complete API & engine documentation
 ├── CMakeLists.txt          # CMake build configuration
 ├── Makefile                # Simple Make build configuration
 ├── pyproject.toml          # Python project configuration for uv

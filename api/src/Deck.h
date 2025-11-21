@@ -40,6 +40,12 @@ public:
     void shuffle(unsigned int seed);
     
     /**
+     * Sets the deck to a specific order from card strings (e.g., "AS", "KH")
+     * This allows deterministic card dealing for testing
+     */
+    void setExactOrder(const std::vector<std::string>& cardStrings);
+    
+    /**
      * Deals a single card from the top of the deck
      */
     [[nodiscard]] Card dealCard();

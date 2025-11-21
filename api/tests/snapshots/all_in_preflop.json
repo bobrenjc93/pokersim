@@ -79,6 +79,35 @@
       {
         "card": "TC",
         "type": "dealRiver"
+      },
+      {
+        "players": [
+          {
+            "amountWon": 400,
+            "bestFive": [
+              "QC",
+              "AC",
+              "KC",
+              "KD",
+              "TC"
+            ],
+            "handRanking": "One Pair",
+            "playerId": "p2"
+          },
+          {
+            "amountWon": 0,
+            "bestFive": [
+              "8D",
+              "7D",
+              "KC",
+              "KD",
+              "TC"
+            ],
+            "handRanking": "One Pair",
+            "playerId": "p1"
+          }
+        ],
+        "type": "showdown"
       }
     ],
     "players": [
@@ -104,7 +133,7 @@
       {
         "bet": 0,
         "canAct": false,
-        "chips": 0,
+        "chips": 400,
         "holeCards": [
           "QC",
           "AC"
@@ -122,7 +151,7 @@
       }
     ],
     "pot": 400,
-    "stage": "River"
+    "stage": "Complete"
   },
   "success": true
 }

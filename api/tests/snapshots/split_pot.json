@@ -1,22 +1,22 @@
 {
   "gameState": {
     "communityCards": [
-      "7D",
-      "8S",
-      "JC",
+      "AD",
       "KD",
-      "KC"
+      "QD",
+      "JD",
+      "TD"
     ],
     "config": {
       "bigBlind": 20,
       "maxPlayers": 10,
       "minPlayers": 2,
-      "seed": 4001,
+      "seed": 0,
       "smallBlind": 10,
-      "startingChips": 1000
+      "startingChips": 500
     },
     "currentBet": 0,
-    "currentPlayerId": "bob",
+    "currentPlayerId": "alice",
     "dealerPosition": 1,
     "handNumber": 1,
     "history": [
@@ -32,22 +32,74 @@
       },
       {
         "cards": [
-          "5S",
-          "6H"
+          "2H",
+          "3D"
         ],
         "playerId": "alice",
         "type": "dealHoleCards"
       },
       {
         "cards": [
-          "QH",
-          "8C"
+          "4S",
+          "5C"
         ],
         "playerId": "bob",
         "type": "dealHoleCards"
       },
       {
+        "action": "raise",
+        "amount": 40,
+        "playerId": "alice",
+        "type": "playerAction"
+      },
+      {
         "action": "call",
+        "amount": 0,
+        "playerId": "bob",
+        "type": "playerAction"
+      },
+      {
+        "cards": [
+          "AD",
+          "KD",
+          "QD"
+        ],
+        "type": "dealFlop"
+      },
+      {
+        "action": "bet",
+        "amount": 100,
+        "playerId": "alice",
+        "type": "playerAction"
+      },
+      {
+        "action": "call",
+        "amount": 0,
+        "playerId": "bob",
+        "type": "playerAction"
+      },
+      {
+        "card": "JD",
+        "type": "dealTurn"
+      },
+      {
+        "action": "bet",
+        "amount": 340,
+        "playerId": "alice",
+        "type": "playerAction"
+      },
+      {
+        "action": "call",
+        "amount": 0,
+        "playerId": "bob",
+        "type": "playerAction"
+      },
+      {
+        "card": "TD",
+        "type": "dealRiver"
+      },
+      {
+        "action": "check",
         "amount": 0,
         "playerId": "alice",
         "type": "playerAction"
@@ -59,69 +111,29 @@
         "type": "playerAction"
       },
       {
-        "cards": [
-          "7D",
-          "8S",
-          "JC"
-        ],
-        "type": "dealFlop"
-      },
-      {
-        "action": "bet",
-        "amount": 50,
-        "playerId": "alice",
-        "type": "playerAction"
-      },
-      {
-        "action": "call",
-        "amount": 0,
-        "playerId": "bob",
-        "type": "playerAction"
-      },
-      {
-        "card": "KD",
-        "type": "dealTurn"
-      },
-      {
-        "action": "bet",
-        "amount": 930,
-        "playerId": "alice",
-        "type": "playerAction"
-      },
-      {
-        "action": "call",
-        "amount": 0,
-        "playerId": "bob",
-        "type": "playerAction"
-      },
-      {
-        "card": "KC",
-        "type": "dealRiver"
-      },
-      {
         "players": [
           {
-            "amountWon": 2000,
+            "amountWon": 490,
             "bestFive": [
-              "QH",
-              "8C",
-              "8S",
+              "AD",
               "KD",
-              "KC"
+              "QD",
+              "JD",
+              "TD"
             ],
-            "handRanking": "Two Pair",
+            "handRanking": "Royal Flush",
             "playerId": "bob"
           },
           {
-            "amountWon": 0,
+            "amountWon": 490,
             "bestFive": [
-              "7D",
-              "8S",
-              "JC",
+              "AD",
               "KD",
-              "KC"
+              "QD",
+              "JD",
+              "TD"
             ],
-            "handRanking": "One Pair",
+            "handRanking": "Royal Flush",
             "playerId": "alice"
           }
         ],
@@ -131,44 +143,44 @@
     "players": [
       {
         "bet": 0,
-        "canAct": false,
-        "chips": 0,
+        "canAct": true,
+        "chips": 500,
         "holeCards": [
-          "5S",
-          "6H"
+          "2H",
+          "3D"
         ],
         "id": "alice",
         "isBigBlind": false,
         "isDealer": false,
         "isInHand": true,
         "isSmallBlind": true,
-        "lastAction": "all_in",
+        "lastAction": "check",
         "name": "Alice",
         "position": 0,
-        "state": "All-in",
-        "totalBet": 1000
+        "state": "Active",
+        "totalBet": 490
       },
       {
         "bet": 0,
         "canAct": true,
-        "chips": 2000,
+        "chips": 500,
         "holeCards": [
-          "QH",
-          "8C"
+          "4S",
+          "5C"
         ],
         "id": "bob",
         "isBigBlind": true,
         "isDealer": true,
         "isInHand": true,
         "isSmallBlind": false,
-        "lastAction": "call",
+        "lastAction": "check",
         "name": "Bob",
         "position": 1,
         "state": "Active",
-        "totalBet": 1000
+        "totalBet": 490
       }
     ],
-    "pot": 2000,
+    "pot": 980,
     "stage": "Complete"
   },
   "success": true

@@ -129,7 +129,13 @@ bool Game::startHand() {
     communityCards.clear();
     pot.reset();
     deck.reset();
-    deck.shuffle(currentSeed + handNumber);
+    
+    // Use exact cards if provided, otherwise shuffle with seed
+    if (!config.exactCards.empty()) {
+        deck.setExactOrder(config.exactCards);
+    } else {
+        deck.shuffle(currentSeed + handNumber);
+    }
     
     // Reset all players
     for (auto& player : players) {
@@ -498,12 +504,36 @@ void Game::endHand() {
         int totalPot = pot.getTotalPot();
         if (totalPot > 0) {
             activePlayers[0]->winChips(totalPot);
+            
+            // Add win without showdown to history
+            history.push_back({
+                {"type", "handResult"},
+                {"winnerIds", json::array({activePlayers[0]->getId()})},
+                {"amountWon", totalPot},
+                {"showdown", false}
+            });
         }
         pot.reset();
         stage = Stage::COMPLETE;
     } else {
         // Normal showdown - distribute pots to winners based on hand evaluation
-        pot.distributePots(playerPtrs, communityCards);
+        auto showdownResults = pot.distributePots(playerPtrs, communityCards);
+        
+        // Add showdown results to history
+        json playersJson = json::array();
+        for (const auto& result : showdownResults) {
+            playersJson.push_back({
+                {"playerId", result.playerId},
+                {"handRanking", result.handRanking},
+                {"bestFive", result.bestFive},
+                {"amountWon", result.amountWon}
+            });
+        }
+        
+        history.push_back({
+            {"type", "showdown"},
+            {"players", playersJson}
+        });
         
         // Stage handling: If we reached here from advanceGame() after the River,
         // stage is already SHOWDOWN (set by advanceGame). Keep it as SHOWDOWN.

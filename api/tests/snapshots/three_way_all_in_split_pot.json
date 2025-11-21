@@ -1,0 +1,207 @@
+{
+  "gameState": {
+    "communityCards": [
+      "KH",
+      "KD",
+      "KS",
+      "QC",
+      "JD"
+    ],
+    "config": {
+      "bigBlind": 20,
+      "maxPlayers": 10,
+      "minPlayers": 3,
+      "seed": 0,
+      "smallBlind": 10,
+      "startingChips": 1000
+    },
+    "currentBet": 0,
+    "currentPlayerId": "bob",
+    "dealerPosition": 1,
+    "handNumber": 1,
+    "history": [
+      {
+        "playerId": "alice",
+        "playerName": "Alice",
+        "type": "addPlayer"
+      },
+      {
+        "playerId": "bob",
+        "playerName": "Bob",
+        "type": "addPlayer"
+      },
+      {
+        "playerId": "charlie",
+        "playerName": "Charlie",
+        "type": "addPlayer"
+      },
+      {
+        "cards": [
+          "AH",
+          "AS"
+        ],
+        "playerId": "alice",
+        "type": "dealHoleCards"
+      },
+      {
+        "cards": [
+          "2H",
+          "3H"
+        ],
+        "playerId": "bob",
+        "type": "dealHoleCards"
+      },
+      {
+        "cards": [
+          "AC",
+          "AD"
+        ],
+        "playerId": "charlie",
+        "type": "dealHoleCards"
+      },
+      {
+        "action": "raise",
+        "amount": 980,
+        "playerId": "bob",
+        "type": "playerAction"
+      },
+      {
+        "action": "raise",
+        "amount": 990,
+        "playerId": "charlie",
+        "type": "playerAction"
+      },
+      {
+        "action": "call",
+        "amount": 0,
+        "playerId": "alice",
+        "type": "playerAction"
+      },
+      {
+        "action": "call",
+        "amount": 0,
+        "playerId": "bob",
+        "type": "playerAction"
+      },
+      {
+        "cards": [
+          "KH",
+          "KD",
+          "KS"
+        ],
+        "type": "dealFlop"
+      },
+      {
+        "card": "QC",
+        "type": "dealTurn"
+      },
+      {
+        "card": "JD",
+        "type": "dealRiver"
+      },
+      {
+        "players": [
+          {
+            "amountWon": 1500,
+            "bestFive": [
+              "AC",
+              "AD",
+              "KH",
+              "KD",
+              "KS"
+            ],
+            "handRanking": "Full House",
+            "playerId": "charlie"
+          },
+          {
+            "amountWon": 0,
+            "bestFive": [
+              "KH",
+              "KD",
+              "KS",
+              "QC",
+              "JD"
+            ],
+            "handRanking": "Three of a Kind",
+            "playerId": "bob"
+          },
+          {
+            "amountWon": 1500,
+            "bestFive": [
+              "AH",
+              "AS",
+              "KH",
+              "KD",
+              "KS"
+            ],
+            "handRanking": "Full House",
+            "playerId": "alice"
+          }
+        ],
+        "type": "showdown"
+      }
+    ],
+    "players": [
+      {
+        "bet": 0,
+        "canAct": true,
+        "chips": 1500,
+        "holeCards": [
+          "AH",
+          "AS"
+        ],
+        "id": "alice",
+        "isBigBlind": true,
+        "isDealer": false,
+        "isInHand": true,
+        "isSmallBlind": false,
+        "lastAction": "call",
+        "name": "Alice",
+        "position": 0,
+        "state": "Active",
+        "totalBet": 1000
+      },
+      {
+        "bet": 0,
+        "canAct": false,
+        "chips": 0,
+        "holeCards": [
+          "2H",
+          "3H"
+        ],
+        "id": "bob",
+        "isBigBlind": false,
+        "isDealer": true,
+        "isInHand": true,
+        "isSmallBlind": false,
+        "lastAction": "call",
+        "name": "Bob",
+        "position": 1,
+        "state": "Active",
+        "totalBet": 1000
+      },
+      {
+        "bet": 0,
+        "canAct": false,
+        "chips": 1500,
+        "holeCards": [
+          "AC",
+          "AD"
+        ],
+        "id": "charlie",
+        "isBigBlind": false,
+        "isDealer": false,
+        "isInHand": true,
+        "isSmallBlind": true,
+        "lastAction": "all_in",
+        "name": "Charlie",
+        "position": 2,
+        "state": "All-in",
+        "totalBet": 1000
+      }
+    ],
+    "pot": 3000,
+    "stage": "Complete"
+  },
+  "success": true
+}

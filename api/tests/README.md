@@ -15,6 +15,7 @@ The suite includes the following test scenarios:
 3. **All-in on flop** - All-in after the flop cards are dealt
 4. **All-in on turn** - All-in after the turn card is dealt
 5. **All-in on river** - All-in on the final betting round
+6. **Split pot** - Both players have identical hands (uses `exactCards` to guarantee royal flush on board)
 
 ## Running Tests
 
@@ -99,6 +100,29 @@ All tests use fixed seeds to ensure:
 - Card dealing is deterministic
 - Same history always produces same result
 - Tests are reproducible
+
+### Exact Card Testing
+
+For scenarios requiring specific cards (like guaranteed split pots), tests can use the `exactCards` config option:
+
+```python
+payload = {
+    "config": {
+        "exactCards": [
+            "2H", "3D",  # Player 1 hole cards
+            "4S", "5C",  # Player 2 hole cards
+            "6H",        # Burn before flop
+            "AD", "KD", "QD",  # Flop
+            "7S",        # Burn before turn
+            "JD",        # Turn
+            "8C",        # Burn before river
+            "TD"         # River
+        ]
+    }
+}
+```
+
+This allows testing of edge cases without relying on finding the right seed.
 
 ### Stateless API
 
