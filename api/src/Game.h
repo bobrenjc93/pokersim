@@ -88,6 +88,7 @@ public:
     const std::vector<Card>& getCommunityCards() const noexcept { return communityCards; }
     int getPotSize() const noexcept { return pot.getTotalPot(); }
     int getCurrentBet() const noexcept { return pot.getCurrentBet(); }
+    int getMinRaise() const noexcept { return pot.getMinRaise(); }
     int getDealerPosition() const noexcept { return dealerPosition; }
     int getHandNumber() const noexcept { return handNumber; }
     const GameConfig& getConfig() const noexcept { return config; }
@@ -170,6 +171,12 @@ public:
      * Adds an event to the history (for event sourcing)
      */
     void recordEvent(const json& event);
+    
+    /**
+     * Gets action constraints for the current player
+     * Returns JSON with legal actions and their constraints
+     */
+    [[nodiscard]] json getActionConstraints() const;
 
 private:
     /**

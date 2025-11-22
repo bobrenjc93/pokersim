@@ -1,5 +1,21 @@
 {
   "gameState": {
+    "actionConstraints": {
+      "canAct": true,
+      "currentBet": 0,
+      "legalActions": [
+        "fold",
+        "check",
+        "bet",
+        "all_in"
+      ],
+      "minBet": 20,
+      "minRaise": 0,
+      "minRaiseTotal": 0,
+      "playerBet": 0,
+      "playerChips": 500,
+      "toCall": 0
+    },
     "communityCards": [
       "AD",
       "KD",
@@ -140,6 +156,7 @@
         "type": "showdown"
       }
     ],
+    "minRaise": 0,
     "players": [
       {
         "bet": 0,

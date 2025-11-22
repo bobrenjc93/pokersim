@@ -84,11 +84,15 @@ json JsonSerializer::gameToJson(const Game& game) {
         historyJson.push_back(event);
     }
     
+    // Get action constraints
+    json actionConstraints = game.getActionConstraints();
+    
     // Use initializer list for single allocation
     return json{
         {"stage", game.getStageName()},
         {"pot", game.getPotSize()},
         {"currentBet", game.getCurrentBet()},
+        {"minRaise", game.getMinRaise()},
         {"dealerPosition", game.getDealerPosition()},
         {"handNumber", game.getHandNumber()},
         {"config", {
@@ -102,6 +106,7 @@ json JsonSerializer::gameToJson(const Game& game) {
         {"communityCards", std::move(cardsJson)},
         {"currentPlayerId", std::move(currentPlayerId)},
         {"players", std::move(playersJson)},
-        {"history", std::move(historyJson)}
+        {"history", std::move(historyJson)},
+        {"actionConstraints", std::move(actionConstraints)}
     };
 }

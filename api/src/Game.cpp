@@ -573,3 +573,69 @@ bool Game::advanceGame() {
     return performStageTransition();
 }
 
+json Game::getActionConstraints() const {
+    json constraints;
+    
+    // Get current player
+    const Player* player = getCurrentPlayer();
+    if (!player || !player->canAct()) {
+        // No current player or player can't act
+        constraints["canAct"] = false;
+        constraints["legalActions"] = json::array();
+        return constraints;
+    }
+    
+    constraints["canAct"] = true;
+    
+    int currentBet = pot.getCurrentBet();
+    int playerBet = player->getBet();
+    int playerChips = player->getChips();
+    int minRaise = pot.getMinRaise();
+    
+    // Calculate key amounts
+    int toCall = currentBet - playerBet;
+    int minRaiseTotal = toCall + minRaise; // Total amount needed to raise (call + min raise)
+    
+    // Determine legal actions
+    json legalActions = json::array();
+    
+    // Can always fold
+    legalActions.push_back("fold");
+    
+    // Check or call
+    if (toCall == 0) {
+        legalActions.push_back("check");
+        // Can bet ONLY if no current bet exists in the round AND have enough for min bet
+        if (playerChips >= config.bigBlind && currentBet == 0) {
+            legalActions.push_back("bet");
+        }
+    } else {
+        // There's a bet to call
+        if (playerChips >= toCall) {
+            legalActions.push_back("call");
+            // Can raise if have enough chips beyond call
+            if (playerChips > toCall) {
+                legalActions.push_back("raise");
+            }
+        }
+    }
+    
+    // Can always go all-in if have chips
+    if (playerChips > 0) {
+        legalActions.push_back("all_in");
+    }
+    
+    constraints["legalActions"] = legalActions;
+    
+    // Add amount constraints
+    constraints["toCall"] = toCall;
+    constraints["minBet"] = config.bigBlind;
+    constraints["minRaiseTotal"] = minRaiseTotal; // Total amount to add for minimum raise
+    constraints["playerChips"] = playerChips;
+    constraints["playerBet"] = playerBet;
+    constraints["currentBet"] = currentBet;
+    constraints["minRaise"] = minRaise; // Minimum raise increment
+    
+    return constraints;
+}
+

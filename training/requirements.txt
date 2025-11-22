@@ -1,0 +1,13 @@
+# Requirements for RL training data generation and model training
+# Install with: uv pip install -r requirements.txt
+
+# Core dependencies for API communication
+requests>=2.31.0     # HTTP library for API calls (simpler and faster than curl subprocess)
+
+# Required for model training and inference
+torch>=2.0.0        # PyTorch for neural network training
+numpy>=1.24.0       # Required by PyTorch for numerical operations
+
+# System resource monitoring (used by continuous_trainer.py)
+psutil>=5.9.0       # Cross-platform system and process utilities
+

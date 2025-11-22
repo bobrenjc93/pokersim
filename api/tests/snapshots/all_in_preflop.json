@@ -1,5 +1,9 @@
 {
   "gameState": {
+    "actionConstraints": {
+      "canAct": false,
+      "legalActions": []
+    },
     "communityCards": [
       "7D",
       "5H",
@@ -110,6 +114,7 @@
         "type": "showdown"
       }
     ],
+    "minRaise": 0,
     "players": [
       {
         "bet": 0,

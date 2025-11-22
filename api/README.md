@@ -226,6 +226,7 @@ All responses follow this structure:
     "stage": "PREFLOP",
     "pot": 30,
     "currentBet": 20,
+    "minRaise": 20,
     "dealerPosition": 0,
     "handNumber": 1,
     "config": {
