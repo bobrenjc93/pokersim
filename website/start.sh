@@ -43,7 +43,6 @@ echo "🚀 Starting Flask web server..."
 echo "   Server will be available at: http://localhost:5000"
 echo ""
 
-# Activate venv and run
-source .venv/bin/activate
-python app.py
+# Run with uv
+uv run python app.py
 

@@ -31,6 +31,15 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 
 # =============================================================================
+# Model Version Management
+# =============================================================================
+
+# Model architecture versions
+MODEL_VERSION_LEGACY = 1  # Feed-forward network (PokerNet)
+MODEL_VERSION_TRANSFORMER = 2  # Transformer-based network (PokerTransformer)
+MODEL_VERSION_CURRENT = MODEL_VERSION_TRANSFORMER  # Default for new models
+
+# =============================================================================
 # Feature Encoding
 # =============================================================================
 
@@ -43,9 +52,30 @@ SUIT_MAP = {'C': 0, 'D': 1, 'H': 2, 'S': 3}
 # Stage mapping
 STAGE_MAP = {'Preflop': 0, 'Flop': 1, 'Turn': 2, 'River': 3, 'Complete': 4}
 
-# Action mapping
-ACTION_MAP = {'fold': 0, 'check': 1, 'call': 2, 'bet': 3, 'raise': 4, 'all_in': 5}
-ACTION_NAMES = ['fold', 'check', 'call', 'bet', 'raise', 'all_in']
+# Action mapping with granular bet sizing
+# Bet/Raise sizes as percentages of pot: 10%, 25%, 33%, 50%, 75%, 100%, 150%, 200%, 300%
+ACTION_MAP = {
+    'fold': 0, 'check': 1, 'call': 2,
+    'bet_10%': 3, 'bet_25%': 4, 'bet_33%': 5, 'bet_50%': 6, 'bet_75%': 7,
+    'bet_100%': 8, 'bet_150%': 9, 'bet_200%': 10, 'bet_300%': 11,
+    'raise_10%': 12, 'raise_25%': 13, 'raise_33%': 14, 'raise_50%': 15, 'raise_75%': 16,
+    'raise_100%': 17, 'raise_150%': 18, 'raise_200%': 19, 'raise_300%': 20,
+    'all_in': 21
+}
+ACTION_NAMES = [
+    'fold', 'check', 'call',
+    'bet_10%', 'bet_25%', 'bet_33%', 'bet_50%', 'bet_75%', 'bet_100%', 'bet_150%', 'bet_200%', 'bet_300%',
+    'raise_10%', 'raise_25%', 'raise_33%', 'raise_50%', 'raise_75%', 'raise_100%', 'raise_150%', 'raise_200%', 'raise_300%',
+    'all_in'
+]
+
+# Bet size percentages for each action (as fraction of pot)
+BET_SIZE_MAP = {
+    'bet_10%': 0.10, 'bet_25%': 0.25, 'bet_33%': 0.33, 'bet_50%': 0.50, 'bet_75%': 0.75,
+    'bet_100%': 1.0, 'bet_150%': 1.5, 'bet_200%': 2.0, 'bet_300%': 3.0,
+    'raise_10%': 0.10, 'raise_25%': 0.25, 'raise_33%': 0.33, 'raise_50%': 0.50, 'raise_75%': 0.75,
+    'raise_100%': 1.0, 'raise_150%': 1.5, 'raise_200%': 2.0, 'raise_300%': 3.0,
+}
 
 
 def encode_card(card: str) -> tuple[int, int]:
@@ -150,18 +180,175 @@ def encode_state(state: dict[str, Any]) -> torch.Tensor:
     return torch.tensor(features, dtype=torch.float32)
 
 
-def encode_action(action: dict[str, Any]) -> int:
+def get_bet_size_bucket(amount: int, pot: int, min_amount: int, max_amount: int, is_bet: bool) -> str:
+    """
+    Determine which bet size bucket an amount falls into.
+    
+    Args:
+        amount: The bet/raise amount
+        pot: Current pot size
+        min_amount: Minimum legal bet/raise amount
+        max_amount: Maximum legal bet/raise amount (player chips)
+        is_bet: True if this is a bet, False if it's a raise
+    
+    Returns:
+        Action label (e.g., 'bet_50%', 'raise_100%')
+    """
+    # All-in case (at or very close to max)
+    if amount >= max_amount * 0.98:  # Within 2% of max is considered all-in
+        return 'all_in'
+    
+    # Avoid division by zero
+    if pot <= 0:
+        pot = min_amount  # Use minimum as fallback
+    
+    # Calculate as percentage of pot
+    pot_fraction = amount / pot
+    
+    # Define bet size buckets (sorted)
+    buckets = [(0.10, '10%'), (0.25, '25%'), (0.33, '33%'), (0.50, '50%'), (0.75, '75%'),
+               (1.0, '100%'), (1.5, '150%'), (2.0, '200%'), (3.0, '300%')]
+    
+    # Find closest bucket
+    best_bucket = buckets[-1][1]  # Default to largest
+    min_diff = float('inf')
+    
+    for threshold, bucket_name in buckets:
+        diff = abs(pot_fraction - threshold)
+        if diff < min_diff:
+            min_diff = diff
+            best_bucket = bucket_name
+    
+    prefix = 'bet_' if is_bet else 'raise_'
+    return prefix + best_bucket
+
+
+def encode_action(action: dict[str, Any], state: dict[str, Any] = None) -> int:
     """
     Convert action dictionary to action index.
     
     Args:
         action: Action dictionary with 'action' key
+        state: Optional state dictionary for bet sizing context
     
     Returns:
-        Action index (0-5)
+        Action index (0-21)
     """
+    # Check if we have a granular action label (e.g., 'bet_50%', 'raise_100%')
+    action_label = action.get('action_label')
+    if action_label and action_label in ACTION_MAP:
+        return ACTION_MAP[action_label]
+    
+    # Get basic action type
     action_type = action.get('action', 'fold')
+    
+    # For bet/raise actions, determine the size bucket
+    if action_type in ['bet', 'raise'] and state is not None:
+        amount = action.get('amount', 0)
+        pot = state.get('pot', 0)
+        player_chips = state.get('player_chips', 0)
+        
+        if action_type == 'bet':
+            min_bet = state.get('min_bet', state.get('big_blind', 20))
+            action_label = get_bet_size_bucket(amount, pot, min_bet, player_chips, is_bet=True)
+        else:  # raise
+            min_raise_total = state.get('min_raise_total', state.get('big_blind', 20))
+            action_label = get_bet_size_bucket(amount, pot, min_raise_total, player_chips, is_bet=False)
+        
+        if action_label in ACTION_MAP:
+            return ACTION_MAP[action_label]
+    
+    # Fall back to direct mapping (fold, check, call, all_in)
     return ACTION_MAP.get(action_type, 0)
+
+
+# =============================================================================
+# Adaptive Training Scheduler
+# =============================================================================
+
+class AdaptiveDataScheduler:
+    """
+    Manages progressive dataset growth during training.
+    Starts with a small subset of data and increases when validation loss plateaus.
+    """
+    
+    def __init__(self, total_samples: int, initial_fraction: float = 0.1, 
+                 growth_factor: float = 1.5, plateau_patience: int = 5,
+                 plateau_threshold: float = 0.001):
+        """
+        Args:
+            total_samples: Total number of available samples
+            initial_fraction: Initial fraction of data to use (0.0-1.0)
+            growth_factor: Multiply current size by this when growing
+            plateau_patience: Epochs without improvement before growing dataset
+            plateau_threshold: Minimum improvement to not be considered plateaued
+        """
+        self.total_samples = total_samples
+        self.initial_fraction = max(0.01, min(1.0, initial_fraction))
+        self.growth_factor = max(1.1, growth_factor)
+        self.plateau_patience = plateau_patience
+        self.plateau_threshold = plateau_threshold
+        
+        # Start with initial fraction, but at least 100 samples or 1% of data
+        self.current_size = max(
+            100,
+            int(total_samples * self.initial_fraction)
+        )
+        self.current_size = min(self.current_size, total_samples)
+        
+        # Track validation loss history
+        self.best_val_loss = float('inf')
+        self.epochs_without_improvement = 0
+        self.growth_history = [self.current_size]
+        
+    def get_current_size(self) -> int:
+        """Get current dataset size to use"""
+        return self.current_size
+    
+    def get_progress(self) -> float:
+        """Get progress through curriculum (0.0 to 1.0)"""
+        return self.current_size / self.total_samples
+    
+    def update(self, val_loss: float) -> bool:
+        """
+        Update scheduler with validation loss.
+        
+        Args:
+            val_loss: Current validation loss
+            
+        Returns:
+            True if dataset size was increased, False otherwise
+        """
+        # Check if we improved
+        if val_loss < self.best_val_loss - self.plateau_threshold:
+            self.best_val_loss = val_loss
+            self.epochs_without_improvement = 0
+            return False
+        
+        # No improvement
+        self.epochs_without_improvement += 1
+        
+        # Check if we should grow dataset
+        if self.epochs_without_improvement >= self.plateau_patience:
+            # Only grow if we haven't reached full dataset yet
+            if self.current_size < self.total_samples:
+                new_size = int(self.current_size * self.growth_factor)
+                new_size = min(new_size, self.total_samples)
+                
+                if new_size > self.current_size:
+                    print(f"\n📈 Validation loss plateaued. Growing dataset:")
+                    print(f"   {self.current_size:,} → {new_size:,} samples ({new_size/self.total_samples*100:.1f}% of total)")
+                    
+                    self.current_size = new_size
+                    self.growth_history.append(new_size)
+                    self.epochs_without_improvement = 0
+                    return True
+        
+        return False
+    
+    def is_at_full_size(self) -> bool:
+        """Check if using full dataset"""
+        return self.current_size >= self.total_samples
 
 
 # =============================================================================
@@ -194,7 +381,7 @@ class PokerDataset(Dataset):
                 # Only keep if the action is for the same player as the state
                 if state.get('player_id') == action.get('playerId'):
                     state_tensor = encode_state(state)
-                    action_idx = encode_action(action)
+                    action_idx = encode_action(action, state)  # Pass state for bet sizing context
                     self.samples.append((state_tensor, action_idx))
     
     def __len__(self):
@@ -300,7 +487,7 @@ class PokerTransformer(nn.Module):
             nn.Linear(hidden_dim // 2, hidden_dim // 4),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 4, 6)  # 6 possible actions
+            nn.Linear(hidden_dim // 4, 22)  # 22 possible actions (including granular bet sizes)
         )
     
     def forward(self, x):
@@ -396,7 +583,7 @@ class PokerNet(nn.Module):
             nn.Linear(hidden_dim // 2, hidden_dim // 4),
             nn.ReLU(),
             nn.Dropout(0.2),
-            nn.Linear(hidden_dim // 4, 6)  # 6 possible actions
+            nn.Linear(hidden_dim // 4, 22)  # 22 possible actions (including granular bet sizes)
         )
     
     def forward(self, x):
@@ -506,7 +693,7 @@ def validate_model(
     return avg_loss, accuracy
 
 
-def main():
+def main() -> int:
     """Main training function"""
     parser = argparse.ArgumentParser(
         description="Train a poker action prediction model from rollout data"
@@ -514,7 +701,7 @@ def main():
     
     parser.add_argument('--data', type=str, default='data/quickstart_rollouts.json',
                        help='Path to rollout data JSON file or directory of JSON files')
-    parser.add_argument('--output', type=str, default='/tmp/models/poker_model.pt',
+    parser.add_argument('--output', type=str, default='/tmp/pokersim/models/poker_model.pt',
                        help='Output path for trained model')
     parser.add_argument('--epochs', type=int, default=50,
                        help='Number of training epochs')
@@ -536,8 +723,21 @@ def main():
                        help='Early stopping patience (epochs without improvement)')
     parser.add_argument('--checkpoint', type=str, default=None,
                        help='Path to checkpoint to resume training from')
-    parser.add_argument('--use-legacy-model', action='store_true',
-                       help='Use legacy feed-forward model instead of transformer')
+    parser.add_argument('--model-version', type=int, default=MODEL_VERSION_CURRENT,
+                       choices=[MODEL_VERSION_LEGACY, MODEL_VERSION_TRANSFORMER],
+                       help=f'Model architecture version (1=legacy feed-forward, 2=transformer, default={MODEL_VERSION_CURRENT})')
+    
+    # Adaptive training schedule
+    parser.add_argument('--adaptive-schedule', action='store_true',
+                       help='Enable adaptive training schedule (start small, grow as loss plateaus)')
+    parser.add_argument('--initial-data-fraction', type=float, default=0.1,
+                       help='Initial fraction of data to train on (default: 0.1)')
+    parser.add_argument('--data-growth-factor', type=float, default=1.5,
+                       help='Factor to grow dataset by when plateauing (default: 1.5)')
+    parser.add_argument('--plateau-patience', type=int, default=5,
+                       help='Epochs without improvement before increasing data size (default: 5)')
+    parser.add_argument('--plateau-threshold', type=float, default=0.001,
+                       help='Minimum improvement to not be considered plateaued (default: 0.001)')
     
     args = parser.parse_args()
     
@@ -572,50 +772,96 @@ def main():
         with open(data_path, 'r') as f:
             rollouts = json.load(f)
     
-    # Create dataset
-    dataset = PokerDataset(rollouts)
+    # Create full dataset
+    full_dataset = PokerDataset(rollouts)
     
-    if len(dataset) == 0:
+    if len(full_dataset) == 0:
         print("✗ Error: No training samples found")
         return 1
     
-    feature_dim = dataset.get_feature_dim()
+    feature_dim = full_dataset.get_feature_dim()
     
-    # Split into train/val (80/20)
-    train_size = int(0.8 * len(dataset))
-    val_size = len(dataset) - train_size
-    train_dataset, val_dataset = torch.utils.data.random_split(
-        dataset, [train_size, val_size]
-    )
+    print(f"✓ Loaded {len(rollouts)} rollouts ({len(full_dataset)} state-action pairs)")
     
-    print(f"✓ Loaded {len(rollouts)} rollouts ({len(dataset)} state-action pairs)")
+    # Setup adaptive scheduler if enabled
+    adaptive_scheduler = None
+    if args.adaptive_schedule:
+        adaptive_scheduler = AdaptiveDataScheduler(
+            total_samples=len(full_dataset),
+            initial_fraction=args.initial_data_fraction,
+            growth_factor=args.data_growth_factor,
+            plateau_patience=args.plateau_patience,
+            plateau_threshold=args.plateau_threshold
+        )
+        print(f"\n🎯 Adaptive training schedule enabled:")
+        print(f"   Starting with {adaptive_scheduler.get_current_size():,} samples ({adaptive_scheduler.get_progress()*100:.1f}%)")
+        print(f"   Will grow by {args.data_growth_factor}x when loss plateaus")
+    
+    # Helper function to create dataloaders with current curriculum size
+    def create_dataloaders(dataset, current_size=None):
+        """Create train/val dataloaders, optionally with a subset of data"""
+        if current_size is None or current_size >= len(dataset):
+            # Use full dataset
+            working_dataset = dataset
+        else:
+            # Use subset
+            indices = list(range(len(dataset)))
+            import random
+            random.shuffle(indices)
+            subset_indices = indices[:current_size]
+            working_dataset = torch.utils.data.Subset(dataset, subset_indices)
+        
+        # Split into train/val (80/20)
+        train_size = int(0.8 * len(working_dataset))
+        val_size = len(working_dataset) - train_size
+        train_dataset, val_dataset = torch.utils.data.random_split(
+            working_dataset, [train_size, val_size]
+        )
+        
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=0
+        )
+        
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=0
+        )
+        
+        return train_loader, val_loader, train_size, val_size
+    
+    # Create initial dataloaders
+    if adaptive_scheduler:
+        train_loader, val_loader, train_size, val_size = create_dataloaders(
+            full_dataset, adaptive_scheduler.get_current_size()
+        )
+    else:
+        train_loader, val_loader, train_size, val_size = create_dataloaders(full_dataset)
+    
     print(f"✓ Train samples: {train_size}, Validation samples: {val_size}")
     
-    # Create data loaders
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=0
-    )
-    
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=0
-    )
-    
-    # Setup device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"✓ Using device: {device}")
-    
-    # Create model
-    if args.use_legacy_model:
-        print("Using legacy feed-forward model")
-        model = PokerNet(input_dim=feature_dim, hidden_dim=args.hidden_dim)
+    # Setup device (prioritize CUDA, then MPS, then CPU)
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+        print(f"✓ Using device: CUDA (GPU)")
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        device = torch.device('mps')
+        print(f"✓ Using device: MPS (Apple Silicon GPU)")
     else:
-        print("Using transformer-based model")
+        device = torch.device('cpu')
+        print(f"✓ Using device: CPU")
+    print(f"  Device: {device}")
+    
+    # Create model based on version
+    if args.model_version == MODEL_VERSION_LEGACY:
+        print(f"Using model version {MODEL_VERSION_LEGACY}: Legacy feed-forward network")
+        model = PokerNet(input_dim=feature_dim, hidden_dim=args.hidden_dim)
+    elif args.model_version == MODEL_VERSION_TRANSFORMER:
+        print(f"Using model version {MODEL_VERSION_TRANSFORMER}: Transformer-based network")
         model = PokerTransformer(
             input_dim=feature_dim, 
             hidden_dim=args.hidden_dim,
@@ -623,6 +869,8 @@ def main():
             num_layers=args.num_layers,
             dropout=args.dropout
         )
+    else:
+        raise ValueError(f"Unknown model version: {args.model_version}")
     model = model.to(device)
     
     # Count parameters
@@ -644,12 +892,17 @@ def main():
             print(f"\n📂 Loading checkpoint from: {checkpoint_path}")
             checkpoint = torch.load(checkpoint_path, map_location=device)
             
-            # Check if checkpoint matches model type
-            checkpoint_model_type = checkpoint.get('model_type', 'legacy')
-            current_model_type = 'legacy' if args.use_legacy_model else 'transformer'
+            # Check if checkpoint model version matches current version
+            # Handle legacy checkpoints that used 'model_type' string
+            if 'model_version' in checkpoint:
+                checkpoint_version = checkpoint['model_version']
+            else:
+                # Legacy checkpoint compatibility
+                checkpoint_model_type = checkpoint.get('model_type', 'legacy')
+                checkpoint_version = MODEL_VERSION_LEGACY if checkpoint_model_type == 'legacy' else MODEL_VERSION_TRANSFORMER
             
-            if checkpoint_model_type != current_model_type:
-                print(f"⚠️  Warning: Checkpoint is {checkpoint_model_type} but current model is {current_model_type}")
+            if checkpoint_version != args.model_version:
+                print(f"⚠️  Warning: Checkpoint is model version {checkpoint_version} but current model is version {args.model_version}")
                 print(f"   Starting training from scratch with new architecture")
             else:
                 try:
@@ -668,49 +921,104 @@ def main():
     if start_epoch > 1:
         print(f"  Continuing from epoch {start_epoch}")
 
+    current_epoch = start_epoch
+    total_epochs_run = 0
+    max_total_epochs = args.epochs * 5  # Safety limit to prevent infinite training
     
-    for epoch in range(start_epoch, start_epoch + args.epochs):
-        train_loss, train_acc = train_model(model, train_loader, optimizer, criterion, device, epoch, start_epoch + args.epochs - 1)
-        val_loss, val_acc = validate_model(model, val_loader, criterion, device)
-        
-        print(f"Epoch {epoch}/{start_epoch + args.epochs - 1} - Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}% | Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%", flush=True)
-        
-        # Save best model based on validation loss
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            epochs_without_improvement = 0
-            output_path = Path(args.output) if Path(args.output).is_absolute() else Path(__file__).parent / args.output
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Save model state and metadata
-            checkpoint_data = {
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'train_loss': train_loss,
-                'val_loss': val_loss,
-                'feature_dim': feature_dim,
-                'hidden_dim': args.hidden_dim,
-                'action_names': ACTION_NAMES,
-                'model_type': 'legacy' if args.use_legacy_model else 'transformer',
-            }
-            
-            # Add transformer-specific parameters if using transformer
-            if not args.use_legacy_model:
-                checkpoint_data.update({
-                    'num_heads': args.num_heads,
-                    'num_layers': args.num_layers,
-                    'dropout': args.dropout,
-                })
-            
-            torch.save(checkpoint_data, output_path)
-            
-            print(f"  → Best model saved (val loss: {best_val_loss:.4f})", flush=True)
+    while total_epochs_run < max_total_epochs:
+        # Determine how many epochs to run in this phase
+        if adaptive_scheduler and not adaptive_scheduler.is_at_full_size():
+            # When using adaptive schedule, run fewer epochs per phase
+            epochs_this_phase = min(args.epochs, max_total_epochs - total_epochs_run)
         else:
-            epochs_without_improvement += 1
-            if epochs_without_improvement >= args.early_stopping_patience:
-                print(f"\n  ⚠️  Early stopping triggered after {epoch} epochs (no improvement for {args.early_stopping_patience} epochs)")
+            # Regular training or at full dataset size
+            epochs_this_phase = args.epochs
+        
+        phase_end_epoch = current_epoch + epochs_this_phase
+        
+        for epoch in range(current_epoch, phase_end_epoch):
+            train_loss, train_acc = train_model(model, train_loader, optimizer, criterion, device, epoch, phase_end_epoch - 1)
+            val_loss, val_acc = validate_model(model, val_loader, criterion, device)
+            
+            # Progress indicator for adaptive schedule
+            if adaptive_scheduler:
+                progress_str = f" [Data: {adaptive_scheduler.get_progress()*100:.0f}%]"
+            else:
+                progress_str = ""
+            
+            print(f"Epoch {epoch}/{phase_end_epoch - 1}{progress_str} - Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}% | Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%", flush=True)
+            
+            # Save best model based on validation loss
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                epochs_without_improvement = 0
+                output_path = Path(args.output) if Path(args.output).is_absolute() else Path(__file__).parent / args.output
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                # Save model state and metadata
+                checkpoint_data = {
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'train_loss': train_loss,
+                    'val_loss': val_loss,
+                    'feature_dim': feature_dim,
+                    'hidden_dim': args.hidden_dim,
+                    'action_names': ACTION_NAMES,
+                    'model_version': args.model_version,
+                }
+                
+                # Add version-specific parameters
+                if args.model_version == MODEL_VERSION_TRANSFORMER:
+                    checkpoint_data.update({
+                        'num_heads': args.num_heads,
+                        'num_layers': args.num_layers,
+                        'dropout': args.dropout,
+                    })
+                
+                torch.save(checkpoint_data, output_path)
+                
+                print(f"  → Best model saved (val loss: {best_val_loss:.4f})", flush=True)
+            else:
+                epochs_without_improvement += 1
+                # Only trigger early stopping if not using adaptive schedule or already at full size
+                if (not adaptive_scheduler or adaptive_scheduler.is_at_full_size()) and \
+                   epochs_without_improvement >= args.early_stopping_patience:
+                    print(f"\n  ⚠️  Early stopping triggered after {epoch} epochs (no improvement for {args.early_stopping_patience} epochs)")
+                    total_epochs_run = max_total_epochs  # Exit outer loop too
+                    break
+            
+            # Update adaptive scheduler if enabled
+            if adaptive_scheduler:
+                dataset_grew = adaptive_scheduler.update(val_loss)
+                
+                if dataset_grew:
+                    # Recreate dataloaders with new dataset size
+                    train_loader, val_loader, train_size, val_size = create_dataloaders(
+                        full_dataset, adaptive_scheduler.get_current_size()
+                    )
+                    print(f"   New split - Train: {train_size:,}, Val: {val_size:,}")
+                    
+                    # Reset improvement counter when we grow dataset
+                    epochs_without_improvement = 0
+                    
+                    # Break to start new phase with larger dataset
+                    current_epoch = epoch + 1
+                    total_epochs_run += (epoch - current_epoch + epochs_this_phase)
+                    break
+        else:
+            # Completed this phase normally (no break)
+            total_epochs_run += epochs_this_phase
+            current_epoch = phase_end_epoch
+            
+            # If not using adaptive schedule or at full size, we're done
+            if not adaptive_scheduler or adaptive_scheduler.is_at_full_size():
                 break
+        
+        # Safety check
+        if total_epochs_run >= max_total_epochs:
+            print(f"\n  ⚠️  Reached maximum epochs ({max_total_epochs})")
+            break
     
     print(f"\n✓ Training complete! Best validation loss: {best_val_loss:.4f}")
     print(f"  Model saved to: {args.output}")

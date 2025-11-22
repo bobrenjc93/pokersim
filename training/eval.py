@@ -13,8 +13,8 @@ Prerequisites:
 - Running API server
 
 Usage:
-    python eval.py --model /tmp/models/poker_model.pt
-    python eval.py --model /tmp/models/poker_model.pt --num-hands 100 --num-players 2
+    python eval.py --model /tmp/pokersim/models/poker_model.pt
+    python eval.py --model /tmp/pokersim/models/poker_model.pt --num-hands 100 --num-players 2
 """
 
 import argparse
@@ -32,7 +32,11 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 # Import from train.py
-from train import PokerNet, PokerTransformer, PokerDataset, encode_state, encode_action, ACTION_NAMES
+from train import (PokerNet, PokerTransformer, PokerDataset, encode_state, encode_action, 
+                   ACTION_NAMES, BET_SIZE_MAP, MODEL_VERSION_LEGACY, MODEL_VERSION_TRANSFORMER)
+
+# Import model version from config
+from config import MODEL_VERSION
 
 # Import agent classes from generate_rollouts
 try:
@@ -73,7 +77,7 @@ class ModelAgent:
         self.name = name
         self.model.eval()
     
-    def select_action(self, state: dict[str, Any], legal_actions: list[str]) -> tuple[str, int]:
+    def select_action(self, state: dict[str, Any], legal_actions: list[str]) -> tuple[str, int, str]:
         """
         Select an action using the trained model.
         
@@ -82,10 +86,10 @@ class ModelAgent:
             legal_actions: List of legal action strings
         
         Returns:
-            tuple: (action_type, amount)
+            tuple: (action_type, amount, action_label)
         """
         if not legal_actions:
-            return ("fold", 0)
+            return ("fold", 0, "fold")
         
         # Encode the state
         state_tensor = encode_state(state).unsqueeze(0).to(self.device)
@@ -95,47 +99,76 @@ class ModelAgent:
             outputs = self.model(state_tensor)
             probs = torch.softmax(outputs, dim=1)
             
-            # Get action probabilities for legal actions only
-            legal_action_probs = []
-            legal_action_indices = []
+            # Build mapping of legal actions to granular actions
+            # For bet/raise, we need to consider all size variants
+            legal_granular_actions = []
+            legal_granular_probs = []
             
             for action_str in legal_actions:
-                if action_str in ACTION_NAMES:
-                    action_idx = ACTION_NAMES.index(action_str)
-                    legal_action_probs.append(probs[0, action_idx].item())
-                    legal_action_indices.append(action_idx)
+                if action_str == 'bet':
+                    # Consider all bet size variants
+                    for action_name in ACTION_NAMES:
+                        if action_name.startswith('bet_'):
+                            action_idx = ACTION_NAMES.index(action_name)
+                            legal_granular_actions.append(action_name)
+                            legal_granular_probs.append(probs[0, action_idx].item())
+                elif action_str == 'raise':
+                    # Consider all raise size variants
+                    for action_name in ACTION_NAMES:
+                        if action_name.startswith('raise_'):
+                            action_idx = ACTION_NAMES.index(action_name)
+                            legal_granular_actions.append(action_name)
+                            legal_granular_probs.append(probs[0, action_idx].item())
+                else:
+                    # Direct action (fold, check, call, all_in)
+                    if action_str in ACTION_NAMES:
+                        action_idx = ACTION_NAMES.index(action_str)
+                        legal_granular_actions.append(action_str)
+                        legal_granular_probs.append(probs[0, action_idx].item())
             
             # If no legal actions match our action space, pick randomly
-            if not legal_action_probs:
-                action_type = random.choice(legal_actions)
+            if not legal_granular_probs:
+                action_label = random.choice(legal_actions)
             else:
                 # Choose the legal action with highest probability
-                best_idx = legal_action_probs.index(max(legal_action_probs))
-                action_idx = legal_action_indices[best_idx]
-                action_type = ACTION_NAMES[action_idx]
+                best_idx = legal_granular_probs.index(max(legal_granular_probs))
+                action_label = legal_granular_actions[best_idx]
         
-        # Calculate amount for bet/raise
+        # Parse the action label to determine type and amount
         amount = 0
-        if action_type == "raise":
-            min_raise_total = state.get('min_raise_total', state.get('big_blind', 20))
-            max_raise = state['player_chips']
-            if max_raise >= min_raise_total:
-                # Raise to about 2x minimum
-                amount = min(max_raise, min_raise_total * 2)
-            else:
-                amount = max_raise
         
-        elif action_type == "bet":
+        if action_label.startswith('bet_'):
+            action_type = 'bet'
+            pot = state.get('pot', 0)
             min_bet = state.get('min_bet', state.get('big_blind', 20))
             max_bet = state['player_chips']
+            
+            # Get size fraction from label
+            size_fraction = BET_SIZE_MAP.get(action_label, 0.5)
+            target = int(pot * size_fraction)
+            amount = max(min_bet, min(max_bet, target))
+            
+        elif action_label.startswith('raise_'):
+            action_type = 'raise'
             pot = state.get('pot', 0)
-            if max_bet >= min_bet:
-                # Bet about half pot
-                amount = max(min_bet, min(max_bet, pot // 2))
-            else:
-                amount = max_bet
+            min_raise_total = state.get('min_raise_total', state.get('big_blind', 20))
+            max_raise = state['player_chips']
+            
+            # Get size fraction from label
+            size_fraction = BET_SIZE_MAP.get(action_label, 1.0)
+            target = int(pot * size_fraction)
+            amount = max(min_raise_total, min(max_raise, target))
+            
+        elif action_label == 'all_in':
+            action_type = 'all_in'
+            amount = state['player_chips']
+            
+        else:
+            # fold, check, call
+            action_type = action_label
+            amount = 0
         
-        return (action_type, amount)
+        return (action_type, amount, action_label)
 
 
 # =============================================================================
@@ -145,7 +178,7 @@ class ModelAgent:
 class EvaluationMetrics:
     """Track and compute evaluation metrics"""
     
-    def __init__(self, num_actions: int = 6):
+    def __init__(self, num_actions: int = 22):
         self.num_actions = num_actions
         self.reset()
     
@@ -291,7 +324,7 @@ def evaluate_model(
         EvaluationMetrics object with results
     """
     model.eval()
-    metrics = EvaluationMetrics(num_actions=6)
+    metrics = EvaluationMetrics(num_actions=22)
     
     with torch.no_grad():
         for batch_idx, (states, actions) in enumerate(test_loader):
@@ -439,14 +472,14 @@ def play_vs_random(
 # Main
 # =============================================================================
 
-def main():
+def main() -> int:
     """Main evaluation function"""
     parser = argparse.ArgumentParser(
         description="Evaluate a trained poker model by playing against random agents"
     )
     
-    parser.add_argument('--model', type=str, default='/tmp/models/poker_model.pt',
-                       help='Path to trained model')
+    parser.add_argument('--model', type=str, default=f'/tmp/pokersim/models_v{MODEL_VERSION}/poker_model.pt',
+                       help=f'Path to trained model (default: /tmp/pokersim/models_v{MODEL_VERSION}/poker_model.pt)')
     parser.add_argument('--num-hands', type=int, default=100,
                        help='Number of hands to play (default: 100)')
     parser.add_argument('--num-players', type=int, default=2,
@@ -482,31 +515,53 @@ def main():
     checkpoint = torch.load(model_path, map_location='cpu')
     feature_dim = checkpoint['feature_dim']
     hidden_dim = checkpoint['hidden_dim']
-    model_type = checkpoint.get('model_type', 'legacy')
+    
+    # Get model version (handle legacy checkpoints)
+    if 'model_version' in checkpoint:
+        model_version = checkpoint['model_version']
+    else:
+        # Legacy checkpoint compatibility
+        model_type = checkpoint.get('model_type', 'legacy')
+        model_version = MODEL_VERSION_LEGACY if model_type == 'legacy' else MODEL_VERSION_TRANSFORMER
+    
+    # Version name for display
+    version_names = {
+        MODEL_VERSION_LEGACY: "Legacy (feed-forward)",
+        MODEL_VERSION_TRANSFORMER: "Transformer"
+    }
+    version_name = version_names.get(model_version, f"Unknown (v{model_version})")
     
     print(f"✓ Model metadata:")
-    print(f"  - Model type: {model_type}")
+    print(f"  - Model version: {model_version} ({version_name})")
     print(f"  - Feature dim: {feature_dim}")
     print(f"  - Hidden dim: {hidden_dim}")
     print(f"  - Trained epoch: {checkpoint['epoch']}")
     if 'val_loss' in checkpoint:
         print(f"  - Validation loss: {checkpoint['val_loss']:.4f}")
     
-    # Print transformer-specific parameters
-    if model_type == 'transformer':
+    # Print version-specific parameters
+    if model_version == MODEL_VERSION_TRANSFORMER:
         print(f"  - Transformer layers: {checkpoint.get('num_layers', 4)}")
         print(f"  - Attention heads: {checkpoint.get('num_heads', 8)}")
         print(f"  - Dropout: {checkpoint.get('dropout', 0.1)}")
     print()
     
-    # Setup device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"✓ Using device: {device}")
+    # Setup device (prioritize CUDA, then MPS, then CPU)
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+        print(f"✓ Using device: CUDA (GPU)")
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        device = torch.device('mps')
+        print(f"✓ Using device: MPS (Apple Silicon GPU)")
+    else:
+        device = torch.device('cpu')
+        print(f"✓ Using device: CPU")
+    print(f"  Device: {device}")
     print()
     
-    # Create and load model
+    # Create and load model based on version
     print("Loading model weights...")
-    if model_type == 'transformer':
+    if model_version == MODEL_VERSION_TRANSFORMER:
         model = PokerTransformer(
             input_dim=feature_dim, 
             hidden_dim=hidden_dim,
@@ -514,8 +569,11 @@ def main():
             num_layers=checkpoint.get('num_layers', 4),
             dropout=checkpoint.get('dropout', 0.1)
         )
-    else:
+    elif model_version == MODEL_VERSION_LEGACY:
         model = PokerNet(input_dim=feature_dim, hidden_dim=hidden_dim)
+    else:
+        print(f"✗ Error: Unknown model version {model_version}")
+        return 1
     
     model.load_state_dict(checkpoint['model_state_dict'])
     model = model.to(device)

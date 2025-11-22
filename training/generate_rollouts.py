@@ -39,6 +39,9 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+# Import model version from config
+from config import MODEL_VERSION
+
 try:
     import requests
     HAS_REQUESTS = True
@@ -71,6 +74,49 @@ def print_header(msg: str):
 
 
 # =============================================================================
+# Bet Sizing Utilities
+# =============================================================================
+
+# Granular bet size buckets as percentages of pot
+BET_SIZE_BUCKETS = [0.10, 0.25, 0.33, 0.50, 0.75, 1.0, 1.5, 2.0, 3.0]
+BET_SIZE_LABELS = ['10%', '25%', '33%', '50%', '75%', '100%', '150%', '200%', '300%']
+
+
+def calculate_bet_amount(pot: int, size_fraction: float, min_amount: int, max_amount: int) -> int:
+    """
+    Calculate bet amount based on pot size and constraints.
+    
+    Args:
+        pot: Current pot size
+        size_fraction: Fraction of pot to bet (e.g., 0.5 for 50%)
+        min_amount: Minimum legal bet/raise
+        max_amount: Maximum bet/raise (player chips)
+    
+    Returns:
+        Bet amount within legal constraints
+    """
+    # Calculate target amount
+    target = int(pot * size_fraction)
+    
+    # Enforce constraints
+    amount = max(min_amount, target)
+    amount = min(max_amount, amount)
+    
+    return amount
+
+
+def select_random_bet_size() -> tuple[float, str]:
+    """
+    Randomly select a bet size from the granular buckets.
+    
+    Returns:
+        Tuple of (size_fraction, label)
+    """
+    idx = random.randint(0, len(BET_SIZE_BUCKETS) - 1)
+    return BET_SIZE_BUCKETS[idx], BET_SIZE_LABELS[idx]
+
+
+# =============================================================================
 # Agent Implementations
 # =============================================================================
 
@@ -81,7 +127,7 @@ class Agent:
         self.player_id = player_id
         self.name = name
     
-    def select_action(self, state: dict[str, Any], legal_actions: list[str]) -> tuple[str, int]:
+    def select_action(self, state: dict[str, Any], legal_actions: list[str]) -> tuple[str, int, str]:
         """
         Select an action based on current state.
         
@@ -90,9 +136,10 @@ class Agent:
             legal_actions: List of legal action strings (e.g., ["fold", "call", "raise"])
         
         Returns:
-            tuple: (action_type, amount)
+            tuple: (action_type, amount, action_label)
                 - action_type: string like "call", "raise", "fold"
                 - amount: integer for bet/raise amount, 0 otherwise
+                - action_label: granular action label like "bet_50%", "raise_100%", etc.
         """
         raise NotImplementedError("Agents must implement select_action()")
 
@@ -109,8 +156,8 @@ class RandomAgent(Agent):
     Strategy: No strategy, pure randomness
     """
     
-    def select_action(self, state: dict[str, Any], legal_actions: list[str]) -> tuple[str, int]:
-        """Randomly select a legal action"""
+    def select_action(self, state: dict[str, Any], legal_actions: list[str]) -> tuple[str, int, str]:
+        """Randomly select a legal action with granular bet sizing"""
         # Don't select all_in too often (it's always legal but boring)
         if 'all_in' in legal_actions and len(legal_actions) > 1:
             # 80% chance to exclude all_in from random selection
@@ -123,39 +170,30 @@ class RandomAgent(Agent):
             action = random.choice(legal_actions)
         
         amount = 0
+        action_label = action  # Default label is the action itself
         
-        # If action is raise, choose a random amount
+        # If action is raise, choose a random bet size from granular buckets
         if action == "raise":
-            # Get the minimum raise total from the state (includes call + raise)
             min_raise_total = state.get('min_raise_total', state.get('big_blind', 20))
             max_raise = state['player_chips']
+            pot = state.get('pot', 0)
             
-            # Ensure we have enough chips for minimum raise
-            if max_raise >= min_raise_total:
-                # Choose a raise amount between min and a reasonable max
-                # Upper bound is either all chips or 3x the minimum raise
-                upper_bound = min(max_raise, min_raise_total * 3)
-                amount = random.randint(min_raise_total, upper_bound)
-            else:
-                # Not enough chips for minimum raise - shouldn't happen if legal_actions is correct
-                # But just in case, go all-in
-                amount = max_raise
+            # Select random bet size bucket
+            size_fraction, size_label = select_random_bet_size()
+            amount = calculate_bet_amount(pot, size_fraction, min_raise_total, max_raise)
+            action_label = f'raise_{size_label}'
         
         elif action == "bet":
-            # First bet in the round - must be at least big blind
             min_bet = state.get('min_bet', state.get('big_blind', 20))
             max_bet = state['player_chips']
             pot = state.get('pot', 0)
             
-            if max_bet >= min_bet:
-                # Choose a bet between min_bet and a reasonable max (pot size or 3x min)
-                upper_bound = min(max_bet, max(pot, min_bet * 3))
-                amount = random.randint(min_bet, upper_bound)
-            else:
-                # Not enough chips to make minimum bet - shouldn't happen if legal_actions is correct
-                amount = max_bet
+            # Select random bet size bucket
+            size_fraction, size_label = select_random_bet_size()
+            amount = calculate_bet_amount(pot, size_fraction, min_bet, max_bet)
+            action_label = f'bet_{size_label}'
         
-        return (action, amount)
+        return (action, amount, action_label)
 
 
 class CallAgent(Agent):
@@ -169,15 +207,15 @@ class CallAgent(Agent):
     Strategy: Call/check when possible, fold when forced to
     """
     
-    def select_action(self, state: dict[str, Any], legal_actions: list[str]) -> tuple[str, int]:
+    def select_action(self, state: dict[str, Any], legal_actions: list[str]) -> tuple[str, int, str]:
         """Always prefer call/check"""
         if "check" in legal_actions:
-            return ("check", 0)
+            return ("check", 0, "check")
         elif "call" in legal_actions:
-            return ("call", 0)
+            return ("call", 0, "call")
         else:
             # Must fold
-            return ("fold", 0)
+            return ("fold", 0, "fold")
 
 
 class TightAgent(Agent):
@@ -196,7 +234,7 @@ class TightAgent(Agent):
     
     PREMIUM_RANKS = ['A', 'K', 'Q', 'J', 'T']
     
-    def select_action(self, state: dict[str, Any], legal_actions: list[str]) -> tuple[str, int]:
+    def select_action(self, state: dict[str, Any], legal_actions: list[str]) -> tuple[str, int, str]:
         """Play tight - only premium hands"""
         hole_cards = state.get('hole_cards', [])
         stage = state.get('stage', 'PREFLOP')
@@ -213,34 +251,33 @@ class TightAgent(Agent):
                 
                 if is_premium:
                     if "raise" in legal_actions:
-                        # Aggressive raise with premium hands
+                        # Aggressive raise with premium hands - use 100% pot sizing
                         min_raise_total = state.get('min_raise_total', state.get('big_blind', 20))
                         pot = state.get('pot', 0)
-                        # Raise to about pot size, but at least minimum
-                        amount = max(min_raise_total, min(pot, state['player_chips']))
-                        return ("raise", amount)
+                        amount = calculate_bet_amount(pot, 1.0, min_raise_total, state['player_chips'])
+                        return ("raise", amount, "raise_100%")
                     elif "call" in legal_actions:
-                        return ("call", 0)
+                        return ("call", 0, "call")
                     elif "check" in legal_actions:
-                        return ("check", 0)
+                        return ("check", 0, "check")
                 
                 # Not premium - fold if there's a bet
                 if "check" in legal_actions:
-                    return ("check", 0)
+                    return ("check", 0, "check")
                 else:
-                    return ("fold", 0)
+                    return ("fold", 0, "fold")
         
         # Post-flop: simplified strategy (check/call)
         if "check" in legal_actions:
-            return ("check", 0)
+            return ("check", 0, "check")
         elif "call" in legal_actions:
             # Only call reasonable bets
             pot = state.get('pot', 0)
             current_bet = state.get('current_bet', 0)
             if current_bet < pot * 0.5:  # Call if bet is less than 50% pot
-                return ("call", 0)
+                return ("call", 0, "call")
         
-        return ("fold", 0)
+        return ("fold", 0, "fold")
 
 
 class AggressiveAgent(Agent):
@@ -256,36 +293,36 @@ class AggressiveAgent(Agent):
     - Rarely check or call
     """
     
-    def select_action(self, state: dict[str, Any], legal_actions: list[str]) -> tuple[str, int]:
+    def select_action(self, state: dict[str, Any], legal_actions: list[str]) -> tuple[str, int, str]:
         """Play aggressive - bet and raise"""
         # Prefer raising
         if "raise" in legal_actions:
             min_raise_total = state.get('min_raise_total', state.get('big_blind', 20))
             pot = state.get('pot', 0)
             player_chips = state['player_chips']
-            # Aggressive raise - about 75% of pot, but at least minimum
-            amount = max(min_raise_total, int(pot * 0.75))
-            return ("raise", min(amount, player_chips))
+            # Aggressive raise - use 75% pot sizing
+            amount = calculate_bet_amount(pot, 0.75, min_raise_total, player_chips)
+            return ("raise", amount, "raise_75%")
         
         # Bet if no current bet
         if "bet" in legal_actions:
             pot = state.get('pot', 0)
             min_bet = state.get('min_bet', state.get('big_blind', 20))
             player_chips = state['player_chips']
-            # Bet about 50% of pot, but at least minimum
-            amount = max(min_bet, int(pot * 0.5))
-            return ("bet", min(amount, player_chips))
+            # Bet 50% of pot
+            amount = calculate_bet_amount(pot, 0.50, min_bet, player_chips)
+            return ("bet", amount, "bet_50%")
         
         # Call if we can't raise
         if "call" in legal_actions:
-            return ("call", 0)
+            return ("call", 0, "call")
         
         # Check if possible
         if "check" in legal_actions:
-            return ("check", 0)
+            return ("check", 0, "check")
         
         # Last resort: fold
-        return ("fold", 0)
+        return ("fold", 0, "fold")
 
 
 # =============================================================================
@@ -541,7 +578,7 @@ class RolloutGenerator:
                 break
             
             # Agent selects action
-            action_type, amount = agent.select_action(state, legal_actions)
+            action_type, amount, action_label = agent.select_action(state, legal_actions)
             
             # Record state and action
             rollout['states'].append(state)
@@ -549,7 +586,8 @@ class RolloutGenerator:
                 'type': 'playerAction',
                 'playerId': current_player_id,
                 'action': action_type,
-                'amount': amount
+                'amount': amount,
+                'action_label': action_label  # Store granular action label
             }
             rollout['actions'].append(action_record)
             
@@ -699,7 +737,7 @@ def create_agents(num_players: int, agent_type: str = "random") -> list[Agent]:
     return agents
 
 
-def main():
+def main() -> int:
     """Main entry point for rollout generation"""
     parser = argparse.ArgumentParser(
         description="Generate RL training data by simulating poker hands",
@@ -725,8 +763,8 @@ Examples:
     # Rollout configuration
     parser.add_argument('--num-rollouts', type=int, default=100,
                       help='Number of rollouts to generate (default: 100)')
-    parser.add_argument('--output', type=str, default='data/rollouts.json',
-                      help='Output file path (default: data/rollouts.json)')
+    parser.add_argument('--output', type=str, default=f'/tmp/pokersim/data_v{MODEL_VERSION}/rollouts.json',
+                      help=f'Output file path (default: /tmp/pokersim/data_v{MODEL_VERSION}/rollouts.json)')
     
     # Game configuration
     parser.add_argument('--num-players', type=int, default=2,

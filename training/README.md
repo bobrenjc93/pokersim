@@ -2,10 +2,14 @@
 
 Generate reinforcement learning training data by simulating complete poker hands (rollouts), then train and evaluate neural network models.
 
-## Documentation
+## Table of Contents
 
-- **Quick Start**: See [`QUICKSTART.md`](QUICKSTART.md) for a fast introduction
-- **Continuous Training**: See [`CONTINUOUS_TRAINING.md`](CONTINUOUS_TRAINING.md) for the continuous training system
+- [Quick Start](#quick-start)
+- [Data Generation](#data-generation)
+- [Model Training](#model-training)
+- [Model Evaluation](#model-evaluation)
+- [Continuous Training System](#continuous-training-system)
+- [Troubleshooting](#troubleshooting)
 
 ## Quick Start
 
@@ -23,10 +27,10 @@ cd ../training
 uv run python generate_rollouts.py --num-rollouts 1000 --agent-type mixed
 
 # Train a model
-uv run python train.py --data data/rollouts.json --epochs 100
+uv run python train.py --data /tmp/pokersim/data/rollouts.json --epochs 100
 
 # Evaluate the model
-uv run python eval.py --model /tmp/models/poker_model.pt --data data/rollouts.json
+uv run python eval.py --model /tmp/pokersim/models/poker_model.pt --data /tmp/pokersim/data/rollouts.json
 ```
 
 ## Complete Workflow
@@ -98,14 +102,14 @@ class MyAgent(Agent):
 Train a neural network to predict actions from game states:
 
 ```bash
-uv run python train.py --data data/rollouts.json --epochs 100
+uv run python train.py --data /tmp/pokersim/data/rollouts.json --epochs 100
 ```
 
 This will:
 - Load and encode poker states into feature vectors
 - Create a neural network (PokerNet)
 - Train it to predict actions
-- Save the best model to `/tmp/models/poker_model.pt`
+- Save the best model to `/tmp/pokersim/models/poker_model.pt`
 
 **Key hyperparameters:**
 - `--epochs`: Number of training epochs (default: 50)
@@ -151,7 +155,7 @@ Outputs probability distribution over 6 actions:
 Evaluate the trained model on test data:
 
 ```bash
-uv run python eval.py --model /tmp/models/poker_model.pt --data data/rollouts.json
+uv run python eval.py --model /tmp/pokersim/models/poker_model.pt --data /tmp/pokersim/data/rollouts.json
 ```
 
 This will show:
@@ -169,7 +173,7 @@ from train import PokerNet, PokerDataset, encode_state
 import torch
 
 # Load your data
-with open('data/rollouts.json') as f:
+with open('/tmp/pokersim/data/rollouts.json') as f:
     rollouts = json.load(f)
 
 # Create dataset
@@ -218,6 +222,81 @@ Edit `encode_state()` in `train.py` to add:
 - Track performance over many games (1000+)
 - Analyze specific situations (preflop vs postflop)
 
+## Continuous Training System
+
+For long-running training that automatically generates data and trains models in an infinite loop:
+
+### Quick Start
+
+```bash
+./start_continuous_training.sh
+```
+
+Press `Ctrl+C` to stop gracefully.
+
+### What It Does
+
+The system runs three concurrent processes:
+
+1. **Data Generation** - Generates poker game rollouts in batches
+2. **Model Training** - Trains neural networks on accumulated data  
+3. **Periodic Evaluation** - Tests model performance vs baseline agents
+
+By default, the system **accumulates all data** and trains on increasingly large datasets for better learning.
+
+### Configuration
+
+**Common options:**
+
+```bash
+# Evaluate more frequently with more hands
+./start_continuous_training.sh --eval-interval 3 --num-eval-hands 500
+
+# Skip evaluation (faster training)
+./start_continuous_training.sh --skip-eval
+
+# Custom data directory
+./start_continuous_training.sh --data-dir ./my_data
+
+# Limit data files to save disk space
+./start_continuous_training.sh --max-data-files 5
+```
+
+**Advanced configuration:**
+
+```bash
+uv run python continuous_trainer.py \
+    --batch-size 5000 \
+    --epochs-per-cycle 50 \
+    --max-data-files 10 \
+    --cpu-threshold 0.80 \
+    --memory-threshold 0.85
+```
+
+### Resource Management
+
+The system automatically:
+- Throttles data generation when CPU/memory is high
+- Rotates old data files to limit disk usage
+- Sets low priority for data generation to avoid impacting training
+- Monitors and auto-restarts the API server if needed
+
+### Model Outputs
+
+Models are saved to `/tmp/pokersim/models/`:
+- `poker_model.pt` - Latest model
+- `poker_model_YYYYMMDD_HHMMSS.pt` - Timestamped checkpoints
+
+### Evaluate Trained Models
+
+```bash
+cd training
+uv run python eval.py \
+    --model /tmp/pokersim/models/poker_model.pt \
+    --num-hands 1000 \
+    --num-players 6
+```
+
 ## Troubleshooting
 
 **Cannot connect to API server?**
@@ -238,7 +317,7 @@ uv pip install torch
 
 **Model file not found**
 - Make sure you've run `train.py` first
-- Check the path: default is `/tmp/models/poker_model.pt`
+- Check the path: default is `/tmp/pokersim/models/poker_model.pt`
 
 **Low accuracy (<30%)**
 - Generate more training data

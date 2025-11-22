@@ -13,7 +13,7 @@
 #   ./start_continuous_training.sh [options]
 #
 # Options:
-#   --data-dir PATH       Directory for training data (default: /tmp/data)
+#   --data-dir PATH       Directory for training data (default: /tmp/pokersim/data)
 #   --eval-interval N     Run evaluation every N training cycles (default: 5)
 #   --num-eval-hands N    Number of hands to play in evaluation (default: 100)
 #   --skip-eval           Skip evaluation entirely
@@ -56,8 +56,8 @@ if ! uv run python -c "import psutil" 2>/dev/null; then
 fi
 
 # Extract data-dir from arguments if specified, otherwise use default
-DATA_DIR="/tmp/data"
-MODEL_DIR="/tmp/models"
+DATA_DIR="/tmp/pokersim/data"
+MODEL_DIR="/tmp/pokersim/models"
 
 # Parse command line arguments to find --data-dir (without consuming them)
 i=1
