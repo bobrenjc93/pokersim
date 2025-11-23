@@ -4,7 +4,11 @@ Continuous Poker Model Training System
 
 This program balances system resources between data generation and model training,
 allowing the system to continuously improve by:
-1. Generating new training data in the background
+1. Generating new training data in the background with adaptive batch sizing
+   - Batch 1: 50 rollouts (quick start)
+   - Batch 2: 500 rollouts (ramp up)
+   - Batch 3: 5,000 rollouts (moderate scale)
+   - Batch 4+: 50,000 rollouts (full scale)
 2. Training models on available data
 3. Managing resources to prevent system overload
 4. Rotating data files to manage disk space
@@ -16,19 +20,20 @@ Usage:
     python continuous_trainer.py [options]
 
 Examples:
-    # Run with default settings
+    # Run with default settings (adaptive batch sizing)
     python continuous_trainer.py
 
     # Custom configuration
-    python continuous_trainer.py --batch-size 1000 --epochs-per-cycle 50 --max-data-files 10
+    python continuous_trainer.py --epochs-per-cycle 50 --max-data-files 10
 
     # High resource mode (more aggressive)
     python continuous_trainer.py --cpu-threshold 0.9 --memory-threshold 0.9
+    
+    # Larger model
+    python continuous_trainer.py --hidden-dim 1024 --num-heads 32 --num-layers 12
 """
 
 import argparse
-import json
-import os
 import signal
 import subprocess
 import sys
@@ -51,7 +56,7 @@ try:
 except ImportError:
     HAS_PSUTIL = False
     print("⚠️  Warning: psutil not available. Resource monitoring will be limited.")
-    print("   Install with: pip install psutil")
+    print("   Install with: uv sync")
     print("")
 
 
@@ -67,7 +72,6 @@ class SystemConfig:
     memory_threshold: float = 0.85  # Max memory usage before throttling
     
     # Data generation
-    rollouts_per_batch: int = 5000  # Rollouts to generate per batch
     num_players: int = 3
     small_blind: int = 25
     big_blind: int = 50
@@ -77,14 +81,22 @@ class SystemConfig:
     # Training
     epochs_per_cycle: int = 50  # Epochs to train per cycle
     batch_size: int = 32
-    learning_rate: float = 0.001
-    hidden_dim: int = 256
+    learning_rate: float = 0.0001  # Reduced for better convergence
+    hidden_dim: int = 512  # Increased for larger model
+    num_heads: int = 16  # Increased attention heads
+    num_layers: int = 8  # Increased transformer layers
+    dropout: float = 0.2  # Increased dropout for regularization
+    weight_decay: float = 0.001  # Increased weight decay
+    gradient_checkpointing: bool = True  # Enable to handle larger model
+    mixed_precision: bool = False  # Set to True if using CUDA
+    lr_scheduler: str = "cosine"  # Learning rate scheduler
+    lr_warmup_epochs: int = 5  # Warmup epochs
     
     # Adaptive training schedule
     adaptive_schedule: bool = True  # Enable adaptive dataset growth
-    initial_data_fraction: float = 0.15  # Start with 15% of data
-    data_growth_factor: float = 1.5  # Grow by 1.5x when plateauing
-    plateau_patience: int = 5  # Epochs without improvement before growing
+    initial_data_fraction: float = 0.05  # Start with 5% of data
+    data_growth_factor: float = 1.3  # Grow by 1.3x when plateauing (reduced from 1.5x for smoother growth)
+    plateau_patience: int = 3  # Epochs without improvement before growing (reduced from 5 for faster adaptation)
     plateau_threshold: float = 0.001  # Minimum improvement threshold
     
     # Evaluation
@@ -97,6 +109,10 @@ class SystemConfig:
     data_dir: Path = Path(f"/tmp/pokersim/data_v{MODEL_VERSION}")
     model_dir: Path = Path(f"/tmp/pokersim/models_v{MODEL_VERSION}")
     accumulate_data: bool = True  # If True, train on all accumulated data; if False, train on single batches
+    
+    # TensorBoard
+    tensorboard_enabled: bool = True  # Enable TensorBoard logging
+    tensorboard_dir: Path = Path(f"/tmp/pokersim/tensorboard_v{MODEL_VERSION}")
     
     # API server
     api_port: int = 8080
@@ -238,7 +254,7 @@ class ProcessManager:
                     )
                     print(f"✓ API server ready (PID: {self.api_process.pid})")
                     return True
-                except:
+                except Exception:
                     if i == 19:
                         print("✗ API server failed to start")
                         return False
@@ -260,7 +276,7 @@ class ProcessManager:
                 self.api_process.kill()
             self.api_process = None
     
-    def start_data_generation(self, output_file: Path) -> bool:
+    def start_data_generation(self, output_file: Path, batch_size: int) -> bool:
         """Start a data generation job (non-blocking)"""
         with self.datagen_lock:
             try:
@@ -276,7 +292,7 @@ class ProcessManager:
                 cmd = [
                     "uv", "run", "--with", "requests", "python",
                     "generate_rollouts.py",
-                    "--num-rollouts", str(self.config.rollouts_per_batch),
+                    "--num-rollouts", str(batch_size),
                     "--num-players", str(self.config.num_players),
                     "--small-blind", str(self.config.small_blind),
                     "--big-blind", str(self.config.big_blind),
@@ -299,7 +315,7 @@ class ProcessManager:
                     try:
                         p = psutil.Process(process.pid)
                         p.nice(self.config.datagen_priority)
-                    except:
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
                         pass
                 
                 # Add to active jobs
@@ -326,7 +342,7 @@ class ProcessManager:
                     # Process has finished
                     try:
                         stdout, _ = job.process.communicate(timeout=0.1)
-                    except:
+                    except subprocess.TimeoutExpired:
                         stdout = None
                     
                     if returncode == 0:
@@ -379,8 +395,22 @@ class ProcessManager:
                 "--epochs", str(self.config.epochs_per_cycle),
                 "--batch-size", str(self.config.batch_size),
                 "--lr", str(self.config.learning_rate),
-                "--hidden-dim", str(self.config.hidden_dim)
+                "--hidden-dim", str(self.config.hidden_dim),
+                "--num-heads", str(self.config.num_heads),
+                "--num-layers", str(self.config.num_layers),
+                "--dropout", str(self.config.dropout),
+                "--weight-decay", str(self.config.weight_decay),
+                "--lr-scheduler", self.config.lr_scheduler,
+                "--lr-warmup-epochs", str(self.config.lr_warmup_epochs)
             ]
+            
+            # Add gradient checkpointing if enabled
+            if self.config.gradient_checkpointing:
+                cmd.append("--gradient-checkpointing")
+            
+            # Add mixed precision if enabled
+            if self.config.mixed_precision:
+                cmd.append("--mixed-precision")
             
             # Add adaptive schedule arguments if enabled
             if self.config.adaptive_schedule:
@@ -396,6 +426,12 @@ class ProcessManager:
             if checkpoint_path:
                 cmd.extend(["--checkpoint", str(checkpoint_path)])
             
+            # Add TensorBoard arguments
+            if self.config.tensorboard_enabled:
+                cmd.extend(["--tensorboard-dir", str(self.config.tensorboard_dir)])
+            else:
+                cmd.append("--no-tensorboard")
+            
             self.training_process = subprocess.Popen(
                 cmd,
                 cwd=self.project_root / "training",
@@ -409,7 +445,7 @@ class ProcessManager:
                 try:
                     p = psutil.Process(self.training_process.pid)
                     p.nice(self.config.training_priority)
-                except:
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
             
             # Stream output
@@ -490,7 +526,7 @@ class ProcessManager:
             for job in self.datagen_jobs:
                 try:
                     job.process.terminate()
-                except:
+                except (ProcessLookupError, PermissionError):
                     pass
             self.datagen_jobs = []
         
@@ -517,6 +553,33 @@ class DataManager:
         # Ensure directories exist
         self.config.data_dir.mkdir(parents=True, exist_ok=True)
         self.config.model_dir.mkdir(parents=True, exist_ok=True)
+    
+    def _get_batch_size_for_number(self, batch_num: int) -> int:
+        """Get the batch size for a specific batch number
+        
+        Args:
+            batch_num: The batch number to get size for
+            
+        Returns:
+            Number of rollouts for this batch
+        """
+        # Adaptive batch sizes:
+        # Batch 1: 50
+        # Batch 2: 500
+        # Batch 3: 5,000
+        if batch_num == 1:
+            return 50
+        elif batch_num == 2:
+            return 500
+        else:
+            return 5000
+    
+    def get_adaptive_batch_size(self) -> int:
+        """Get the batch size for the current batch based on adaptive schedule
+        
+        Note: This should be called AFTER get_next_data_file() which increments data_counter
+        """
+        return self._get_batch_size_for_number(self.data_counter)
     
     def get_next_data_file(self) -> Path:
         """Get the path for the next data file to generate"""
@@ -642,7 +705,7 @@ class ContinuousTrainer:
         print(f"  Data queue size: {self.data_manager.data_queue.qsize()}")
         print(f"{'='*70}\n")
     
-    def _data_generation_loop(self):
+    def _data_generation_loop(self) -> None:
         """Background thread for continuous data generation"""
         while self.running:
             try:
@@ -668,11 +731,20 @@ class ContinuousTrainer:
                 
                 
                 # Start a new data generation job (non-blocking)
-                output_file = self.data_manager.get_next_data_file()
-                if self.process_manager.start_data_generation(output_file):
+                # Peek at what the next batch would be without incrementing counter yet
+                next_batch_num = self.data_manager.data_counter + 1
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"batch_{timestamp}_{next_batch_num:04d}.json"
+                output_file = self.data_manager.config.data_dir / filename
+                batch_size = self.data_manager._get_batch_size_for_number(next_batch_num)
+                
+                if self.process_manager.start_data_generation(output_file, batch_size):
+                    # Job started successfully - now increment the counter
+                    self.data_manager.data_counter = next_batch_num
+                    print(f"🎲 Starting batch #{self.data_manager.data_counter} generation ({batch_size:,} rollouts)...")
                     self.stats['last_data_gen'] = time.time()
                 else:
-                    # At max concurrent jobs, wait a bit
+                    # At max concurrent jobs, wait a bit before trying again
                     time.sleep(1)
                 
             except Exception as e:
@@ -701,6 +773,8 @@ class ContinuousTrainer:
         print("\n✓ System initialized")
         print("  - API server running")
         print("  - Data generation thread started")
+        if self.config.tensorboard_enabled:
+            print(f"  - TensorBoard enabled: tensorboard --logdir={self.config.tensorboard_dir}")
         print(f"  - Building initial data buffer ({self.config.initial_buffer_size} batches)...\n")
         
         # Wait for initial buffer to build up (pipelining)
@@ -739,9 +813,26 @@ class ContinuousTrainer:
                     continue
                 
                 # Get data file to train on
-                data_file = self.data_manager.get_data_file(block=True, timeout=5.0)
+                # Try to get a new batch from the queue (non-blocking)
+                data_file = self.data_manager.get_data_file(block=False)
+                is_new_batch = (data_file is not None)
+                
+                # If no new data in queue, check if we have any existing data to train on
                 if data_file is None:
-                    continue
+                    # Get any existing data file to keep training going
+                    existing_files = sorted(
+                        self.config.data_dir.glob("batch_*.json"),
+                        key=lambda p: p.stat().st_mtime,
+                        reverse=True  # Most recent first
+                    )
+                    if existing_files:
+                        # Use the most recent data file
+                        data_file = existing_files[0]
+                        print(f"ℹ️  No new data ready - continuing training on existing data: {data_file.name}")
+                    else:
+                        # No data at all - wait a bit and check again
+                        time.sleep(5.0)
+                        continue
                 
                 # Train model
                 model_file = self.data_manager.get_next_model_file()
@@ -749,8 +840,10 @@ class ContinuousTrainer:
                     self.stats['training_cycles'] += 1
                     self.stats['last_training'] = time.time()
                     
-                    # Mark data file as complete (safe to delete now)
-                    self.data_manager.mark_file_complete(data_file)
+                    # Only mark data file as complete if it was a new batch from the queue
+                    # If we're reusing existing data, keep it around for next iteration
+                    if is_new_batch:
+                        self.data_manager.mark_file_complete(data_file)
                     
                     # Copy to main model location (only if new model was actually saved)
                     main_model = self.data_manager.config.model_dir / "poker_model.pt"
@@ -768,8 +861,9 @@ class ContinuousTrainer:
                         self.process_manager.evaluate_model(main_model)
                 else:
                     print("⚠️  Training failed, will retry with next batch...")
-                    # Even on failure, mark as complete to avoid keeping it forever
-                    self.data_manager.mark_file_complete(data_file)
+                    # Only mark as complete if it was a new batch (avoid keeping failed batches forever)
+                    if is_new_batch:
+                        self.data_manager.mark_file_complete(data_file)
                 
                 # Small delay before next cycle
                 time.sleep(2)
@@ -803,9 +897,7 @@ def main() -> int:
     parser.add_argument('--memory-threshold', type=float, default=0.85,
                        help='Memory threshold for throttling (0.0-1.0, default: 0.85)')
     
-    # Data generation
-    parser.add_argument('--batch-size', type=int, default=5000,
-                       help='Rollouts per batch (default: 5000)')
+    # Data generation (uses adaptive batch sizing: 50, 500, 5000, then 50k rollouts)
     parser.add_argument('--num-players', type=int, default=3,
                        help='Number of players (default: 3)')
     parser.add_argument('--agent-type', type=str, default='mixed',
@@ -815,20 +907,37 @@ def main() -> int:
     # Training
     parser.add_argument('--epochs-per-cycle', type=int, default=50,
                        help='Epochs per training cycle (default: 50)')
-    parser.add_argument('--learning-rate', type=float, default=0.001,
-                       help='Learning rate (default: 0.001)')
-    parser.add_argument('--hidden-dim', type=int, default=256,
-                       help='Hidden layer dimension (default: 256)')
+    parser.add_argument('--learning-rate', type=float, default=0.0001,
+                       help='Learning rate (default: 0.0001 - reduced for stability)')
+    parser.add_argument('--hidden-dim', type=int, default=512,
+                       help='Hidden layer dimension (default: 512 - increased for larger model)')
+    parser.add_argument('--num-heads', type=int, default=16,
+                       help='Number of attention heads (default: 16)')
+    parser.add_argument('--num-layers', type=int, default=8,
+                       help='Number of transformer layers (default: 8)')
+    parser.add_argument('--dropout', type=float, default=0.2,
+                       help='Dropout rate (default: 0.2)')
+    parser.add_argument('--weight-decay', type=float, default=0.001,
+                       help='Weight decay for regularization (default: 0.001)')
+    parser.add_argument('--no-gradient-checkpointing', action='store_true',
+                       help='Disable gradient checkpointing (enabled by default for memory efficiency)')
+    parser.add_argument('--mixed-precision', action='store_true',
+                       help='Enable mixed precision training (faster on CUDA)')
+    parser.add_argument('--lr-scheduler', type=str, default='cosine',
+                       choices=['none', 'step', 'cosine', 'plateau'],
+                       help='Learning rate scheduler (default: cosine)')
+    parser.add_argument('--lr-warmup-epochs', type=int, default=5,
+                       help='Learning rate warmup epochs (default: 5)')
     
     # Adaptive training schedule
     parser.add_argument('--no-adaptive-schedule', action='store_true',
                        help='Disable adaptive training schedule (enabled by default)')
-    parser.add_argument('--initial-data-fraction', type=float, default=0.15,
-                       help='Initial fraction of data to train on (default: 0.15)')
-    parser.add_argument('--data-growth-factor', type=float, default=1.5,
-                       help='Factor to grow dataset by when plateauing (default: 1.5)')
-    parser.add_argument('--plateau-patience', type=int, default=5,
-                       help='Epochs without improvement before increasing data (default: 5)')
+    parser.add_argument('--initial-data-fraction', type=float, default=0.05,
+                       help='Initial fraction of data to train on (default: 0.05)')
+    parser.add_argument('--data-growth-factor', type=float, default=1.3,
+                       help='Factor to grow dataset by when plateauing (default: 1.3 - smoother growth)')
+    parser.add_argument('--plateau-patience', type=int, default=3,
+                       help='Epochs without improvement before increasing data (default: 3 - faster adaptation)')
     parser.add_argument('--plateau-threshold', type=float, default=0.001,
                        help='Minimum improvement threshold (default: 0.001)')
     
@@ -858,18 +967,31 @@ def main() -> int:
     parser.add_argument('--api-port', type=int, default=8080,
                        help='API server port (default: 8080)')
     
+    # TensorBoard
+    parser.add_argument('--no-tensorboard', action='store_true',
+                       help='Disable TensorBoard logging (default: False)')
+    parser.add_argument('--tensorboard-dir', type=str, default=f'/tmp/pokersim/tensorboard_v{MODEL_VERSION}',
+                       help=f'Directory for TensorBoard logs (default: /tmp/pokersim/tensorboard_v{MODEL_VERSION})')
+    
     args = parser.parse_args()
     
     # Create configuration
     config = SystemConfig(
         cpu_threshold=args.cpu_threshold,
         memory_threshold=args.memory_threshold,
-        rollouts_per_batch=args.batch_size,
         num_players=args.num_players,
         agent_type=args.agent_type,
         epochs_per_cycle=args.epochs_per_cycle,
         learning_rate=args.learning_rate,
         hidden_dim=args.hidden_dim,
+        num_heads=args.num_heads,
+        num_layers=args.num_layers,
+        dropout=args.dropout,
+        weight_decay=args.weight_decay,
+        gradient_checkpointing=not args.no_gradient_checkpointing,
+        mixed_precision=args.mixed_precision,
+        lr_scheduler=args.lr_scheduler,
+        lr_warmup_epochs=args.lr_warmup_epochs,
         adaptive_schedule=not args.no_adaptive_schedule,
         initial_data_fraction=args.initial_data_fraction,
         data_growth_factor=args.data_growth_factor,
@@ -883,7 +1005,9 @@ def main() -> int:
         initial_buffer_size=args.initial_buffer_size,
         api_port=args.api_port,
         api_url=f"http://localhost:{args.api_port}/simulate",
-        data_dir=Path(args.data_dir)
+        data_dir=Path(args.data_dir),
+        tensorboard_enabled=not args.no_tensorboard,
+        tensorboard_dir=Path(args.tensorboard_dir)
     )
     
     # Check dependencies
@@ -892,9 +1016,9 @@ def main() -> int:
         import torch
     except ImportError as e:
         print(f"✗ Missing dependency: {e}")
-        print("  Install with: pip install requests torch")
+        print("  Install with: uv sync")
         if not HAS_PSUTIL:
-            print("  Optional: pip install psutil (for resource monitoring)")
+            print("  Optional: uv sync (includes psutil for resource monitoring)")
         return 1
     
     # Run continuous trainer

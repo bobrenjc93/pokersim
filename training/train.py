@@ -13,7 +13,7 @@ used for decision-making in poker.
 
 Prerequisites:
 - Generated rollout data (from generate_rollouts.py)
-- PyTorch (pip install torch)
+- PyTorch (installed via uv sync)
 
 Usage:
     python train.py --data data/quickstart_rollouts.json --epochs 100
@@ -22,13 +22,15 @@ Usage:
 import argparse
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.tensorboard import SummaryWriter
 
 # =============================================================================
 # Model Version Management
@@ -349,6 +351,33 @@ class AdaptiveDataScheduler:
     def is_at_full_size(self) -> bool:
         """Check if using full dataset"""
         return self.current_size >= self.total_samples
+    
+    def state_dict(self) -> dict:
+        """Get scheduler state for checkpointing"""
+        return {
+            'current_size': self.current_size,
+            'best_val_loss': self.best_val_loss,
+            'epochs_without_improvement': self.epochs_without_improvement,
+            'growth_history': self.growth_history.copy(),
+            'total_samples': self.total_samples,
+            'initial_fraction': self.initial_fraction,
+            'growth_factor': self.growth_factor,
+            'plateau_patience': self.plateau_patience,
+            'plateau_threshold': self.plateau_threshold,
+        }
+    
+    def load_state_dict(self, state_dict: dict):
+        """Restore scheduler state from checkpoint"""
+        self.current_size = state_dict['current_size']
+        self.best_val_loss = state_dict['best_val_loss']
+        self.epochs_without_improvement = state_dict['epochs_without_improvement']
+        self.growth_history = state_dict['growth_history'].copy()
+        # Also restore configuration in case it changed
+        self.total_samples = state_dict['total_samples']
+        self.initial_fraction = state_dict['initial_fraction']
+        self.growth_factor = state_dict['growth_factor']
+        self.plateau_patience = state_dict['plateau_patience']
+        self.plateau_threshold = state_dict['plateau_threshold']
 
 
 # =============================================================================
@@ -420,7 +449,7 @@ class PokerTransformer(nn.Module):
     """
     
     def __init__(self, input_dim: int, hidden_dim: int = 256, num_heads: int = 8, 
-                 num_layers: int = 4, dropout: float = 0.1):
+                 num_layers: int = 4, dropout: float = 0.1, gradient_checkpointing: bool = False):
         """
         Args:
             input_dim: Size of input feature vector
@@ -428,6 +457,7 @@ class PokerTransformer(nn.Module):
             num_heads: Number of attention heads
             num_layers: Number of transformer encoder layers
             dropout: Dropout rate
+            gradient_checkpointing: Enable gradient checkpointing to save memory
         """
         super().__init__()
         
@@ -438,6 +468,7 @@ class PokerTransformer(nn.Module):
         
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
+        self.gradient_checkpointing = gradient_checkpointing
         
         # Token organization:
         # - 2 hole card tokens (17 features each)
@@ -543,8 +574,14 @@ class PokerTransformer(nn.Module):
         # Add positional encodings
         tokens = tokens + self.pos_encoding
         
-        # Apply transformer
-        transformed = self.transformer(tokens)  # (batch_size, num_tokens, hidden_dim)
+        # Apply transformer with optional gradient checkpointing
+        if self.gradient_checkpointing and self.training:
+            # Use gradient checkpointing to save memory during training
+            transformed = torch.utils.checkpoint.checkpoint(
+                self.transformer, tokens, use_reentrant=False
+            )
+        else:
+            transformed = self.transformer(tokens)  # (batch_size, num_tokens, hidden_dim)
         
         # Apply layer norm
         transformed = self.norm(transformed)
@@ -602,7 +639,9 @@ def train_model(
     criterion: nn.Module,
     device: torch.device,
     epoch: int,
-    total_epochs: int
+    total_epochs: int,
+    writer: Optional[SummaryWriter] = None,
+    scaler: Optional[torch.cuda.amp.GradScaler] = None
 ) -> float:
     """
     Train the model for one epoch.
@@ -615,6 +654,7 @@ def train_model(
         device: Device to train on
         epoch: Current epoch number
         total_epochs: Total number of epochs for training
+        writer: Optional TensorBoard SummaryWriter for logging
     
     Returns:
         Average loss for the epoch
@@ -628,20 +668,35 @@ def train_model(
         states = states.to(device)
         actions = actions.to(device)
         
-        # Forward pass
         optimizer.zero_grad()
-        outputs = model(states)
-        loss = criterion(outputs, actions)
         
-        # Backward pass
-        loss.backward()
-        optimizer.step()
+        # Forward and backward pass with optional mixed precision
+        if scaler is not None:
+            # Mixed precision training
+            with torch.cuda.amp.autocast():
+                outputs = model(states)
+                loss = criterion(outputs, actions)
+            
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            # Standard precision
+            outputs = model(states)
+            loss = criterion(outputs, actions)
+            loss.backward()
+            optimizer.step()
         
         # Statistics
         total_loss += loss.item()
         _, predicted = outputs.max(1)
         total += actions.size(0)
         correct += predicted.eq(actions).sum().item()
+        
+        # Log batch metrics to TensorBoard
+        if writer is not None and batch_idx % 100 == 0:
+            global_step = epoch * len(train_loader) + batch_idx
+            writer.add_scalar('Train/Batch_Loss', loss.item(), global_step)
     
     avg_loss = total_loss / len(train_loader)
     accuracy = 100. * correct / total
@@ -717,15 +772,30 @@ def main() -> int:
                        help='Number of transformer encoder layers (default: 4)')
     parser.add_argument('--dropout', type=float, default=0.1,
                        help='Dropout rate (default: 0.1)')
-    parser.add_argument('--weight-decay', type=float, default=0.0001,
-                       help='Weight decay (L2 regularization)')
+    parser.add_argument('--weight-decay', type=float, default=0.001,
+                       help='Weight decay (L2 regularization) (default: 0.001)')
     parser.add_argument('--early-stopping-patience', type=int, default=10,
                        help='Early stopping patience (epochs without improvement)')
+    parser.add_argument('--lr-scheduler', type=str, default='cosine',
+                       choices=['none', 'step', 'cosine', 'plateau'],
+                       help='Learning rate scheduler (default: cosine)')
+    parser.add_argument('--lr-warmup-epochs', type=int, default=5,
+                       help='Number of warmup epochs for learning rate (default: 5)')
+    parser.add_argument('--gradient-checkpointing', action='store_true',
+                       help='Enable gradient checkpointing to save memory (slower but enables larger models)')
+    parser.add_argument('--mixed-precision', action='store_true',
+                       help='Enable mixed precision training (faster on modern GPUs)')
     parser.add_argument('--checkpoint', type=str, default=None,
                        help='Path to checkpoint to resume training from')
     parser.add_argument('--model-version', type=int, default=MODEL_VERSION_CURRENT,
                        choices=[MODEL_VERSION_LEGACY, MODEL_VERSION_TRANSFORMER],
                        help=f'Model architecture version (1=legacy feed-forward, 2=transformer, default={MODEL_VERSION_CURRENT})')
+    
+    # TensorBoard options
+    parser.add_argument('--tensorboard-dir', type=str, default='/tmp/pokersim/tensorboard',
+                       help='Directory for TensorBoard logs (default: /tmp/pokersim/tensorboard)')
+    parser.add_argument('--no-tensorboard', action='store_true',
+                       help='Disable TensorBoard logging')
     
     # Adaptive training schedule
     parser.add_argument('--adaptive-schedule', action='store_true',
@@ -867,8 +937,11 @@ def main() -> int:
             hidden_dim=args.hidden_dim,
             num_heads=args.num_heads,
             num_layers=args.num_layers,
-            dropout=args.dropout
+            dropout=args.dropout,
+            gradient_checkpointing=args.gradient_checkpointing
         )
+        if args.gradient_checkpointing:
+            print(f"  ⚡ Gradient checkpointing enabled (saves memory, trades speed)")
     else:
         raise ValueError(f"Unknown model version: {args.model_version}")
     model = model.to(device)
@@ -879,7 +952,44 @@ def main() -> int:
     
     # Loss and optimizer with weight decay (L2 regularization)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=(0.9, 0.999))
+    
+    # Learning rate scheduler
+    scheduler = None
+    if args.lr_scheduler != 'none':
+        if args.lr_scheduler == 'cosine':
+            # Cosine annealing with warmup
+            scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, 
+                T_max=args.epochs - args.lr_warmup_epochs,
+                eta_min=args.lr * 0.01  # Min LR is 1% of initial
+            )
+            print(f"✓ Using cosine annealing LR scheduler (warmup: {args.lr_warmup_epochs} epochs)")
+        elif args.lr_scheduler == 'step':
+            scheduler = optim.lr_scheduler.StepLR(
+                optimizer,
+                step_size=args.epochs // 3,
+                gamma=0.5
+            )
+            print(f"✓ Using step LR scheduler (decay every {args.epochs // 3} epochs)")
+        elif args.lr_scheduler == 'plateau':
+            scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer,
+                mode='min',
+                factor=0.5,
+                patience=5,
+                verbose=True
+            )
+            print(f"✓ Using plateau LR scheduler (reduce on val loss plateau)")
+    
+    # Mixed precision training
+    scaler = None
+    if args.mixed_precision and device.type in ['cuda', 'mps']:
+        if device.type == 'cuda':
+            scaler = torch.cuda.amp.GradScaler()
+            print(f"✓ Mixed precision training enabled (faster training)")
+        else:
+            print(f"⚠️  Mixed precision not fully supported on MPS, using standard precision")
     
     best_val_loss = float('inf')
     epochs_without_improvement = 0
@@ -908,6 +1018,16 @@ def main() -> int:
                 try:
                     model.load_state_dict(checkpoint['model_state_dict'])
                     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                    
+                    # Restore scheduler state if present
+                    if scheduler and 'scheduler_state_dict' in checkpoint:
+                        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                    
+                    # Restore adaptive scheduler state if present
+                    if adaptive_scheduler and 'adaptive_scheduler_state_dict' in checkpoint:
+                        adaptive_scheduler.load_state_dict(checkpoint['adaptive_scheduler_state_dict'])
+                        print(f"   Resumed adaptive schedule: using {adaptive_scheduler.get_current_size():,} samples ({adaptive_scheduler.get_progress()*100:.1f}% of data)")
+                    
                     start_epoch = checkpoint.get('epoch', 0) + 1
                     best_val_loss = checkpoint.get('val_loss', float('inf'))
                     print(f"✓ Resumed from epoch {checkpoint.get('epoch', 0)}, best val loss: {best_val_loss:.4f}")
@@ -916,6 +1036,35 @@ def main() -> int:
                     print(f"   Starting training from scratch")
         else:
             print(f"⚠️  Checkpoint not found: {checkpoint_path}, starting from scratch")
+    
+    # Setup TensorBoard
+    writer = None
+    if not args.no_tensorboard:
+        log_dir = Path(args.tensorboard_dir) / f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        writer = SummaryWriter(log_dir=str(log_dir))
+        print(f"\n📊 TensorBoard logging to: {log_dir}")
+        print(f"   To view: tensorboard --logdir={args.tensorboard_dir}")
+        
+        # Log hyperparameters
+        hparams = {
+            'learning_rate': args.lr,
+            'batch_size': args.batch_size,
+            'hidden_dim': args.hidden_dim,
+            'weight_decay': args.weight_decay,
+            'model_version': args.model_version,
+            'adaptive_schedule': args.adaptive_schedule,
+        }
+        if args.model_version == MODEL_VERSION_TRANSFORMER:
+            hparams.update({
+                'num_heads': args.num_heads,
+                'num_layers': args.num_layers,
+                'dropout': args.dropout,
+            })
+        
+        # Log hyperparameters as text
+        hparam_str = '\n'.join([f'{k}: {v}' for k, v in hparams.items()])
+        writer.add_text('Hyperparameters', hparam_str, 0)
     
     print(f"\nStarting training for {args.epochs} epochs...")
     if start_epoch > 1:
@@ -937,8 +1086,27 @@ def main() -> int:
         phase_end_epoch = current_epoch + epochs_this_phase
         
         for epoch in range(current_epoch, phase_end_epoch):
-            train_loss, train_acc = train_model(model, train_loader, optimizer, criterion, device, epoch, phase_end_epoch - 1)
+            # Learning rate warmup
+            if scheduler and epoch < args.lr_warmup_epochs:
+                warmup_lr = args.lr * (epoch + 1) / args.lr_warmup_epochs
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = warmup_lr
+            
+            train_loss, train_acc = train_model(model, train_loader, optimizer, criterion, device, epoch, phase_end_epoch - 1, writer, scaler)
             val_loss, val_acc = validate_model(model, val_loader, criterion, device)
+            
+            # Log epoch metrics to TensorBoard
+            if writer is not None:
+                writer.add_scalar('Loss/Train', train_loss, epoch)
+                writer.add_scalar('Loss/Validation', val_loss, epoch)
+                writer.add_scalar('Accuracy/Train', train_acc, epoch)
+                writer.add_scalar('Accuracy/Validation', val_acc, epoch)
+                writer.add_scalar('Learning_Rate', optimizer.param_groups[0]['lr'], epoch)
+                
+                # Log dataset size if using adaptive schedule
+                if adaptive_scheduler:
+                    writer.add_scalar('Dataset/Size', adaptive_scheduler.get_current_size(), epoch)
+                    writer.add_scalar('Dataset/Progress', adaptive_scheduler.get_progress(), epoch)
             
             # Progress indicator for adaptive schedule
             if adaptive_scheduler:
@@ -947,6 +1115,13 @@ def main() -> int:
                 progress_str = ""
             
             print(f"Epoch {epoch}/{phase_end_epoch - 1}{progress_str} - Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}% | Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%", flush=True)
+            
+            # Update learning rate scheduler (after warmup)
+            if scheduler and epoch >= args.lr_warmup_epochs:
+                if args.lr_scheduler == 'plateau':
+                    scheduler.step(val_loss)
+                else:
+                    scheduler.step()
             
             # Save best model based on validation loss
             if val_loss < best_val_loss:
@@ -968,12 +1143,22 @@ def main() -> int:
                     'model_version': args.model_version,
                 }
                 
+                # Add scheduler state if present
+                if scheduler:
+                    checkpoint_data['scheduler_state_dict'] = scheduler.state_dict()
+                    checkpoint_data['lr_scheduler'] = args.lr_scheduler
+                
+                # Add adaptive scheduler state if present
+                if adaptive_scheduler:
+                    checkpoint_data['adaptive_scheduler_state_dict'] = adaptive_scheduler.state_dict()
+                
                 # Add version-specific parameters
                 if args.model_version == MODEL_VERSION_TRANSFORMER:
                     checkpoint_data.update({
                         'num_heads': args.num_heads,
                         'num_layers': args.num_layers,
                         'dropout': args.dropout,
+                        'gradient_checkpointing': args.gradient_checkpointing,
                     })
                 
                 torch.save(checkpoint_data, output_path)
@@ -1022,6 +1207,21 @@ def main() -> int:
     
     print(f"\n✓ Training complete! Best validation loss: {best_val_loss:.4f}")
     print(f"  Model saved to: {args.output}")
+    
+    # Log final metrics to TensorBoard
+    if writer is not None:
+        writer.add_hparams(
+            hparams,
+            {
+                'hparam/best_val_loss': best_val_loss,
+                'hparam/final_train_loss': train_loss if 'train_loss' in locals() else float('inf'),
+                'hparam/total_epochs': total_epochs_run,
+            }
+        )
+        
+        # Close TensorBoard writer
+        writer.close()
+        print(f"  TensorBoard logs: {log_dir}")
     
     return 0
 

@@ -29,15 +29,7 @@ cd website
 3. Install dependencies:
 
 ```bash
-uv venv
-uv pip install -r requirements.txt
-```
-
-Or activate and install in one go:
-```bash
-uv venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-uv pip install -r requirements.txt
+uv sync
 ```
 
 ## Running the Server
@@ -52,8 +44,7 @@ Use the included start script that handles everything:
 
 This script will:
 - Install uv if needed
-- Create a virtual environment with `uv venv`
-- Install all dependencies with `uv pip install`
+- Install all dependencies with `uv sync`
 - Check if the API server is running
 - Start the Flask server
 
@@ -62,13 +53,9 @@ This script will:
 Start the server with default settings (port 5000):
 
 ```bash
-# First time setup
-uv venv
-uv pip install -r requirements.txt
-
-# Run the server
-source .venv/bin/activate
-python app.py
+# First time setup and run
+uv sync
+uv run python app.py
 ```
 
 The server will start at `http://localhost:5000`
@@ -94,8 +81,9 @@ API_HOST=your-api-host API_PORT=8080 python app.py
 For production deployment, use a WSGI server like Gunicorn:
 
 ```bash
-uv pip install gunicorn
-gunicorn -w 4 -b 0.0.0.0:5000 app:app
+# Add gunicorn to pyproject.toml dev dependencies first, then:
+uv sync
+uv run gunicorn -w 4 -b 0.0.0.0:5000 app:app
 ```
 
 ## Using the Web Interface
@@ -146,8 +134,7 @@ Proxies requests to the C++ API server.
 ```
 website/
 ├── app.py              # Flask application
-├── pyproject.toml      # Modern Python dependencies (recommended)
-├── requirements.txt    # Traditional pip dependencies (also supported)
+├── pyproject.toml      # Python dependencies
 ├── start.sh            # Quick start script
 ├── templates/
 │   └── index.html     # Web interface

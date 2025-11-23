@@ -17,7 +17,7 @@ Generate reinforcement learning training data by simulating complete poker hands
 
 ```bash
 # Install dependencies
-uv pip install -r requirements.txt
+uv sync
 
 # Start API server
 cd ../api && make && ./build/poker_api 8080
@@ -150,6 +150,77 @@ Outputs probability distribution over 6 actions:
 5. **Validation**: Track performance on held-out data
 6. **Checkpointing**: Save best model
 
+### TensorBoard Visualization
+
+Monitor training progress in real-time with TensorBoard:
+
+**Start TensorBoard:**
+
+```bash
+# In a separate terminal
+tensorboard --logdir=/tmp/pokersim/tensorboard
+# Then open http://localhost:6006 in your browser
+```
+
+**Train with TensorBoard (enabled by default):**
+
+```bash
+uv run python train.py --data /tmp/pokersim/data/rollouts.json --epochs 100
+```
+
+**TensorBoard logs:**
+- **Loss/Train & Loss/Validation**: Track model convergence
+- **Accuracy/Train & Accuracy/Validation**: Monitor prediction accuracy
+- **Learning_Rate**: View learning rate over time
+- **Dataset/Size & Dataset/Progress**: Track adaptive dataset growth
+- **Batch metrics**: Fine-grained loss tracking during training
+
+**Compare multiple runs:**
+
+TensorBoard automatically organizes runs by timestamp, making it easy to compare different hyperparameters:
+
+```bash
+# Run 1: Default settings
+uv run python train.py --data data.json --epochs 100
+
+# Run 2: Larger model
+uv run python train.py --data data.json --epochs 100 --hidden-dim 512
+
+# Run 3: Different learning rate
+uv run python train.py --data data.json --epochs 100 --lr 0.0001
+```
+
+All runs will appear in TensorBoard for easy comparison.
+
+**Custom log directory:**
+
+```bash
+uv run python train.py --tensorboard-dir ./my_logs
+tensorboard --logdir=./my_logs
+```
+
+**Disable TensorBoard:**
+
+```bash
+uv run python train.py --no-tensorboard
+```
+
+**Continuous training with TensorBoard:**
+
+The continuous training system automatically logs to TensorBoard:
+
+```bash
+./start_continuous_training.sh
+# In another terminal:
+tensorboard --logdir=/tmp/pokersim/tensorboard_v2
+```
+
+You can disable it with:
+
+```bash
+./start_continuous_training.sh --no-tensorboard
+```
+
 ## Model Evaluation
 
 Evaluate the trained model on test data:
@@ -244,6 +315,28 @@ The system runs three concurrent processes:
 
 By default, the system **accumulates all data** and trains on increasingly large datasets for better learning.
 
+### Improved Training Configuration (Default)
+
+The continuous training system uses optimized defaults for better convergence:
+
+**Model Scaling:**
+- Hidden dimension: **512** (2x larger than before)
+- Transformer layers: **8** (2x deeper)
+- Attention heads: **16** (2x more)
+- Total parameters: **~5M** (10x larger model)
+
+**Training Improvements:**
+- Learning rate: **0.0001** with cosine annealing scheduler
+- Warmup: 5 epochs for stable training start
+- Optimizer: AdamW with weight decay 0.001
+- Dropout: 0.2 for better regularization
+- Gradient checkpointing: Enabled for memory efficiency
+
+**Adaptive Schedule:**
+- Initial data: **50%** (starts with more data)
+- Growth factor: **1.3x** (smoother growth)
+- Patience: **3 epochs** (faster adaptation)
+
 ### Configuration
 
 **Common options:**
@@ -266,12 +359,23 @@ By default, the system **accumulates all data** and trains on increasingly large
 
 ```bash
 uv run python continuous_trainer.py \
-    --batch-size 5000 \
     --epochs-per-cycle 50 \
     --max-data-files 10 \
     --cpu-threshold 0.80 \
     --memory-threshold 0.85
 ```
+
+**Maximum model size (requires 16GB+ RAM):**
+
+```bash
+uv run python continuous_trainer.py \
+    --hidden-dim 1024 \
+    --num-heads 32 \
+    --num-layers 12 \
+    --learning-rate 0.00005
+```
+
+This creates a **~30M parameter** model (similar to GPT-2 small).
 
 ### Resource Management
 
@@ -283,7 +387,7 @@ The system automatically:
 
 ### Model Outputs
 
-Models are saved to `/tmp/pokersim/models/`:
+Models are saved to `/tmp/pokersim/models_v2/`:
 - `poker_model.pt` - Latest model
 - `poker_model_YYYYMMDD_HHMMSS.pt` - Timestamped checkpoints
 
@@ -292,7 +396,7 @@ Models are saved to `/tmp/pokersim/models/`:
 ```bash
 cd training
 uv run python eval.py \
-    --model /tmp/pokersim/models/poker_model.pt \
+    --model /tmp/pokersim/models_v2/poker_model.pt \
     --num-hands 1000 \
     --num-players 6
 ```
@@ -312,7 +416,7 @@ cd ../api && ./build/poker_api 8080
 
 **ImportError: No module named 'torch'**
 ```bash
-uv pip install torch
+uv sync
 ```
 
 **Model file not found**

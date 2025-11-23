@@ -21,8 +21,7 @@ echo ""
 
 # Install dependencies
 echo "📦 Installing dependencies..."
-uv venv --allow-existing
-uv pip install -r requirements.txt
+uv sync
 echo "✓ Dependencies installed"
 echo ""
 

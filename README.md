@@ -7,6 +7,7 @@ A full-stack poker simulation system with a Python web interface and high-perfor
 This monorepo contains:
 - **Website**: Python Flask web server with modern UI for poker simulations
 - **API**: Pure C++ API server for fast game state simulations
+- **Training**: Reinforcement learning system for training poker AI agents
 
 ## Architecture
 
@@ -48,10 +49,8 @@ In a new terminal:
 
 ```bash
 cd website
-uv venv  # Create virtual environment
-uv pip install -r requirements.txt  # Install dependencies
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-python app.py
+uv sync  # Create virtual environment and install dependencies
+uv run python app.py
 ```
 
 **Don't have uv?** Install it first:
@@ -72,16 +71,22 @@ pokersim/
 ├── README.md              # This file
 ├── website/               # Python Flask web server
 │   ├── app.py            # Flask application
-│   ├── requirements.txt  # Python dependencies
+│   ├── pyproject.toml    # Python dependencies
 │   ├── templates/
 │   │   └── index.html   # Web UI
 │   └── README.md        # Website documentation
-└── api/                  # C++ API server
-    ├── src/             # Source files
-    ├── tests/           # Test files
-    ├── CMakeLists.txt   # CMake configuration
-    ├── Makefile         # Make configuration
-    └── README.md        # API & engine documentation
+├── api/                  # C++ API server
+│   ├── src/             # Source files
+│   ├── tests/           # Test files
+│   ├── CMakeLists.txt   # CMake configuration
+│   ├── Makefile         # Make configuration
+│   └── README.md        # API & engine documentation
+└── training/             # RL training system
+    ├── generate_rollouts.py  # Generate poker game data
+    ├── train.py              # Train neural networks
+    ├── eval.py               # Evaluate models
+    ├── continuous_trainer.py # Continuous training loop
+    └── README.md             # Training documentation
 ```
 
 ## Features
@@ -149,6 +154,36 @@ curl -X POST http://localhost:8080/simulate \
 ```
 
 **For complete API documentation, see [`api/README.md`](api/README.md)**
+
+### Train a Poker AI
+
+Train a neural network to learn poker strategy:
+
+```bash
+# Start the API server
+cd api && make && ./build/poker_api 8080
+
+# In a new terminal, generate training data and train a model
+cd training
+uv sync  # Install dependencies
+uv run python generate_rollouts.py --num-rollouts 5000 --agent-type mixed
+uv run python train.py --data /tmp/pokersim/data/rollouts.json --epochs 100
+
+# Monitor training with TensorBoard
+tensorboard --logdir=/tmp/pokersim/tensorboard
+```
+
+**For continuous, self-improving training:**
+
+```bash
+cd training
+./start_continuous_training.sh
+
+# In another terminal, monitor with TensorBoard
+tensorboard --logdir=/tmp/pokersim/tensorboard_v2
+```
+
+**For complete training documentation, see [`training/README.md`](training/README.md)**
 
 ## Development
 
@@ -278,8 +313,7 @@ curl http://localhost:5000
 - The first build downloads dependencies (requires internet)
 
 ### Python import errors
-- Activate virtual environment if using one
-- Install dependencies: `uv pip install -r requirements.txt`
+- Install dependencies: `uv sync`
 
 ## Performance
 

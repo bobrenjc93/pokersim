@@ -17,7 +17,7 @@ Or customize game configs:
 
 # Model architecture versions (imported from train.py for consistency)
 # This determines which directories to use for data and models
-MODEL_VERSION = 2  # Current model version (1=legacy feed-forward, 2=transformer)
+MODEL_VERSION = 4  # Current model version (1=legacy feed-forward, 2=transformer)
 
 # =============================================================================
 # Game Configuration

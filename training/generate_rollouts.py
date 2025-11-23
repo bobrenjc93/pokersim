@@ -48,7 +48,7 @@ try:
 except ImportError:
     HAS_REQUESTS = False
     print("⚠️  Warning: requests library not found, falling back to curl subprocess")
-    print("   For better performance: pip install requests")
+    print("   For better performance: uv sync")
 
 
 # =============================================================================
