@@ -29,10 +29,12 @@ echo "----------------------------------------"
 if command -v uv &> /dev/null; then
     # Run Python API tests with uv
     uv run tests/test_stateless_api.py "$@"
+    uv run tests/test_stateful_api.py "$@"
     echo ""
 elif command -v python3 &> /dev/null; then
     # Run Python API tests with python3
     python3 tests/test_stateless_api.py "$@"
+    python3 tests/test_stateful_api.py "$@"
     echo ""
 else
     echo "⚠️  Neither uv nor python3 found - skipping Python API tests"

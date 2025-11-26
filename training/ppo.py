@@ -95,7 +95,10 @@ class PPOTrainer:
             'kl_divergence': [],
             'clip_fraction': [],
             'explained_variance': [],
-            'learning_rate': []
+            'learning_rate': [],
+            'grad_norm': [],
+            'value_mean': [],
+            'return_mean': []
         }
     
     def compute_gae(
@@ -227,8 +230,8 @@ class PPOTrainer:
                 # Value loss with clipping (improves stability)
                 values = values.squeeze() # Ensure shape match
                 
-                # Unclipped loss
-                v_loss_unclipped = (values - mb_returns) ** 2
+                # Unclipped loss - use Huber loss (SmoothL1) for robustness against outliers
+                v_loss_unclipped = F.smooth_l1_loss(values, mb_returns, reduction='none')
                 
                 # Clipped loss
                 v_clipped = mb_old_values + torch.clamp(
@@ -236,7 +239,7 @@ class PPOTrainer:
                     -self.clip_epsilon,
                     self.clip_epsilon
                 )
-                v_loss_clipped = (v_clipped - mb_returns) ** 2
+                v_loss_clipped = F.smooth_l1_loss(v_clipped, mb_returns, reduction='none')
                 
                 # Max of clipped and unclipped (conservative update)
                 v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
@@ -258,7 +261,9 @@ class PPOTrainer:
                     self.accelerator.backward(loss)
                 else:
                     loss.backward()
-                nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+                
+                # Gradient clipping and tracking
+                grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
                 self.optimizer.step()
                 
                 # Track statistics
@@ -276,6 +281,8 @@ class PPOTrainer:
                     epoch_stats['total_loss'].append(loss.item())
                     epoch_stats['kl_divergence'].append(kl_div.item())
                     epoch_stats['clip_fraction'].append(clip_fraction.item())
+                    if 'grad_norm' not in epoch_stats: epoch_stats['grad_norm'] = []
+                    epoch_stats['grad_norm'].append(grad_norm.item() if hasattr(grad_norm, 'item') else grad_norm)
             
             # Early stopping based on KL divergence
             if self.target_kl is not None:
@@ -306,6 +313,8 @@ class PPOTrainer:
             var_returns = returns_cpu.var()
             explained_var = 1 - (returns_cpu - all_values).var() / (var_returns + 1e-8)
             epoch_stats['explained_variance'] = [explained_var.item()]
+            epoch_stats['value_mean'] = [all_values.mean().item()]
+            epoch_stats['return_mean'] = [returns_cpu.mean().item()]
         
         # Average statistics
         avg_stats = {

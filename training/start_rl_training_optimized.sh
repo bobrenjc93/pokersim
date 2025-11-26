@@ -30,14 +30,14 @@ API_DIR="$(dirname "$SCRIPT_DIR")/api"
 
 # Training parameters (optimized for convergence)
 ITERATIONS=5000
-EPISODES_PER_ITER=100
-PPO_EPOCHS=10         # Increased for convergence
-MINI_BATCH_SIZE=512   # Increased for stability
-LEARNING_RATE=0.0001  # 1e-4, lowered for stability
-ENTROPY_COEF=0.01     # Default 0.01
-VALUE_LOSS_COEF=0.5   # Default 0.5
-GAE_LAMBDA=0.95       # Default 0.95
-NUM_PLAYERS=2         # Heads-up (simpler)
+EPISODES_PER_ITER=2000    # Significantly increased for better variance reduction (was 100)
+PPO_EPOCHS=20            # Increased to extract more from data (was 10)
+MINI_BATCH_SIZE=512      # Standard batch size
+LEARNING_RATE=0.0002     # Slightly increased with larger batch size
+ENTROPY_COEF=0.02        # Increased exploration
+VALUE_LOSS_COEF=0.5      # Default 0.5
+GAE_LAMBDA=0.95          # Default 0.95
+NUM_PLAYERS=2            # Heads-up (simpler)
 SMALL_BLIND=10
 BIG_BLIND=20
 STARTING_CHIPS=1000
@@ -142,12 +142,12 @@ fi
 echo ""
 echo -e "${BLUE}📊 Optimizations Enabled:${NC}"
 echo "   ✓ Heads-up play (2 players) - simpler to learn"
-echo "   ✓ Learning rate: ${LEARNING_RATE} - lowered for stability"
-echo "   ✓ Entropy coefficient: ${ENTROPY_COEF}"
+echo "   ✓ Learning rate: ${LEARNING_RATE} - adjusted for stability"
+echo "   ✓ Entropy coefficient: ${ENTROPY_COEF} - increased exploration"
 echo "   ✓ Model size: Large (1024 dim, 8 layers, 16 heads)"
 echo "   ✓ Reward normalization - improved stability"
 echo "   ✓ Learning rate scheduling - adaptive learning"
-echo "   ✓ ${EPISODES_PER_ITER} episodes/iteration - balanced updates"
+echo "   ✓ ${EPISODES_PER_ITER} episodes/iteration - massive variance reduction"
 
 echo ""
 echo -e "${BLUE}📊 TensorBoard Monitoring:${NC}"

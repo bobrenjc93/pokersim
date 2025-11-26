@@ -1,12 +1,60 @@
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 #include "PokerEngineAPI.h"
+#include "Game.h"
+#include "JsonSerializer.h"
 #include "json.hpp"
 
 namespace py = pybind11;
 
+// Helper to convert nlohmann::json to py::object
+py::object json_to_py(const nlohmann::json& j) {
+    if (j.is_null()) {
+        return py::none();
+    } else if (j.is_boolean()) {
+        return py::bool_(j.get<bool>());
+    } else if (j.is_number_integer()) {
+        // nlohmann::json::number_integer_t is usually long long
+        return py::int_(j.get<nlohmann::json::number_integer_t>());
+    } else if (j.is_number_float()) {
+        return py::float_(j.get<double>());
+    } else if (j.is_string()) {
+        return py::str(j.get<std::string>());
+    } else if (j.is_array()) {
+        py::list l;
+        for (const auto& item : j) {
+            l.append(json_to_py(item));
+        }
+        return l;
+    } else if (j.is_object()) {
+        py::dict d;
+        for (auto it = j.begin(); it != j.end(); ++it) {
+            d[py::str(it.key())] = json_to_py(it.value());
+        }
+        return d;
+    }
+    return py::none();
+}
+
+// Helper to expose Game state as JSON string
+std::string get_game_state_json(const Game& game) {
+    return JsonSerializer::gameToJson(game).dump();
+}
+
+// Helper to expose Game state as dict (avoids string parsing in Python)
+py::dict get_game_state_dict(const Game& game) {
+    auto j = JsonSerializer::gameToJson(game);
+    return json_to_py(j).cast<py::dict>();
+}
+
+// Helper to process action via string
+bool process_action_str(Game& game, const std::string& playerId, const std::string& actionStr, int amount) {
+    Player::Action action = JsonSerializer::stringToAction(actionStr);
+    return game.processAction(playerId, action, amount);
+}
+
 std::string process_request(const std::string& request_str) {
     try {
-        py::gil_scoped_release release;
         auto request_json = nlohmann::json::parse(request_str);
         PokerEngineAPI api;
         auto response_json = api.processRequest(request_json);
@@ -21,6 +69,38 @@ std::string process_request(const std::string& request_str) {
 
 PYBIND11_MODULE(poker_api_binding, m) {
     m.doc() = "Poker Engine API bindings";
+    
+    // Existing stateless API
     m.def("process_request", &process_request, "Process a poker engine request (takes JSON string, returns JSON string)");
-}
 
+    // GameConfig binding
+    py::class_<Game::GameConfig>(m, "GameConfig")
+        .def(py::init<>())
+        .def_readwrite("smallBlind", &Game::GameConfig::smallBlind)
+        .def_readwrite("bigBlind", &Game::GameConfig::bigBlind)
+        .def_readwrite("startingChips", &Game::GameConfig::startingChips)
+        .def_readwrite("minPlayers", &Game::GameConfig::minPlayers)
+        .def_readwrite("maxPlayers", &Game::GameConfig::maxPlayers)
+        .def_readwrite("seed", &Game::GameConfig::seed);
+
+    // Game binding
+    py::class_<Game>(m, "Game")
+        .def(py::init<const Game::GameConfig&>())
+        .def("add_player", [](Game& self, const std::string& id, const std::string& name, int chips) {
+            return self.addPlayer(id, name, chips);
+        }, py::arg("id"), py::arg("name"), py::arg("chips") = 0)
+        .def("remove_player", [](Game& self, const std::string& id) {
+            return self.removePlayer(id);
+        })
+        .def("start_hand", &Game::startHand)
+        .def("process_action", &process_action_str, py::arg("player_id"), py::arg("action"), py::arg("amount") = 0)
+        .def("advance_game", &Game::advanceGame)
+        .def("get_stage_name", &Game::getStageName)
+        .def("get_state_json", &get_game_state_json)
+        .def("get_state_dict", &get_game_state_dict, "Get game state as a Python dictionary (faster than parsing JSON string)")
+        .def("get_current_player_id", [](const Game& self) -> std::optional<std::string> {
+            const Player* p = self.getCurrentPlayer();
+            if (p) return p->getId();
+            return std::nullopt;
+        });
+}

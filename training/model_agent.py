@@ -460,3 +460,118 @@ class RandomAgent:
             
         action_type, amount = convert_action_label(action_label, state)
         return action_type, amount, action_label
+
+
+class HeuristicAgent:
+    """
+    Rule-based agent for baseline comparison.
+    Implements a simple aggressive strategy.
+    """
+    def __init__(self, player_id: str, name: str):
+        self.player_id = player_id
+        self.name = name
+        
+    def reset_hand(self):
+        pass
+        
+    def observe_action(self, player_id: str, action_type: str, amount: int, pot: int, stage: str):
+        pass
+        
+    def _get_hand_strength(self, hole_cards: List[Dict], community_cards: List[Dict]) -> float:
+        """
+        Estimate hand strength (0.0 to 1.0).
+        Simple proxy: pair check, high card, etc.
+        For a real implementation, we'd use a hand evaluator library.
+        """
+        # Placeholder for simple heuristic
+        # Return random strength for now, biased by card ranks
+        if not hole_cards:
+            return 0.0
+            
+        # Parse ranks
+        rank_map = {'2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9, 
+                   'T': 10, 'J': 11, 'Q': 12, 'K': 13, 'A': 14}
+        
+        ranks = []
+        for c in hole_cards:
+            r = c.get('rank', '2')
+            ranks.append(rank_map.get(r, 2))
+            
+        h1, h2 = sorted(ranks, reverse=True)
+        
+        # Preflop heuristic
+        if not community_cards:
+            # Pocket pair
+            if h1 == h2:
+                return 0.5 + (h1 / 14.0) * 0.5
+            
+            # High cards
+            return (h1 / 14.0) * 0.6 + (h2 / 14.0) * 0.2
+            
+        # Postflop - just random noise mixed with preflop strength for this simple baseline
+        # In a real bot we'd evaluate the full hand
+        return (h1 / 14.0) * 0.4 + (h2 / 14.0) * 0.1 + random.random() * 0.5
+
+    def select_action(self, state: Dict[str, Any], legal_actions: List[str]) -> Tuple[str, int, str]:
+        # Get hand strength
+        strength = self._get_hand_strength(state.get('hole_cards', []), state.get('community_cards', []))
+        
+        # Determine desired action based on strength
+        can_check = 'check' in legal_actions
+        can_call = 'call' in legal_actions
+        can_bet = 'bet' in legal_actions
+        can_raise = 'raise' in legal_actions
+        
+        # Very strong hand -> Bet/Raise
+        if strength > 0.8:
+            if can_raise:
+                action_label = 'raise_100%'
+            elif can_bet:
+                action_label = 'bet_75%'
+            elif can_call:
+                action_label = 'call'
+            else:
+                action_label = 'check' if can_check else 'fold'
+                
+        # Strong hand -> Bet small / Call
+        elif strength > 0.6:
+            if can_bet:
+                action_label = 'bet_50%'
+            elif can_call:
+                action_label = 'call'
+            else:
+                action_label = 'check' if can_check else 'fold'
+        
+        # Medium hand -> Check/Call if cheap
+        elif strength > 0.4:
+            if can_check:
+                action_label = 'check'
+            elif can_call:
+                # Call if not too expensive relative to stack (simplified)
+                action_label = 'call'
+            else:
+                action_label = 'fold'
+        
+        # Weak hand -> Check/Fold (bluff occasionally)
+        else:
+            if random.random() < 0.1 and can_bet: # Bluff 10%
+                action_label = 'bet_50%'
+            elif can_check:
+                action_label = 'check'
+            else:
+                action_label = 'fold'
+        
+        # Fallback validation
+        action_type, amount = convert_action_label(action_label, state)
+        
+        # If conversion failed or action not legal (e.g. raise not legal), fallback
+        base_type = action_type
+        if base_type == 'bet' and not can_bet:
+             action_label = 'check' if can_check else 'fold'
+        elif base_type == 'raise' and not can_raise:
+             action_label = 'call' if can_call else 'fold'
+             
+        # Re-convert
+        action_type, amount = convert_action_label(action_label, state)
+        
+        return action_type, amount, action_label

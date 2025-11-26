@@ -20,6 +20,7 @@ import concurrent.futures
 import argparse
 import random
 import sys
+import os
 import time
 import traceback
 from collections import deque
@@ -350,6 +351,9 @@ class RLTrainingSession:
         total_reward_bb = 0
         total_episodes = 0
         
+        # Track action counts for evaluation
+        eval_action_counts = {name: 0 for name in ACTION_NAMES}
+        
         # Run evaluation episodes
         # We use concurrent execution for speed, similar to train_iteration
         max_workers = min(num_episodes, 10)
@@ -370,6 +374,10 @@ class RLTrainingSession:
                         continue
                         
                     total_episodes += 1
+                    
+                    # Update eval action counts
+                    for act_idx in episode['actions']:
+                        eval_action_counts[ACTION_NAMES[act_idx.item()]] += 1
                     
                     # Check if won (profit > 0)
                     main_reward = episode['main_reward'] # This is normalized by starting chips
@@ -399,6 +407,24 @@ class RLTrainingSession:
         if self.log_level >= 1:
             print(f"  Win Rate: {win_rate:.2%}")
             print(f"  BB/100: {bb_per_100:.2f}")
+            
+            # Print action distribution for evaluation
+            total_eval_actions = sum(eval_action_counts.values())
+            if total_eval_actions > 0:
+                print("  Eval Action Distribution:")
+                grouped_counts = {'fold': 0, 'check': 0, 'call': 0, 'bet': 0, 'raise': 0, 'all_in': 0}
+                for name, count in eval_action_counts.items():
+                    if name in grouped_counts:
+                        grouped_counts[name] += count
+                    elif name.startswith('bet_'):
+                        grouped_counts['bet'] += count
+                    elif name.startswith('raise_'):
+                        grouped_counts['raise'] += count
+                
+                for act in ['fold', 'check', 'call', 'bet', 'raise', 'all_in']:
+                    count = grouped_counts[act]
+                    pct = count / total_eval_actions
+                    print(f"    {act.ljust(8)}: {pct:.1%} ({count})")
             
         # Log to TensorBoard
         if self.writer:
@@ -443,8 +469,15 @@ class RLTrainingSession:
         episode_rewards = []
         episode_lengths = []
         
+        # Track action counts
+        action_counts = {name: 0 for name in ACTION_NAMES}
+        
         # Collect episodes in parallel
-        max_workers = min(num_episodes, 10)  # Cap at 10 threads to avoid overloading API/System
+        # Use all available CPUs (leaving a few for system)
+        # Cap at 20 to avoid excessive overhead if CPU count is very high
+        num_workers = min(num_episodes, max(1, (os.cpu_count() or 4) - 1))
+        max_workers = min(num_workers, 20)
+        
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
                 executor.submit(self.collect_episode, use_opponent_pool=True, verbose=verbose)
@@ -465,6 +498,10 @@ class RLTrainingSession:
                     self.stats['avg_episode_length'].append(len(episode['states']))
                     self.stats['win_rate'].append(1.0 if episode['main_reward'] > 0 else 0.0)
                     
+                    # Update action counts
+                    for act_idx in episode['actions']:
+                        action_counts[ACTION_NAMES[act_idx.item()]] += 1
+                    
                     # Track average value estimate
                     if len(episode['values']) > 0:
                         avg_value = sum([v.item() for v in episode['values']]) / len(episode['values'])
@@ -480,7 +517,8 @@ class RLTrainingSession:
                     # Normalize reward to be in range [-1, 1]
                     # episode['main_reward'] is already normalized by starting_chips in collect_episode
                     normalized_reward = episode['main_reward']
-                    normalized_reward = max(-1.0, min(1.0, normalized_reward))  # Clip to [-1, 1]
+                    # Relax clipping to allow for > 1.0 wins in deep stack scenarios, but cap extreme values
+                    normalized_reward = max(-2.0, min(5.0, normalized_reward))
                     
                     # Add intermediate shaping rewards for better learning signal
                     # Small reward for staying in the hand (engagement)
@@ -540,6 +578,26 @@ class RLTrainingSession:
             print(f"  Avg Episode Reward: {sum(episode_rewards)/len(episode_rewards):.3f}")
             print(f"  Avg Episode Length: {sum(episode_lengths)/len(episode_lengths):.1f}")
             print(f"  Win Rate: {sum(1 for r in episode_rewards if r > 0) / len(episode_rewards):.2%}")
+            
+            # Print action distribution
+            total_actions = sum(action_counts.values())
+            if total_actions > 0:
+                print("\n  Action Distribution:")
+                # Group bets and raises
+                grouped_counts = {'fold': 0, 'check': 0, 'call': 0, 'bet': 0, 'raise': 0, 'all_in': 0}
+                for name, count in action_counts.items():
+                    if name in grouped_counts:
+                        grouped_counts[name] += count
+                    elif name.startswith('bet_'):
+                        grouped_counts['bet'] += count
+                    elif name.startswith('raise_'):
+                        grouped_counts['raise'] += count
+                
+                for act in ['fold', 'check', 'call', 'bet', 'raise', 'all_in']:
+                    count = grouped_counts[act]
+                    pct = count / total_actions
+                    print(f"    {act.ljust(8)}: {pct:.1%} ({count})")
+
             print(f"\nRunning PPO update...")
         
         # PPO update
@@ -549,7 +607,7 @@ class RLTrainingSession:
         )
         
         # Anneal entropy coefficient (decay to 0.001 minimum)
-        self.ppo_trainer.entropy_coef = max(0.001, self.ppo_trainer.entropy_coef * 0.995)
+        self.ppo_trainer.entropy_coef = max(0.001, self.ppo_trainer.entropy_coef * 0.999)
         if self.writer:
              self.writer.add_scalar('PPO/EntropyCoef', self.ppo_trainer.entropy_coef, self.stats['iteration'])
         
@@ -562,6 +620,11 @@ class RLTrainingSession:
             print(f"  Value Loss: {ppo_stats['value_loss']:.4f}")
             print(f"  Entropy: {ppo_stats['entropy']:.4f}")
             print(f"  KL Divergence: {ppo_stats['kl_divergence']:.4f}")
+            print(f"  Grad Norm: {ppo_stats.get('grad_norm', 0.0):.4f}")
+            
+            if 'value_mean' in ppo_stats and 'return_mean' in ppo_stats:
+                print(f"  Value Mean: {ppo_stats['value_mean']:.4f} vs Return Mean: {ppo_stats['return_mean']:.4f}")
+                
             print(f"  Explained Variance: {ppo_stats['explained_variance']:.4f}")
             
             # Convergence indicator
@@ -690,10 +753,10 @@ def main() -> int:
     # Training parameters - optimized for convergence
     parser.add_argument('--iterations', type=int, default=5000,
                        help='Number of training iterations (default: 5000)')
-    parser.add_argument('--episodes-per-iter', type=int, default=200,
-                       help='Episodes per iteration (default: 200, increased for stability)')
-    parser.add_argument('--ppo-epochs', type=int, default=10,
-                       help='PPO epochs per update (default: 10)')
+    parser.add_argument('--episodes-per-iter', type=int, default=1000,
+                       help='Episodes per iteration (default: 1000, increased for stability)')
+    parser.add_argument('--ppo-epochs', type=int, default=15,
+                       help='PPO epochs per update (default: 15)')
     parser.add_argument('--mini-batch-size', type=int, default=128,
                        help='Mini-batch size for PPO (default: 128)')
     

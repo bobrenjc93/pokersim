@@ -36,6 +36,7 @@ try:
         extract_state,
         ModelAgent,
         RandomAgent,
+        HeuristicAgent,
         load_model_agent
     )
     # Helper for type hinting
@@ -46,6 +47,41 @@ except ImportError as e:
     print(f"Error importing modules from training directory: {e}")
     print(f"Make sure {TRAINING_DIR} exists and contains the required files.")
     sys.exit(1)
+
+
+class EloRating:
+    """
+    Simple ELO rating system implementation.
+    """
+    def __init__(self, k_factor: float = 32.0, initial_rating: float = 1000.0):
+        self.k_factor = k_factor
+        self.initial_rating = initial_rating
+        self.ratings: Dict[str, float] = defaultdict(lambda: initial_rating)
+        
+    def get_rating(self, player_id: str) -> float:
+        return self.ratings[player_id]
+        
+    def get_expected_score(self, rating_a: float, rating_b: float) -> float:
+        """Calculate expected score for player A against player B"""
+        return 1.0 / (1.0 + 10.0 ** ((rating_b - rating_a) / 400.0))
+        
+    def update_ratings(self, player_a: str, player_b: str, score_a: float) -> Tuple[float, float]:
+        """
+        Update ratings based on match result.
+        score_a: 1.0 for win, 0.5 for draw, 0.0 for loss
+        """
+        ra = self.ratings[player_a]
+        rb = self.ratings[player_b]
+        
+        expected_a = self.get_expected_score(ra, rb)
+        
+        new_ra = ra + self.k_factor * (score_a - expected_a)
+        new_rb = rb + self.k_factor * ((1.0 - score_a) - (1.0 - expected_a))
+        
+        self.ratings[player_a] = new_ra
+        self.ratings[player_b] = new_rb
+        
+        return new_ra, new_rb
 
 
 class Arena:
@@ -102,22 +138,31 @@ class Arena:
             print(f"API Error: {e}")
             return {'success': False, 'error': str(e)}
 
-    def play_hand(self, model_a: Optional[PokerActorCritic], model_b: Optional[PokerActorCritic], 
-                 deterministic: bool = True) -> Dict[str, float]:
-        """Play a single hand between two models (or Random if None). Returns rewards."""
+    def play_hand(self, agent_a_config: Dict, agent_b_config: Dict) -> Dict[str, float]:
+        """
+        Play a single hand between two agents.
         
-        # Create agents for this hand (ensures fresh encoders)
-        if model_a:
-            agent_a = load_model_agent('p0', 'Model A', model=model_a, 
-                                     device=self.device, deterministic=deterministic)
-        else:
-            agent_a = RandomAgent('p0', 'Random A')
-            
-        if model_b:
-            agent_b = load_model_agent('p1', 'Model B', model=model_b, 
-                                     device=self.device, deterministic=deterministic)
-        else:
-            agent_b = RandomAgent('p1', 'Random B')
+        Args:
+            agent_a_config: Dict with 'type' ('model', 'random', 'heuristic') and 'model'/'path' if needed
+            agent_b_config: Dict with 'type' ('model', 'random', 'heuristic') and 'model'/'path' if needed
+        """
+        
+        def create_agent(player_id: str, config: Dict) -> Any:
+            name = config.get('name', f"{config['type']}_{player_id}")
+            if config['type'] == 'model':
+                model = config.get('model')
+                if model is None and 'path' in config:
+                    model = self.load_model(Path(config['path']))
+                
+                return load_model_agent(player_id, name, model=model, 
+                                      device=self.device, deterministic=config.get('deterministic', True))
+            elif config['type'] == 'heuristic':
+                return HeuristicAgent(player_id, name)
+            else:
+                return RandomAgent(player_id, name)
+
+        agent_a = create_agent('p0', agent_a_config)
+        agent_b = create_agent('p1', agent_b_config)
         
         agents = {
             'p0': agent_a,
@@ -160,14 +205,20 @@ class Arena:
             state_dict = extract_state(game_state, current_player_id)
             
             # Get action
-            action_type, amount, action_label = agent.select_action(state_dict, legal_actions)
+            if hasattr(agent, 'select_action'):
+                action_type, amount, action_label = agent.select_action(state_dict, legal_actions)
+            else:
+                # Fallback for weird agent types?
+                action_type = 'check'
+                amount = 0
             
             # Notify all agents (update history/encoders)
             pot = game_state.get('pot', 0)
             stage_name = game_state.get('stage', 'Preflop')
             
             for pid, ag in agents.items():
-                ag.observe_action(current_player_id, action_type, amount, pot, stage_name)
+                if hasattr(ag, 'observe_action'):
+                    ag.observe_action(current_player_id, action_type, amount, pot, stage_name)
             
             # Apply action
             history.append({
@@ -194,14 +245,25 @@ class Arena:
             
         return rewards
 
-    def play_match(self, name_a: str, path_a: Optional[Path], 
-                   name_b: str, path_b: Optional[Path], 
+    def play_match(self, agent_a_config: Dict, agent_b_config: Dict, 
                    num_hands: int = 100) -> Dict:
-        """Play a match between two models"""
+        """Play a match between two agents"""
+        name_a = agent_a_config.get('name', 'Agent A')
+        name_b = agent_b_config.get('name', 'Agent B')
         print(f"Playing {name_a} vs {name_b} ({num_hands} hands)...")
         
-        model_a = self.load_model(path_a) if path_a else None
-        model_b = self.load_model(path_b) if path_b else None
+        # Pre-load models to avoid loading them for every hand
+        # We create copies of the config to avoid modifying the caller's dict
+        config_a = agent_a_config.copy()
+        config_b = agent_b_config.copy()
+        
+        if config_a.get('type') == 'model' and 'model' not in config_a and 'path' in config_a:
+            print(f"  Loading model A from {config_a['path']}...")
+            config_a['model'] = self.load_model(Path(config_a['path']))
+            
+        if config_b.get('type') == 'model' and 'model' not in config_b and 'path' in config_b:
+            print(f"  Loading model B from {config_b['path']}...")
+            config_b['model'] = self.load_model(Path(config_b['path']))
         
         results_a = []
         results_b = []
@@ -211,54 +273,57 @@ class Arena:
         total_rewards_a = 0
         total_rewards_b = 0
         
-        # Serial or parallel with index tracking
-        chunk_size = 10
-        for i in tqdm(range(0, num_hands, chunk_size), desc="Simulating"):
+        # Use a single executor for all hands
+        max_workers = os.cpu_count() or 4
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             batch_futures = []
             batch_swaps = []
             
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(chunk_size, 10)) as executor:
-                for j in range(i, min(i + chunk_size, num_hands)):
-                    swap = (j % 2 == 1)
-                    batch_swaps.append(swap)
+            # Submit all hands
+            for j in range(num_hands):
+                swap = (j % 2 == 1)
+                batch_swaps.append(swap)
+                if swap:
+                    # Swap positions (B is p0, A is p1)
+                    batch_futures.append(executor.submit(self.play_hand, config_b, config_a))
+                else:
+                    # A is p0, B is p1
+                    batch_futures.append(executor.submit(self.play_hand, config_a, config_b))
+            
+            # Collect results with progress bar
+            for k, f in tqdm(enumerate(batch_futures), total=num_hands, desc="Simulating"):
+                try:
+                    res = f.result()
+                    if res.get('error'): continue
+                    
+                    swap = batch_swaps[k]
+                    
                     if swap:
-                        batch_futures.append(executor.submit(self.play_hand, model_b, model_a))
+                        # p0 is B, p1 is A
+                        reward_a = res['p1']
+                        reward_b = res['p0']
                     else:
-                        batch_futures.append(executor.submit(self.play_hand, model_a, model_b))
-                
-                for k, f in enumerate(batch_futures):
-                    try:
-                        res = f.result()
-                        if res.get('error'): continue
+                        # p0 is A, p1 is B
+                        reward_a = res['p0']
+                        reward_b = res['p1']
                         
-                        swap = batch_swaps[k]
-                        
-                        if swap:
-                            # p0 is B, p1 is A
-                            reward_a = res['p1']
-                            reward_b = res['p0']
-                        else:
-                            # p0 is A, p1 is B
-                            reward_a = res['p0']
-                            reward_b = res['p1']
-                            
-                        results_a.append(reward_a)
-                        results_b.append(reward_b)
-                        total_rewards_a += reward_a
-                        total_rewards_b += reward_b
-                        
-                        if reward_a > 0: wins_a += 1
-                        if reward_b > 0: wins_b += 1
-                        
-                    except Exception as e:
-                        print(f"Error: {e}")
+                    results_a.append(reward_a)
+                    results_b.append(reward_b)
+                    total_rewards_a += reward_a
+                    total_rewards_b += reward_b
+                    
+                    if reward_a > 0: wins_a += 1
+                    if reward_b > 0: wins_b += 1
+                    
+                except Exception as e:
+                    print(f"Error: {e}")
         
         n = len(results_a)
         if n == 0: return {}
         
         return {
-            'model_a': name_a,
-            'model_b': name_b,
+            'agent_a': name_a,
+            'agent_b': name_b,
             'hands': n,
             'win_rate_a': wins_a / n,
             'win_rate_b': wins_b / n,
@@ -340,8 +405,8 @@ def main():
     parser.add_argument('--output-dir', type=str, default='arena_results', help='Output directory for results')
     parser.add_argument('--hands', type=int, default=1000, help='Number of hands per match')
     parser.add_argument('--device', type=str, default='cpu', help='Device (cpu/cuda/mps)')
-    parser.add_argument('--mode', type=str, choices=['ladder', 'all-vs-all', 'vs-random'], default='ladder',
-                       help='Evaluation mode: ladder (vs previous), all-vs-all, or vs-random')
+    parser.add_argument('--mode', type=str, choices=['ladder', 'all-vs-all', 'vs-random', 'elo'], default='ladder',
+                       help='Evaluation mode: ladder (vs previous), all-vs-all, vs-random, or elo')
     
     args = parser.parse_args()
     
@@ -360,13 +425,10 @@ def main():
     if args.mode == 'vs-random':
         print("Running evaluation vs Random...")
         for iter_num, path in checkpoints:
-            res = arena.play_match(
-                name_a=f"Iter_{iter_num}", 
-                path_a=path,
-                name_b="Random",
-                path_b=None, # None -> Random
-                num_hands=args.hands
-            )
+            config_a = {'type': 'model', 'path': str(path), 'name': f"Iter_{iter_num}"}
+            config_b = {'type': 'random', 'name': "Random"}
+            
+            res = arena.play_match(config_a, config_b, num_hands=args.hands)
             res['iteration'] = iter_num
             all_results.append(res)
             print(f"Iter {iter_num}: Win Rate {res['win_rate_a']:.2%}, BB/100 {res['bb_100_a']:.2f}")
@@ -380,18 +442,70 @@ def main():
             iter_a, path_a = sorted_cps[i]
             iter_b, path_b = sorted_cps[i-1]
             
-            res = arena.play_match(
-                name_a=f"Iter_{iter_a}", 
-                path_a=path_a,
-                name_b=f"Iter_{iter_b}",
-                path_b=path_b,
-                num_hands=args.hands
-            )
+            config_a = {'type': 'model', 'path': str(path_a), 'name': f"Iter_{iter_a}"}
+            config_b = {'type': 'model', 'path': str(path_b), 'name': f"Iter_{iter_b}"}
+            
+            res = arena.play_match(config_a, config_b, num_hands=args.hands)
             res['iteration'] = iter_a
             res['opponent_iteration'] = iter_b
             all_results.append(res)
             print(f"Iter {iter_a} vs {iter_b}: Win Rate {res['win_rate_a']:.2%}, BB/100 {res['bb_100_a']:.2f}")
+
+    elif args.mode == 'elo':
+        print("Running ELO evaluation...")
+        elo = EloRating()
+        
+        # Include baselines in ELO tracking
+        elo.ratings['Random'] = 800.0 # Bad baseline
+        elo.ratings['Heuristic'] = 1200.0 # Better baseline
+        
+        # Sort by iteration to simulate progression
+        sorted_cps = sorted(checkpoints, key=lambda x: x[0])
+        
+        # Initialize ratings for all models
+        for iter_num, _ in sorted_cps:
+             elo.ratings[f"Iter_{iter_num}"] = 1000.0
+        
+        # Play matches
+        # Strategy: Play each model against:
+        # 1. Random
+        # 2. Heuristic
+        # 3. Previous model
+        # 4. A few recent models
+        
+        for i in range(len(sorted_cps)):
+            iter_a, path_a = sorted_cps[i]
+            name_a = f"Iter_{iter_a}"
+            config_a = {'type': 'model', 'path': str(path_a), 'name': name_a}
             
+            opponents = []
+            # Always play Random and Heuristic
+            opponents.append({'type': 'random', 'name': 'Random'})
+            opponents.append({'type': 'heuristic', 'name': 'Heuristic'})
+            
+            # Play against previous 3 models
+            start_idx = max(0, i - 3)
+            for j in range(start_idx, i):
+                iter_b, path_b = sorted_cps[j]
+                opponents.append({'type': 'model', 'path': str(path_b), 'name': f"Iter_{iter_b}"})
+            
+            for opp_config in opponents:
+                name_b = opp_config['name']
+                res = arena.play_match(config_a, opp_config, num_hands=args.hands // len(opponents)) # Distribute hands
+                
+                # Update ELO
+                score_a = res['win_rate_a'] # Win rate as score approximation
+                # Or use binary win/loss? Win rate is smoother.
+                
+                new_ra, new_rb = elo.update_ratings(name_a, name_b, score_a)
+                
+                res['elo_a'] = new_ra
+                res['elo_b'] = new_rb
+                res['iteration'] = iter_a
+                all_results.append(res)
+                
+                print(f"  Result: {name_a} ({new_ra:.1f}) vs {name_b} ({new_rb:.1f}) -> WR {score_a:.2%}")
+
     # Save results
     df = pd.DataFrame(all_results)
     csv_path = arena.output_dir / f"results_{args.mode}_{int(time.time())}.csv"
@@ -418,6 +532,21 @@ def main():
             plt.grid(True, alpha=0.3)
             plt.axhline(y=0, color='r', linestyle='--', alpha=0.5)
             
+        elif args.mode == 'elo':
+             # Filter for just model iterations
+             elo_data = []
+             for k, v in elo.ratings.items():
+                 if k.startswith('Iter_'):
+                     iter_num = int(k.split('_')[1])
+                     elo_data.append({'iteration': iter_num, 'elo': v})
+             
+             elo_df = pd.DataFrame(elo_data).sort_values('iteration')
+             sns.lineplot(data=elo_df, x='iteration', y='elo', marker='o')
+             plt.title('ELO Rating Progression')
+             plt.ylabel('ELO')
+             plt.xlabel('Training Iteration')
+             plt.grid(True, alpha=0.3)
+        
         plot_path = arena.output_dir / f"plot_{args.mode}_{int(time.time())}.png"
         plt.savefig(plot_path)
         print(f"Plot saved to {plot_path}")
@@ -427,6 +556,8 @@ def main():
             ascii_plot(df, 'iteration', 'bb_100_a', 'Performance vs Random')
         elif args.mode == 'ladder':
             ascii_plot(df, 'iteration', 'bb_100_a', 'Performance vs Previous Version')
+        elif args.mode == 'elo':
+             ascii_plot(elo_df, 'iteration', 'elo', 'ELO Rating')
 
 if __name__ == "__main__":
     main()
