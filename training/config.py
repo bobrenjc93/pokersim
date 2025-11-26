@@ -1,5 +1,5 @@
 """
-Configuration presets for RL training data generation.
+Configuration for RL training.
 
 Import and use presets:
     from config import get_preset
@@ -15,9 +15,15 @@ Or customize game configs:
 # Model Version
 # =============================================================================
 
-# Model architecture versions (imported from train.py for consistency)
-# This determines which directories to use for data and models
-MODEL_VERSION = 4  # Current model version (1=legacy feed-forward, 2=transformer)
+# Model version for RL training
+MODEL_VERSION = 15  # Current RL model version
+
+# =============================================================================
+# Logging Configuration
+# =============================================================================
+
+# Log levels: 0=minimal, 1=normal, 2=verbose
+LOG_LEVEL = 1  # Default to normal logging (shows errors and progress)
 
 # =============================================================================
 # Game Configuration
@@ -73,68 +79,13 @@ TOURNAMENT_CONFIG = {
 # =============================================================================
 
 # Available agent types for training data generation
-AGENT_TYPES = [
-    'random',      # Uniformly random actions
-    'call',        # Always call/check
-    'tight',       # Play only premium hands
-    'aggressive',  # Bet/raise frequently
-    'mixed',       # Random mix of agent types
-]
+# (Kept for reference or future use)
+# AGENT_TYPES = [
+#     'random',      # Uniformly random actions
+#     'call',        # Always call/check
+#     'tight',       # Play only premium hands
+#     'aggressive',  # Bet/raise frequently
+#     'mixed',       # Random mix of agent types
+# ]
 
-
-# =============================================================================
-# Presets for Common Scenarios
-# =============================================================================
-
-PRESETS = {
-    'quick_test': {
-        'game': DEFAULT_GAME_CONFIG,
-        'num_players': 2,
-        'agent_type': 'random',
-    },
-    
-    'heads_up': {
-        'game': DEFAULT_GAME_CONFIG,
-        'num_players': 2,
-        'agent_type': 'mixed',
-    },
-    
-    'full_ring': {
-        'game': DEFAULT_GAME_CONFIG,
-        'num_players': 9,
-        'agent_type': 'mixed',
-    },
-    
-    'tournament': {
-        'game': TOURNAMENT_CONFIG,
-        'num_players': 6,
-        'agent_type': 'tight',
-    },
-    
-    'high_stakes': {
-        'game': HIGH_STAKES_CONFIG,
-        'num_players': 6,
-        'agent_type': 'aggressive',
-    },
-}
-
-
-def get_preset(name):
-    """
-    Get a preset configuration.
-    
-    Args:
-        name: Name of the preset ('quick_test', 'heads_up', etc.)
-    
-    Returns:
-        Dictionary with preset configuration
-    
-    Example:
-        config = get_preset('heads_up')
-        print(config['game'])
-        print(config['rollout'])
-    """
-    if name not in PRESETS:
-        raise ValueError(f"Unknown preset: {name}. Available: {list(PRESETS.keys())}")
-    return PRESETS[name].copy()
 

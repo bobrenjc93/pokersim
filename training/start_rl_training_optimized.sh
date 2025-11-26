@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+#
+# Optimized RL Training Script for Poker AI
+#
+# This script starts RL training with optimized hyperparameters for better convergence:
+# - Heads-up (2 player) for simpler learning
+# - Increased learning rate (3e-4) for faster learning
+# - More exploration via entropy bonus
+# - Reward normalization for stability
+# - Learning rate scheduling
+# - 50 episodes per iteration for balanced learning
+#
+
+set -euo pipefail
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Get script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+API_DIR="$(dirname "$SCRIPT_DIR")/api"
+
+# Configuration
+# API_URL="http://localhost:8080/simulate"
+# API_PID_FILE="/tmp/pokersim_api.pid"
+
+# Training parameters (optimized for convergence)
+ITERATIONS=5000
+EPISODES_PER_ITER=100
+PPO_EPOCHS=10         # Increased for convergence
+MINI_BATCH_SIZE=512   # Increased for stability
+LEARNING_RATE=0.0001  # 1e-4, lowered for stability
+ENTROPY_COEF=0.01     # Default 0.01
+VALUE_LOSS_COEF=0.5   # Default 0.5
+GAE_LAMBDA=0.95       # Default 0.95
+NUM_PLAYERS=2         # Heads-up (simpler)
+SMALL_BLIND=10
+BIG_BLIND=20
+STARTING_CHIPS=1000
+SAVE_INTERVAL=100
+
+# Model version from config
+if [ -z "${MODEL_VERSION:-}" ]; then
+    # Extract from config.py
+    if [ -f "${SCRIPT_DIR}/config.py" ]; then
+        MODEL_VERSION=$(grep "^MODEL_VERSION =" "${SCRIPT_DIR}/config.py" | awk '{print $3}' | tr -d ' ')
+    fi
+fi
+MODEL_VERSION=${MODEL_VERSION:-11}
+
+# Output directories
+OUTPUT_DIR="/tmp/pokersim/rl_models_v${MODEL_VERSION}"
+TENSORBOARD_DIR="/tmp/pokersim/tensorboard_v${MODEL_VERSION}"
+
+# Parse command line arguments
+VERBOSE=""
+CHECKPOINT=""
+CUSTOM_ARGS=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -v|--verbose)
+            VERBOSE="--verbose"
+            shift
+            ;;
+        -c|--checkpoint)
+            CHECKPOINT="--checkpoint $2"
+            shift 2
+            ;;
+        --iterations)
+            ITERATIONS="$2"
+            shift 2
+            ;;
+        --learning-rate)
+            LEARNING_RATE="$2"
+            shift 2
+            ;;
+        --help)
+            echo "Usage: $0 [OPTIONS]"
+            echo ""
+            echo "Options:"
+            echo "  -v, --verbose              Enable verbose output"
+            echo "  -c, --checkpoint PATH      Resume from checkpoint"
+            echo "  --iterations N             Number of training iterations (default: $ITERATIONS)"
+            echo "  --learning-rate LR         Learning rate (default: $LEARNING_RATE)"
+            echo "  --help                     Show this help message"
+            echo ""
+            echo "Optimized settings:"
+            echo "  - Heads-up (2 players) for simpler learning"
+            echo "  - Learning rate: 3e-4 (standard for PPO)"
+            echo "  - Entropy coefficient: 0.02 (increased exploration)"
+            echo "  - Episodes per iteration: 50 (balanced)"
+            echo "  - Reward normalization enabled"
+            echo "  - Learning rate scheduling enabled"
+            exit 0
+            ;;
+        *)
+            CUSTOM_ARGS="$CUSTOM_ARGS $1"
+            shift
+            ;;
+    esac
+done
+
+# Print header
+echo -e "${BLUE}╔════════════════════════════════════════════════════════════════╗${NC}"
+echo -e "${BLUE}║  🃏 Poker AI Reinforcement Learning Training (OPTIMIZED)    ║${NC}"
+echo -e "${BLUE}╚════════════════════════════════════════════════════════════════╝${NC}"
+echo ""
+
+# Function to cleanup on exit
+cleanup() {
+    echo -e "\n${YELLOW}🛑 Shutting down...${NC}"
+    echo -e "${GREEN}✓ Cleanup complete${NC}\n"
+}
+
+trap cleanup EXIT INT TERM
+
+# Check if bindings are built
+if [ ! -f "$SCRIPT_DIR/poker_api_binding.cpython-312-darwin.so" ] && [ ! -f "$SCRIPT_DIR/poker_api_binding.so" ]; then
+    echo -e "${YELLOW}⚠️  Warning: poker_api_binding not found in current directory.${NC}"
+    echo -e "${YELLOW}   Please ensure you have built the bindings using 'make module' in the api directory.${NC}"
+    # We don't exit here because the file name might vary by python version/platform
+    # train.py will fail with a clear error if it can't import it
+fi
+
+echo ""
+echo -e "${BLUE}Using MODEL_VERSION: v${MODEL_VERSION}${NC}"
+echo ""
+
+# Show configuration
+if [ -n "$CHECKPOINT" ]; then
+    echo -e "${YELLOW}📂 Resuming from checkpoint${NC}"
+else
+    echo -e "${GREEN}Using optimized training parameters${NC}"
+    echo -e "(Run with --help to see all options)"
+fi
+
+echo ""
+echo -e "${BLUE}📊 Optimizations Enabled:${NC}"
+echo "   ✓ Heads-up play (2 players) - simpler to learn"
+echo "   ✓ Learning rate: ${LEARNING_RATE} - lowered for stability"
+echo "   ✓ Entropy coefficient: ${ENTROPY_COEF}"
+echo "   ✓ Model size: Large (1024 dim, 8 layers, 16 heads)"
+echo "   ✓ Reward normalization - improved stability"
+echo "   ✓ Learning rate scheduling - adaptive learning"
+echo "   ✓ ${EPISODES_PER_ITER} episodes/iteration - balanced updates"
+
+echo ""
+echo -e "${BLUE}📊 TensorBoard Monitoring:${NC}"
+echo "   In another terminal, run:"
+echo "   tensorboard --logdir=${TENSORBOARD_DIR}"
+echo "   Then open: http://localhost:6006"
+
+echo ""
+echo -e "${BLUE}📁 Output Locations:${NC}"
+echo "   Models: ${OUTPUT_DIR}/"
+echo "   Logs: ${TENSORBOARD_DIR}/"
+
+echo ""
+echo -e "${BLUE}╔════════════════════════════════════════════════════════════════╗${NC}"
+echo -e "${BLUE}║  Starting RL Training...                                       ║${NC}"
+echo -e "${BLUE}║  Press Ctrl+C to stop gracefully                              ║${NC}"
+echo -e "${BLUE}╚════════════════════════════════════════════════════════════════╝${NC}"
+echo ""
+
+# Activate virtual environment if it exists
+if [ -d "$SCRIPT_DIR/.venv" ]; then
+    source "$SCRIPT_DIR/.venv/bin/activate"
+fi
+
+# Run training with optimized parameters
+uv run python train.py \
+    --iterations "$ITERATIONS" \
+    --episodes-per-iter "$EPISODES_PER_ITER" \
+    --ppo-epochs "$PPO_EPOCHS" \
+    --mini-batch-size "$MINI_BATCH_SIZE" \
+    --learning-rate "$LEARNING_RATE" \
+    --entropy-coef "$ENTROPY_COEF" \
+    --value-loss-coef "$VALUE_LOSS_COEF" \
+    --gae-lambda "$GAE_LAMBDA" \
+    --hidden-dim 1024 \
+    --num-heads 16 \
+    --num-layers 8 \
+    --num-players "$NUM_PLAYERS" \
+    --small-blind "$SMALL_BLIND" \
+    --big-blind "$BIG_BLIND" \
+    --starting-chips "$STARTING_CHIPS" \
+    --save-interval "$SAVE_INTERVAL" \
+    --output-dir "$OUTPUT_DIR" \
+    --tensorboard-dir "$TENSORBOARD_DIR" \
+    $CHECKPOINT \
+    $VERBOSE \
+    $CUSTOM_ARGS
+

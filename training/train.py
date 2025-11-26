@@ -1,1231 +1,968 @@
 #!/usr/bin/env python3
 """
-Training Example
+Reinforcement Learning Training Script for Poker AI
 
-This example shows how to:
-1. Load generated rollout data
-2. Convert poker states into tensors
-3. Train a neural network to predict actions
-4. Save the trained model
+This script uses PPO (Proximal Policy Optimization) with self-play to train
+a poker agent from scratch. The agent learns optimal strategies through
+experience and exploration.
 
-The model learns to map game states to action probabilities, which can be
-used for decision-making in poker.
-
-Prerequisites:
-- Generated rollout data (from generate_rollouts.py)
-- PyTorch (installed via uv sync)
+Key features:
+- PPO algorithm for stable policy learning
+- Self-play against past model versions
+- Transformer-based actor-critic architecture
+- Comprehensive logging and checkpointing
 
 Usage:
-    python train.py --data data/quickstart_rollouts.json --epochs 100
+    python train.py --iterations 5000 --episodes-per-iter 200 --ppo-epochs 10
 """
 
+import concurrent.futures
 import argparse
-import json
+import random
 import sys
+import time
+import traceback
+from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, List, Tuple, Optional
+
+try:
+    import orjson as json
+except ImportError:
+    import json
 
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
+import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
+from accelerate import Accelerator
 
-# =============================================================================
-# Model Version Management
-# =============================================================================
+# Import RL components
+from rl_state_encoder import RLStateEncoder
+from rl_model import PokerActorCritic, create_actor_critic
+from ppo import PPOTrainer
+from model_agent import (
+    ModelAgent, 
+    RandomAgent,
+    ACTION_MAP, 
+    ACTION_NAMES, 
+    BET_SIZE_MAP,
+    convert_action_label,
+    create_legal_actions_mask
+)
 
-# Model architecture versions
-MODEL_VERSION_LEGACY = 1  # Feed-forward network (PokerNet)
-MODEL_VERSION_TRANSFORMER = 2  # Transformer-based network (PokerTransformer)
-MODEL_VERSION_CURRENT = MODEL_VERSION_TRANSFORMER  # Default for new models
+# Import model version and log level from config
+from config import MODEL_VERSION, LOG_LEVEL
 
-# =============================================================================
-# Feature Encoding
-# =============================================================================
-
-# Card mapping: rank to index
-RANK_MAP = {'2': 0, '3': 1, '4': 2, '5': 3, '6': 4, '7': 5, '8': 6, '9': 7, 
-            'T': 8, 'J': 9, 'Q': 10, 'K': 11, 'A': 12}
-# Suit mapping
-SUIT_MAP = {'C': 0, 'D': 1, 'H': 2, 'S': 3}
-
-# Stage mapping
-STAGE_MAP = {'Preflop': 0, 'Flop': 1, 'Turn': 2, 'River': 3, 'Complete': 4}
-
-# Action mapping with granular bet sizing
-# Bet/Raise sizes as percentages of pot: 10%, 25%, 33%, 50%, 75%, 100%, 150%, 200%, 300%
-ACTION_MAP = {
-    'fold': 0, 'check': 1, 'call': 2,
-    'bet_10%': 3, 'bet_25%': 4, 'bet_33%': 5, 'bet_50%': 6, 'bet_75%': 7,
-    'bet_100%': 8, 'bet_150%': 9, 'bet_200%': 10, 'bet_300%': 11,
-    'raise_10%': 12, 'raise_25%': 13, 'raise_33%': 14, 'raise_50%': 15, 'raise_75%': 16,
-    'raise_100%': 17, 'raise_150%': 18, 'raise_200%': 19, 'raise_300%': 20,
-    'all_in': 21
-}
-ACTION_NAMES = [
-    'fold', 'check', 'call',
-    'bet_10%', 'bet_25%', 'bet_33%', 'bet_50%', 'bet_75%', 'bet_100%', 'bet_150%', 'bet_200%', 'bet_300%',
-    'raise_10%', 'raise_25%', 'raise_33%', 'raise_50%', 'raise_75%', 'raise_100%', 'raise_150%', 'raise_200%', 'raise_300%',
-    'all_in'
-]
-
-# Bet size percentages for each action (as fraction of pot)
-BET_SIZE_MAP = {
-    'bet_10%': 0.10, 'bet_25%': 0.25, 'bet_33%': 0.33, 'bet_50%': 0.50, 'bet_75%': 0.75,
-    'bet_100%': 1.0, 'bet_150%': 1.5, 'bet_200%': 2.0, 'bet_300%': 3.0,
-    'raise_10%': 0.10, 'raise_25%': 0.25, 'raise_33%': 0.33, 'raise_50%': 0.50, 'raise_75%': 0.75,
-    'raise_100%': 1.0, 'raise_150%': 1.5, 'raise_200%': 2.0, 'raise_300%': 3.0,
-}
-
-
-def encode_card(card: str) -> tuple[int, int]:
-    """
-    Encode a card string (e.g., 'AS', 'KC') into rank and suit indices.
-    
-    Args:
-        card: Card string (rank + suit)
-    
-    Returns:
-        tuple: (rank_index, suit_index)
-    """
-    if len(card) != 2:
-        return (0, 0)
-    rank = RANK_MAP.get(card[0], 0)
-    suit = SUIT_MAP.get(card[1], 0)
-    return (rank, suit)
-
-
-def encode_state(state: dict[str, Any]) -> torch.Tensor:
-    """
-    Convert a poker state dictionary into a feature vector.
-    
-    Features include:
-    - Hole cards (2 cards, one-hot encoded)
-    - Community cards (5 cards, one-hot encoded)
-    - Pot size (normalized)
-    - Current bet (normalized)
-    - Player chips (normalized)
-    - Player bet (normalized)
-    - Stage (one-hot)
-    - Position features
-    
-    Args:
-        state: State dictionary from rollout
-    
-    Returns:
-        Tensor of shape (feature_dim,)
-    """
-    features = []
-    
-    # Encode hole cards (2 cards × (13 ranks + 4 suits) = 34 features)
-    hole_cards = state.get('hole_cards', [])
-    for i in range(2):
-        if i < len(hole_cards):
-            rank, suit = encode_card(hole_cards[i])
-            rank_onehot = [0] * 13
-            rank_onehot[rank] = 1
-            suit_onehot = [0] * 4
-            suit_onehot[suit] = 1
-            features.extend(rank_onehot + suit_onehot)
-        else:
-            features.extend([0] * 17)  # No card
-    
-    # Encode community cards (5 cards × 17 features = 85 features)
-    community_cards = state.get('community_cards', [])
-    for i in range(5):
-        if i < len(community_cards):
-            rank, suit = encode_card(community_cards[i])
-            rank_onehot = [0] * 13
-            rank_onehot[rank] = 1
-            suit_onehot = [0] * 4
-            suit_onehot[suit] = 1
-            features.extend(rank_onehot + suit_onehot)
-        else:
-            features.extend([0] * 17)  # No card
-    
-    # Normalize chip values (divide by starting stack, typically 1000)
-    starting_chips = 1000.0
-    pot = state.get('pot', 0) / starting_chips
-    current_bet = state.get('current_bet', 0) / starting_chips
-    player_chips = state.get('player_chips', 0) / starting_chips
-    player_bet = state.get('player_bet', 0) / starting_chips
-    player_total_bet = state.get('player_total_bet', 0) / starting_chips
-    
-    features.extend([pot, current_bet, player_chips, player_bet, player_total_bet])
-    
-    # Stage (one-hot, 5 features)
-    stage = state.get('stage', 'Preflop')
-    stage_idx = STAGE_MAP.get(stage, 0)
-    stage_onehot = [0] * 5
-    stage_onehot[stage_idx] = 1
-    features.extend(stage_onehot)
-    
-    # Position features
-    num_players = state.get('num_players', 2)
-    num_active = state.get('num_active', 2)
-    position = state.get('position', 0)
-    is_dealer = float(state.get('is_dealer', False))
-    is_small_blind = float(state.get('is_small_blind', False))
-    is_big_blind = float(state.get('is_big_blind', False))
-    
-    features.extend([
-        num_players / 10.0,  # Normalize by max players
-        num_active / 10.0,
-        position / 10.0,
-        is_dealer,
-        is_small_blind,
-        is_big_blind
-    ])
-    
-    return torch.tensor(features, dtype=torch.float32)
-
-
-def get_bet_size_bucket(amount: int, pot: int, min_amount: int, max_amount: int, is_bet: bool) -> str:
-    """
-    Determine which bet size bucket an amount falls into.
-    
-    Args:
-        amount: The bet/raise amount
-        pot: Current pot size
-        min_amount: Minimum legal bet/raise amount
-        max_amount: Maximum legal bet/raise amount (player chips)
-        is_bet: True if this is a bet, False if it's a raise
-    
-    Returns:
-        Action label (e.g., 'bet_50%', 'raise_100%')
-    """
-    # All-in case (at or very close to max)
-    if amount >= max_amount * 0.98:  # Within 2% of max is considered all-in
-        return 'all_in'
-    
-    # Avoid division by zero
-    if pot <= 0:
-        pot = min_amount  # Use minimum as fallback
-    
-    # Calculate as percentage of pot
-    pot_fraction = amount / pot
-    
-    # Define bet size buckets (sorted)
-    buckets = [(0.10, '10%'), (0.25, '25%'), (0.33, '33%'), (0.50, '50%'), (0.75, '75%'),
-               (1.0, '100%'), (1.5, '150%'), (2.0, '200%'), (3.0, '300%')]
-    
-    # Find closest bucket
-    best_bucket = buckets[-1][1]  # Default to largest
-    min_diff = float('inf')
-    
-    for threshold, bucket_name in buckets:
-        diff = abs(pot_fraction - threshold)
-        if diff < min_diff:
-            min_diff = diff
-            best_bucket = bucket_name
-    
-    prefix = 'bet_' if is_bet else 'raise_'
-    return prefix + best_bucket
-
-
-def encode_action(action: dict[str, Any], state: dict[str, Any] = None) -> int:
-    """
-    Convert action dictionary to action index.
-    
-    Args:
-        action: Action dictionary with 'action' key
-        state: Optional state dictionary for bet sizing context
-    
-    Returns:
-        Action index (0-21)
-    """
-    # Check if we have a granular action label (e.g., 'bet_50%', 'raise_100%')
-    action_label = action.get('action_label')
-    if action_label and action_label in ACTION_MAP:
-        return ACTION_MAP[action_label]
-    
-    # Get basic action type
-    action_type = action.get('action', 'fold')
-    
-    # For bet/raise actions, determine the size bucket
-    if action_type in ['bet', 'raise'] and state is not None:
-        amount = action.get('amount', 0)
-        pot = state.get('pot', 0)
-        player_chips = state.get('player_chips', 0)
-        
-        if action_type == 'bet':
-            min_bet = state.get('min_bet', state.get('big_blind', 20))
-            action_label = get_bet_size_bucket(amount, pot, min_bet, player_chips, is_bet=True)
-        else:  # raise
-            min_raise_total = state.get('min_raise_total', state.get('big_blind', 20))
-            action_label = get_bet_size_bucket(amount, pot, min_raise_total, player_chips, is_bet=False)
-        
-        if action_label in ACTION_MAP:
-            return ACTION_MAP[action_label]
-    
-    # Fall back to direct mapping (fold, check, call, all_in)
-    return ACTION_MAP.get(action_type, 0)
+# Import poker_api_binding for direct C++ calls
+try:
+    import poker_api_binding
+except ImportError:
+    print("Error: 'poker_api_binding' not found. Please compile the binding (cd api && make module).")
+    sys.exit(1)
 
 
 # =============================================================================
-# Adaptive Training Scheduler
+# RL Training Session
 # =============================================================================
 
-class AdaptiveDataScheduler:
+class RLTrainingSession:
     """
-    Manages progressive dataset growth during training.
-    Starts with a small subset of data and increases when validation loss plateaus.
+    Manages RL training session for poker.
+    
+    Handles:
+    - Episode collection (playing hands)
+    - Trajectory storage
+    - PPO updates
+    - Model checkpointing
+    - Self-play opponent management
     """
     
-    def __init__(self, total_samples: int, initial_fraction: float = 0.1, 
-                 growth_factor: float = 1.5, plateau_patience: int = 5,
-                 plateau_threshold: float = 0.001):
+    def __init__(
+        self,
+        model: PokerActorCritic,
+        ppo_trainer: PPOTrainer,
+        game_config: Dict[str, Any],
+        device: torch.device,
+        output_dir: Path,
+        tensorboard_dir: Optional[Path] = None,
+        log_level: int = 0
+    ):
         """
         Args:
-            total_samples: Total number of available samples
-            initial_fraction: Initial fraction of data to use (0.0-1.0)
-            growth_factor: Multiply current size by this when growing
-            plateau_patience: Epochs without improvement before growing dataset
-            plateau_threshold: Minimum improvement to not be considered plateaued
+            model: Actor-critic model
+            ppo_trainer: PPO trainer
+            game_config: Game configuration
+            device: Device for training
+            output_dir: Directory for model checkpoints
+            tensorboard_dir: Directory for TensorBoard logs
+            log_level: Logging verbosity (0=minimal, 1=normal, 2=verbose)
         """
-        self.total_samples = total_samples
-        self.initial_fraction = max(0.01, min(1.0, initial_fraction))
-        self.growth_factor = max(1.1, growth_factor)
-        self.plateau_patience = plateau_patience
-        self.plateau_threshold = plateau_threshold
+        self.model = model
+        self.ppo_trainer = ppo_trainer
+        self.game_config = game_config
+        self.device = device
+        self.output_dir = output_dir
+        self.tensorboard_dir = tensorboard_dir
+        self.log_level = log_level
         
-        # Start with initial fraction, but at least 100 samples or 1% of data
-        self.current_size = max(
-            100,
-            int(total_samples * self.initial_fraction)
-        )
-        self.current_size = min(self.current_size, total_samples)
+        # Opponent pool for self-play (stores past model versions)
+        self.opponent_pool: List[Path] = []
+        self.max_opponent_pool_size = 10  # Increased from 5 for more diversity
         
-        # Track validation loss history
-        self.best_val_loss = float('inf')
-        self.epochs_without_improvement = 0
-        self.growth_history = [self.current_size]
-        
-    def get_current_size(self) -> int:
-        """Get current dataset size to use"""
-        return self.current_size
-    
-    def get_progress(self) -> float:
-        """Get progress through curriculum (0.0 to 1.0)"""
-        return self.current_size / self.total_samples
-    
-    def update(self, val_loss: float) -> bool:
-        """
-        Update scheduler with validation loss.
-        
-        Args:
-            val_loss: Current validation loss
-            
-        Returns:
-            True if dataset size was increased, False otherwise
-        """
-        # Check if we improved
-        if val_loss < self.best_val_loss - self.plateau_threshold:
-            self.best_val_loss = val_loss
-            self.epochs_without_improvement = 0
-            return False
-        
-        # No improvement
-        self.epochs_without_improvement += 1
-        
-        # Check if we should grow dataset
-        if self.epochs_without_improvement >= self.plateau_patience:
-            # Only grow if we haven't reached full dataset yet
-            if self.current_size < self.total_samples:
-                new_size = int(self.current_size * self.growth_factor)
-                new_size = min(new_size, self.total_samples)
-                
-                if new_size > self.current_size:
-                    print(f"\n📈 Validation loss plateaued. Growing dataset:")
-                    print(f"   {self.current_size:,} → {new_size:,} samples ({new_size/self.total_samples*100:.1f}% of total)")
-                    
-                    self.current_size = new_size
-                    self.growth_history.append(new_size)
-                    self.epochs_without_improvement = 0
-                    return True
-        
-        return False
-    
-    def is_at_full_size(self) -> bool:
-        """Check if using full dataset"""
-        return self.current_size >= self.total_samples
-    
-    def state_dict(self) -> dict:
-        """Get scheduler state for checkpointing"""
-        return {
-            'current_size': self.current_size,
-            'best_val_loss': self.best_val_loss,
-            'epochs_without_improvement': self.epochs_without_improvement,
-            'growth_history': self.growth_history.copy(),
-            'total_samples': self.total_samples,
-            'initial_fraction': self.initial_fraction,
-            'growth_factor': self.growth_factor,
-            'plateau_patience': self.plateau_patience,
-            'plateau_threshold': self.plateau_threshold,
-        }
-    
-    def load_state_dict(self, state_dict: dict):
-        """Restore scheduler state from checkpoint"""
-        self.current_size = state_dict['current_size']
-        self.best_val_loss = state_dict['best_val_loss']
-        self.epochs_without_improvement = state_dict['epochs_without_improvement']
-        self.growth_history = state_dict['growth_history'].copy()
-        # Also restore configuration in case it changed
-        self.total_samples = state_dict['total_samples']
-        self.initial_fraction = state_dict['initial_fraction']
-        self.growth_factor = state_dict['growth_factor']
-        self.plateau_patience = state_dict['plateau_patience']
-        self.plateau_threshold = state_dict['plateau_threshold']
-
-
-# =============================================================================
-# Dataset
-# =============================================================================
-
-class PokerDataset(Dataset):
-    """
-    PyTorch dataset for poker state-action pairs.
-    
-    Each sample is a (state_features, action_label) pair where:
-    - state_features: Encoded state vector
-    - action_label: Action taken (0-5)
-    """
-    
-    def __init__(self, rollouts: list[dict[str, Any]]):
-        """
-        Args:
-            rollouts: List of rollout dictionaries
-        """
-        self.samples = []
-        
-        # Extract state-action pairs from all rollouts
-        for rollout in rollouts:
-            states = rollout.get('states', [])
-            actions = rollout.get('actions', [])
-            
-            # Match states with actions (should be 1:1)
-            for state, action in zip(states, actions):
-                # Only keep if the action is for the same player as the state
-                if state.get('player_id') == action.get('playerId'):
-                    state_tensor = encode_state(state)
-                    action_idx = encode_action(action, state)  # Pass state for bet sizing context
-                    self.samples.append((state_tensor, action_idx))
-    
-    def __len__(self):
-        return len(self.samples)
-    
-    def __getitem__(self, idx):
-        return self.samples[idx]
-    
-    def get_feature_dim(self):
-        """Return the dimension of state features"""
-        if len(self.samples) > 0:
-            return self.samples[0][0].shape[0]
-        return 0
-
-
-# =============================================================================
-# Neural Network Model
-# =============================================================================
-
-class PokerTransformer(nn.Module):
-    """
-    Transformer-based neural network for poker action prediction.
-    
-    Architecture:
-    - Input: State features organized into tokens (cards, pot info, position)
-    - Embedding: Project each token to embedding dimension
-    - Positional Encoding: Add positional information
-    - Transformer Encoder: Multi-head self-attention layers
-    - Aggregation: Pool transformer outputs
-    - Output: Action probabilities (6 classes)
-    
-    This modern architecture can better capture:
-    - Relationships between cards (e.g., suited connectors)
-    - Complex betting patterns
-    - Position-dependent strategies
-    """
-    
-    def __init__(self, input_dim: int, hidden_dim: int = 256, num_heads: int = 8, 
-                 num_layers: int = 4, dropout: float = 0.1, gradient_checkpointing: bool = False):
-        """
-        Args:
-            input_dim: Size of input feature vector
-            hidden_dim: Dimension of transformer embeddings (must be divisible by num_heads)
-            num_heads: Number of attention heads
-            num_layers: Number of transformer encoder layers
-            dropout: Dropout rate
-            gradient_checkpointing: Enable gradient checkpointing to save memory
-        """
-        super().__init__()
-        
-        # Ensure hidden_dim is divisible by num_heads
-        if hidden_dim % num_heads != 0:
-            hidden_dim = ((hidden_dim // num_heads) + 1) * num_heads
-            print(f"  Adjusted hidden_dim to {hidden_dim} to be divisible by {num_heads} heads")
-        
-        self.hidden_dim = hidden_dim
-        self.num_heads = num_heads
-        self.gradient_checkpointing = gradient_checkpointing
-        
-        # Token organization:
-        # - 2 hole card tokens (17 features each)
-        # - 5 community card tokens (17 features each)
-        # - 1 pot/betting token (5 features: pot, current_bet, player_chips, player_bet, player_total_bet)
-        # - 1 stage token (5 features: one-hot stage)
-        # - 1 position token (6 features: position info)
-        
-        self.hole_card_dim = 17
-        self.community_card_dim = 17
-        self.pot_dim = 5
-        self.stage_dim = 5
-        self.position_dim = 6
-        
-        # Input projections for different token types
-        self.hole_card_embed = nn.Linear(self.hole_card_dim, hidden_dim)
-        self.community_card_embed = nn.Linear(self.community_card_dim, hidden_dim)
-        self.pot_embed = nn.Linear(self.pot_dim, hidden_dim)
-        self.stage_embed = nn.Linear(self.stage_dim, hidden_dim)
-        self.position_embed = nn.Linear(self.position_dim, hidden_dim)
-        
-        # Learnable positional encodings for each token type
-        # Total: 2 (hole) + 5 (community) + 1 (pot) + 1 (stage) + 1 (position) = 10 tokens
-        self.num_tokens = 10
-        self.pos_encoding = nn.Parameter(torch.randn(1, self.num_tokens, hidden_dim))
-        
-        # Transformer encoder
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=hidden_dim,
-            nhead=num_heads,
-            dim_feedforward=hidden_dim * 4,
-            dropout=dropout,
-            activation='gelu',  # GELU is more modern than ReLU
-            batch_first=True,
-            norm_first=True  # Pre-LayerNorm for better training stability
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        
-        # Layer normalization
-        self.norm = nn.LayerNorm(hidden_dim)
-        
-        # Output head with residual projection
-        self.output_head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, hidden_dim // 4),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 4, 22)  # 22 possible actions (including granular bet sizes)
-        )
-    
-    def forward(self, x):
-        """
-        Forward pass
-        
-        Args:
-            x: Input tensor of shape (batch_size, input_dim)
-            
-        Returns:
-            Tensor of shape (batch_size, 6) with action logits
-        """
-        batch_size = x.size(0)
-        
-        # Parse input features into tokens
-        # Feature layout: 2*17 (hole) + 5*17 (community) + 5 (pot) + 5 (stage) + 6 (position) = 135
-        idx = 0
-        
-        # Hole cards (2 tokens)
-        hole_cards = []
-        for i in range(2):
-            hole_card = x[:, idx:idx+self.hole_card_dim]
-            hole_cards.append(self.hole_card_embed(hole_card))
-            idx += self.hole_card_dim
-        
-        # Community cards (5 tokens)
-        community_cards = []
-        for i in range(5):
-            comm_card = x[:, idx:idx+self.community_card_dim]
-            community_cards.append(self.community_card_embed(comm_card))
-            idx += self.community_card_dim
-        
-        # Pot/betting info (1 token)
-        pot_info = x[:, idx:idx+self.pot_dim]
-        pot_token = self.pot_embed(pot_info)
-        idx += self.pot_dim
-        
-        # Stage (1 token)
-        stage_info = x[:, idx:idx+self.stage_dim]
-        stage_token = self.stage_embed(stage_info)
-        idx += self.stage_dim
-        
-        # Position (1 token)
-        position_info = x[:, idx:idx+self.position_dim]
-        position_token = self.position_embed(position_info)
-        
-        # Stack all tokens: (batch_size, num_tokens, hidden_dim)
-        tokens = torch.stack(
-            hole_cards + community_cards + [pot_token, stage_token, position_token],
-            dim=1
-        )
-        
-        # Add positional encodings
-        tokens = tokens + self.pos_encoding
-        
-        # Apply transformer with optional gradient checkpointing
-        if self.gradient_checkpointing and self.training:
-            # Use gradient checkpointing to save memory during training
-            transformed = torch.utils.checkpoint.checkpoint(
-                self.transformer, tokens, use_reentrant=False
-            )
-        else:
-            transformed = self.transformer(tokens)  # (batch_size, num_tokens, hidden_dim)
-        
-        # Apply layer norm
-        transformed = self.norm(transformed)
-        
-        # Aggregate tokens using mean pooling
-        pooled = transformed.mean(dim=1)  # (batch_size, hidden_dim)
-        
-        # Output head
-        logits = self.output_head(pooled)  # (batch_size, 6)
-        
-        return logits
-
-
-# Legacy model for backward compatibility
-class PokerNet(nn.Module):
-    """
-    Legacy feed-forward neural network for poker action prediction.
-    Kept for backward compatibility with existing checkpoints.
-    """
-    
-    def __init__(self, input_dim: int, hidden_dim: int = 256):
-        """
-        Args:
-            input_dim: Size of input feature vector
-            hidden_dim: Size of hidden layers
-        """
-        super().__init__()
-        
-        self.network = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.4),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(hidden_dim // 2, hidden_dim // 4),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(hidden_dim // 4, 22)  # 22 possible actions (including granular bet sizes)
-        )
-    
-    def forward(self, x):
-        """Forward pass"""
-        return self.network(x)
-
-
-# =============================================================================
-# Training
-# =============================================================================
-
-def train_model(
-    model: nn.Module,
-    train_loader: DataLoader,
-    optimizer: optim.Optimizer,
-    criterion: nn.Module,
-    device: torch.device,
-    epoch: int,
-    total_epochs: int,
-    writer: Optional[SummaryWriter] = None,
-    scaler: Optional[torch.cuda.amp.GradScaler] = None
-) -> float:
-    """
-    Train the model for one epoch.
-    
-    Args:
-        model: Neural network
-        train_loader: Training data loader
-        optimizer: Optimizer
-        criterion: Loss function
-        device: Device to train on
-        epoch: Current epoch number
-        total_epochs: Total number of epochs for training
-        writer: Optional TensorBoard SummaryWriter for logging
-    
-    Returns:
-        Average loss for the epoch
-    """
-    model.train()
-    total_loss = 0.0
-    correct = 0
-    total = 0
-    
-    for batch_idx, (states, actions) in enumerate(train_loader):
-        states = states.to(device)
-        actions = actions.to(device)
-        
-        optimizer.zero_grad()
-        
-        # Forward and backward pass with optional mixed precision
-        if scaler is not None:
-            # Mixed precision training
-            with torch.cuda.amp.autocast():
-                outputs = model(states)
-                loss = criterion(outputs, actions)
-            
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            # Standard precision
-            outputs = model(states)
-            loss = criterion(outputs, actions)
-            loss.backward()
-            optimizer.step()
+        # TensorBoard writer
+        self.writer = None
+        if tensorboard_dir:
+            log_dir = tensorboard_dir / f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            self.writer = SummaryWriter(log_dir=str(log_dir))
+            if self.log_level >= 1:
+                print(f"📊 TensorBoard logging to: {log_dir}")
         
         # Statistics
-        total_loss += loss.item()
-        _, predicted = outputs.max(1)
-        total += actions.size(0)
-        correct += predicted.eq(actions).sum().item()
+        self.stats = {
+            'iteration': 0,
+            'total_episodes': 0,
+            'total_timesteps': 0,
+            'avg_reward': deque(maxlen=100),
+            'avg_episode_length': deque(maxlen=100),
+            'win_rate': deque(maxlen=100),
+            'avg_value_estimate': deque(maxlen=100),
+            'explained_variance_history': deque(maxlen=100)
+        }
+    
+    def collect_episode(
+        self,
+        use_opponent_pool: bool = True,
+        verbose: bool = False,
+        deterministic: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Collect one episode (complete poker hand) using current policy.
         
-        # Log batch metrics to TensorBoard
-        if writer is not None and batch_idx % 100 == 0:
-            global_step = epoch * len(train_loader) + batch_idx
-            writer.add_scalar('Train/Batch_Loss', loss.item(), global_step)
-    
-    avg_loss = total_loss / len(train_loader)
-    accuracy = 100. * correct / total
-    
-    return avg_loss, accuracy
-
-
-def validate_model(
-    model: nn.Module,
-    val_loader: DataLoader,
-    criterion: nn.Module,
-    device: torch.device
-) -> tuple[float, float]:
-    """
-    Validate the model on validation data.
-    
-    Args:
-        model: Neural network
-        val_loader: Validation data loader
-        criterion: Loss function
-        device: Device to validate on
-    
-    Returns:
-        Tuple of (average loss, accuracy) for validation set
-    """
-    model.eval()
-    total_loss = 0.0
-    correct = 0
-    total = 0
-    
-    with torch.no_grad():
-        for states, actions in val_loader:
-            states = states.to(device)
-            actions = actions.to(device)
+        Args:
+            use_opponent_pool: Whether to use past models as opponents
+            verbose: Print detailed progress
+            deterministic: Whether to use deterministic action selection (argmax)
+        
+        Returns:
+            Episode data dict with states, actions, rewards, etc.
+        """
+        # Create encoder for this episode
+        encoder = RLStateEncoder()
+        
+        # Create agents
+        num_players = self.game_config['num_players']
+        agents = []
+        
+        # Main agent (uses current model)
+        main_player_id = 'p0'
+        agents.append({
+            'id': main_player_id,
+            'type': 'model',
+            'encoder': encoder
+        })
+        
+        # Opponent agents
+        for i in range(1, num_players):
+            player_id = f'p{i}'
             
-            # Forward pass
-            outputs = model(states)
-            loss = criterion(outputs, actions)
+            # Mix of random agents and self-play (current model)
+            # TODO: Implement loading past opponents from self.opponent_pool
+            # Currently we use the current model for self-play (which is effective for PPO)
+            if use_opponent_pool and random.random() < 0.5:
+                # Use current model as opponent (Self-Play)
+                agents.append({
+                    'id': player_id,
+                    'type': 'model',
+                    'encoder': RLStateEncoder()  # New encoder for opponent
+                })
+            else:
+                # Use random agent
+                agents.append({
+                    'id': player_id,
+                    'type': 'random'
+                })
+        
+        # Initialize game history
+        history = []
+        for agent in agents:
+            history.append({
+                'type': 'addPlayer',
+                'playerId': agent['id'],
+                'playerName': f"Player_{agent['id']}"
+            })
+        
+        # Get initial state
+        response = self._call_api(history)
+        if not response['success']:
+            return {'states': [], 'actions': [], 'rewards': {}, 'success': False}
+        
+        game_state = response['gameState']
+        
+        # Track episode data
+        episode = {
+            'states': [],
+            'actions': [],
+            'log_probs': [],
+            'values': [],
+            'rewards': {},
+            'legal_actions_masks': [],
+            'dones': [],
+            'success': True
+        }
+        
+        # Main game loop
+        max_steps = 1000
+        step = 0
+        terminal_stages = {'complete', 'showdown'}
+        
+        while step < max_steps:
+            step += 1
             
-            # Statistics
-            total_loss += loss.item()
-            _, predicted = outputs.max(1)
-            total += actions.size(0)
-            correct += predicted.eq(actions).sum().item()
+            # Check terminal condition
+            current_stage = game_state.get('stage', '').lower()
+            if current_stage in terminal_stages:
+                break
+            
+            # Get current player
+            current_player_id = game_state.get('currentPlayerId')
+            if not current_player_id or current_player_id == 'none':
+                break
+            
+            # Find agent for current player
+            current_agent = None
+            for agent in agents:
+                if agent['id'] == current_player_id:
+                    current_agent = agent
+                    break
+            
+            if current_agent is None:
+                break
+            
+            # Extract state
+            state_dict = self._extract_state(game_state, current_player_id)
+            legal_actions = self._get_legal_actions(game_state)
+            
+            if not legal_actions:
+                break
+            
+            # Select action based on agent type
+            if current_agent['type'] == 'model' or (current_player_id == main_player_id):
+                # Use current model
+                state_tensor = encoder.encode_state(state_dict).unsqueeze(0).to(self.device)
+                legal_mask = self._create_legal_actions_mask(legal_actions)
+                
+                with torch.no_grad():
+                    action_logits, value = self.model(state_tensor, legal_mask)
+                    action_probs = F.softmax(action_logits, dim=-1)
+                    
+                    if deterministic:
+                        action_idx = torch.argmax(action_probs.squeeze(0)).item()
+                        # Log prob is not well-defined for deterministic, but we can just take the log prob of the action
+                        log_prob = F.log_softmax(action_logits, dim=-1)[0, action_idx]
+                    else:
+                        action_idx = torch.multinomial(action_probs.squeeze(0), 1).item()
+                        log_prob = F.log_softmax(action_logits, dim=-1)[0, action_idx]
+                
+                # Store trajectory data (only for main agent)
+                if current_player_id == main_player_id:
+                    episode['states'].append(state_tensor.squeeze(0).cpu())
+                    episode['actions'].append(action_idx)
+                    episode['log_probs'].append(log_prob.cpu())
+                    episode['values'].append(value.squeeze().cpu())
+                    episode['legal_actions_masks'].append(legal_mask.squeeze(0).cpu())
+                    episode['dones'].append(0)  # Will set last one to 1
+                
+                action_label = self._idx_to_action_label(action_idx)
+                action_type, amount = self._convert_action(action_label, state_dict)
+                
+            else:
+                # Random agent
+                action_type, amount, action_label = self._random_action(legal_actions, state_dict)
+            
+            # Observe action for all agents' encoders
+            stage = state_dict.get('stage', 'Preflop')
+            pot = state_dict.get('pot', 0)
+            for agent in agents:
+                if agent['type'] == 'model' and 'encoder' in agent:
+                    agent['encoder'].add_action(current_player_id, action_type, amount, pot, stage)
+            
+            # Apply action
+            history.append({
+                'type': 'playerAction',
+                'playerId': current_player_id,
+                'action': action_type,
+                'amount': amount
+            })
+            
+            # Get new state
+            response = self._call_api(history)
+            if not response['success']:
+                episode['success'] = False
+                break
+            
+            game_state = response['gameState']
+        
+        # Calculate rewards (chips won/lost)
+        final_chips = {}
+        initial_chips = self.game_config['startingChips']
+        
+        for player_data in game_state['players']:
+            player_id = player_data['id']
+            final_chips[player_id] = player_data['chips']
+            episode['rewards'][player_id] = final_chips[player_id] - initial_chips
+        
+        # Mark last state as done
+        if episode['dones']:
+            episode['dones'][-1] = 1
+        
+        # Normalize rewards (divide by starting chips for scale)
+        main_reward = episode['rewards'].get(main_player_id, 0) / initial_chips
+        episode['main_reward'] = main_reward
+        
+        # Convert episode data to tensors
+        if episode['states']:
+            episode['states'] = torch.stack(episode['states'])
+            episode['actions'] = torch.tensor(episode['actions'], dtype=torch.long)
+            episode['log_probs'] = torch.stack(episode['log_probs'])
+            episode['values'] = torch.stack(episode['values'])
+            episode['legal_actions_masks'] = torch.stack(episode['legal_actions_masks'])
+            episode['dones'] = torch.tensor(episode['dones'], dtype=torch.float32)
+        
+        return episode
     
-    avg_loss = total_loss / len(val_loader) if len(val_loader) > 0 else 0.0
-    accuracy = 100. * correct / total if total > 0 else 0.0
-    
-    return avg_loss, accuracy
+    def evaluate_vs_random(self, num_episodes: int = 50) -> Dict[str, float]:
+        """
+        Evaluate current model against random agent.
+        
+        Args:
+            num_episodes: Number of episodes to play
+            
+        Returns:
+            Dictionary of evaluation metrics
+        """
+        if self.log_level >= 1:
+            print(f"\n📊 Evaluating vs Random ({num_episodes} episodes)...")
+            
+        wins = 0
+        total_reward_bb = 0
+        total_episodes = 0
+        
+        # Run evaluation episodes
+        # We use concurrent execution for speed, similar to train_iteration
+        max_workers = min(num_episodes, 10)
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Force use_opponent_pool=False to play against Random
+            # Force deterministic=True for evaluation
+            futures = [
+                executor.submit(self.collect_episode, use_opponent_pool=False, verbose=False, deterministic=True)
+                for _ in range(num_episodes)
+            ]
+            
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    episode = future.result()
+                    
+                    if not episode['success']:
+                        continue
+                        
+                    total_episodes += 1
+                    
+                    # Check if won (profit > 0)
+                    main_reward = episode['main_reward'] # This is normalized by starting chips
+                    
+                    # Calculate raw profit in chips
+                    starting_chips = self.game_config['startingChips']
+                    raw_profit = main_reward * starting_chips
+                    
+                    # Convert to Big Blinds
+                    big_blind = self.game_config['bigBlind']
+                    bb_profit = raw_profit / big_blind
+                    total_reward_bb += bb_profit
+                    
+                    if raw_profit > 0:
+                        wins += 1
+                        
+                except Exception as e:
+                    print(f"⚠️  Error in evaluation episode: {e}")
+        
+        if total_episodes == 0:
+            return {}
+            
+        win_rate = wins / total_episodes
+        avg_bb_per_hand = total_reward_bb / total_episodes
+        bb_per_100 = avg_bb_per_hand * 100
+        
+        if self.log_level >= 1:
+            print(f"  Win Rate: {win_rate:.2%}")
+            print(f"  BB/100: {bb_per_100:.2f}")
+            
+        # Log to TensorBoard
+        if self.writer:
+            iteration = self.stats['iteration']
+            self.writer.add_scalar('Evaluation/WinRate_vs_Random', win_rate, iteration)
+            self.writer.add_scalar('Evaluation/BB100_vs_Random', bb_per_100, iteration)
+            
+        return {
+            'win_rate': win_rate,
+            'bb_per_100': bb_per_100
+        }
 
+    def train_iteration(
+        self,
+        num_episodes: int,
+        verbose: bool = False
+    ) -> Dict[str, float]:
+        """
+        Run one training iteration (collect episodes + PPO update).
+        
+        Args:
+            num_episodes: Number of episodes to collect
+            verbose: Print detailed progress
+        
+        Returns:
+            Dictionary of training statistics
+        """
+        if self.log_level >= 1:
+            print(f"\n{'='*70}")
+            print(f"Training Iteration {self.stats['iteration'] + 1}")
+            print(f"{'='*70}")
+            print(f"Collecting {num_episodes} episodes...")
+        
+        all_states = []
+        all_actions = []
+        all_log_probs = []
+        all_values = []
+        all_advantages = []
+        all_returns = []
+        all_legal_masks = []
+        
+        episode_rewards = []
+        episode_lengths = []
+        
+        # Collect episodes in parallel
+        max_workers = min(num_episodes, 10)  # Cap at 10 threads to avoid overloading API/System
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(self.collect_episode, use_opponent_pool=True, verbose=verbose)
+                for _ in range(num_episodes)
+            ]
+            
+            for i, future in enumerate(concurrent.futures.as_completed(futures)):
+                try:
+                    episode = future.result()
+                    
+                    if not episode['success'] or len(episode['states']) == 0:
+                        continue
+                    
+                    # Update statistics (moved from collect_episode)
+                    self.stats['total_episodes'] += 1
+                    self.stats['total_timesteps'] += len(episode['states'])
+                    self.stats['avg_reward'].append(episode['main_reward'])
+                    self.stats['avg_episode_length'].append(len(episode['states']))
+                    self.stats['win_rate'].append(1.0 if episode['main_reward'] > 0 else 0.0)
+                    
+                    # Track average value estimate
+                    if len(episode['values']) > 0:
+                        avg_value = sum([v.item() for v in episode['values']]) / len(episode['values'])
+                        self.stats['avg_value_estimate'].append(avg_value)
+                    
+                    # Compute advantages and returns using GAE
+                    rewards = torch.tensor([episode['main_reward']], dtype=torch.float32)
+                    
+                    # For poker, we get reward at end of hand, so we need to propagate it back
+                    num_steps = len(episode['states'])
+                    step_rewards = torch.zeros(num_steps)
+                    
+                    # Normalize reward to be in range [-1, 1]
+                    # episode['main_reward'] is already normalized by starting_chips in collect_episode
+                    normalized_reward = episode['main_reward']
+                    normalized_reward = max(-1.0, min(1.0, normalized_reward))  # Clip to [-1, 1]
+                    
+                    # Add intermediate shaping rewards for better learning signal
+                    # Small reward for staying in the hand (engagement)
+                    # REMOVED: step_rewards[step_idx] = 0.01 - we want to encourage folding bad hands
+                    if num_steps > 1:
+                        for step_idx in range(num_steps - 1):
+                             step_rewards[step_idx] = 0.0
+                    
+                    # Main reward at the end
+                    step_rewards[-1] = normalized_reward
+                    
+                    # Compute GAE
+                    advantages, returns = self.ppo_trainer.compute_gae(
+                        step_rewards,
+                        episode['values'],
+                        episode['dones'],
+                        torch.tensor(0.0)  # No next value (terminal)
+                    )
+                    
+                    # Store episode data
+                    all_states.append(episode['states'])
+                    all_actions.append(episode['actions'])
+                    all_log_probs.append(episode['log_probs'])
+                    all_values.append(episode['values'])
+                    all_advantages.append(advantages)
+                    all_returns.append(returns)
+                    all_legal_masks.append(episode['legal_actions_masks'])
+                    
+                    episode_rewards.append(episode['main_reward'])
+                    episode_lengths.append(num_steps)
+                    
+                    if self.log_level >= 2 and (i + 1) % 10 == 0:
+                        avg_reward = sum(episode_rewards[-10:]) / len(episode_rewards[-10:])
+                        print(f"  Episode {i+1}/{num_episodes} - Avg Reward (last 10): {avg_reward:.3f}")
+                        
+                except Exception as e:
+                    print(f"⚠️  Error in episode collection: {e}")
+                    traceback.print_exc()
+        
+        if not all_states:
+            if self.log_level >= 1:
+                print("⚠️  No successful episodes collected!")
+            return {}
+        
+        # Concatenate all episode data
+        # NOTE: Keep on CPU for offloading
+        states = torch.cat(all_states, dim=0)
+        actions = torch.cat(all_actions, dim=0)
+        old_log_probs = torch.cat(all_log_probs, dim=0)
+        old_values = torch.cat(all_values, dim=0)
+        advantages = torch.cat(all_advantages, dim=0)
+        returns = torch.cat(all_returns, dim=0)
+        legal_masks = torch.cat(all_legal_masks, dim=0)
+        
+        if self.log_level >= 1:
+            print(f"\nCollected {len(states)} timesteps from {len(episode_rewards)} episodes")
+            print(f"  Avg Episode Reward: {sum(episode_rewards)/len(episode_rewards):.3f}")
+            print(f"  Avg Episode Length: {sum(episode_lengths)/len(episode_lengths):.1f}")
+            print(f"  Win Rate: {sum(1 for r in episode_rewards if r > 0) / len(episode_rewards):.2%}")
+            print(f"\nRunning PPO update...")
+        
+        # PPO update
+        ppo_stats = self.ppo_trainer.update(
+            states, actions, old_log_probs, old_values, advantages, returns, legal_masks,
+            verbose=(self.log_level >= 2)
+        )
+        
+        # Anneal entropy coefficient (decay to 0.001 minimum)
+        self.ppo_trainer.entropy_coef = max(0.001, self.ppo_trainer.entropy_coef * 0.995)
+        if self.writer:
+             self.writer.add_scalar('PPO/EntropyCoef', self.ppo_trainer.entropy_coef, self.stats['iteration'])
+        
+        # Track explained variance for convergence monitoring
+        if 'explained_variance' in ppo_stats:
+            self.stats['explained_variance_history'].append(ppo_stats['explained_variance'])
+        
+        if self.log_level >= 1:
+            print(f"  Policy Loss: {ppo_stats['policy_loss']:.4f}")
+            print(f"  Value Loss: {ppo_stats['value_loss']:.4f}")
+            print(f"  Entropy: {ppo_stats['entropy']:.4f}")
+            print(f"  KL Divergence: {ppo_stats['kl_divergence']:.4f}")
+            print(f"  Explained Variance: {ppo_stats['explained_variance']:.4f}")
+            
+            # Convergence indicator
+            if len(self.stats['explained_variance_history']) >= 10:
+                recent_ev = list(self.stats['explained_variance_history'])[-10:]
+                avg_ev = sum(recent_ev) / len(recent_ev)
+                if avg_ev > 0.8:
+                    print(f"  ✓ Convergence indicator: GOOD (EV={avg_ev:.3f})")
+                elif avg_ev > 0.5:
+                    print(f"  ⚡ Convergence indicator: FAIR (EV={avg_ev:.3f})")
+                else:
+                    print(f"  ⚠️  Convergence indicator: POOR (EV={avg_ev:.3f})")
+        
+        # Log to TensorBoard
+        if self.writer:
+            iteration = self.stats['iteration']
+            self.writer.add_scalar('Episode/AvgReward', sum(episode_rewards)/len(episode_rewards), iteration)
+            self.writer.add_scalar('Episode/AvgLength', sum(episode_lengths)/len(episode_lengths), iteration)
+            self.writer.add_scalar('Episode/WinRate', sum(1 for r in episode_rewards if r > 0) / len(episode_rewards), iteration)
+            
+            for key, value in ppo_stats.items():
+                self.writer.add_scalar(f'PPO/{key}', value, iteration)
+            
+            # Log convergence metrics
+            if self.stats['avg_value_estimate']:
+                self.writer.add_scalar('Convergence/AvgValueEstimate', 
+                                      sum(self.stats['avg_value_estimate']) / len(self.stats['avg_value_estimate']), 
+                                      iteration)
+        
+        self.stats['iteration'] += 1
+        
+        return ppo_stats
+    
+    def save_checkpoint(self, name: str = "latest"):
+        """Save model checkpoint"""
+        checkpoint_path = self.output_dir / f"poker_rl_{name}.pt"
+        
+        self.ppo_trainer.save_checkpoint(
+            str(checkpoint_path),
+            epoch=self.stats['iteration'],
+            input_dim=self.model.input_dim,
+            total_episodes=self.stats['total_episodes'],
+            total_timesteps=self.stats['total_timesteps']
+        )
+        
+        # Only print every 10th checkpoint in minimal mode
+        if self.log_level >= 1 or (self.stats['iteration'] % 100 == 0):
+            print(f"✓ Checkpoint saved: {checkpoint_path}")
+        
+        # Add to opponent pool
+        if len(self.opponent_pool) >= self.max_opponent_pool_size:
+            # Remove oldest
+            self.opponent_pool.pop(0)
+        
+        self.opponent_pool.append(checkpoint_path)
+    
+    def _call_api(self, history: List[Dict]) -> Dict:
+        """Call poker API server"""
+        payload = {
+            'config': {
+                **self.game_config,
+                'seed': random.randint(0, 1000000)
+            },
+            'history': history
+        }
+        
+        try:
+            # Use direct C++ binding
+            # orjson.dumps returns bytes, decode to str if binding requires str
+            payload_bytes = json.dumps(payload)
+            payload_str = payload_bytes.decode('utf-8') if isinstance(payload_bytes, bytes) else payload_bytes
+            
+            response_str = poker_api_binding.process_request(payload_str)
+            return json.loads(response_str)
+        except Exception as e:
+            error_msg = f"Binding error: {e}"
+            print(f"⚠️  {error_msg}")
+            return {'success': False, 'error': error_msg}
+    
+    def _extract_state(self, game_state: Dict, player_id: str) -> Dict[str, Any]:
+        """Extract state for a specific player"""
+        player = None
+        for p in game_state['players']:
+            if p['id'] == player_id:
+                player = p
+                break
+        
+        if player is None:
+            return {}
+        
+        config = game_state.get('config', {})
+        action_constraints = game_state.get('actionConstraints', {})
+        
+        return {
+            'player_id': player_id,
+            'hole_cards': player.get('holeCards', []),
+            'community_cards': game_state.get('communityCards', []),
+            'pot': game_state.get('pot', 0),
+            'current_bet': game_state.get('currentBet', 0),
+            'player_chips': player.get('chips', 0),
+            'player_bet': player.get('bet', 0),
+            'player_total_bet': player.get('totalBet', 0),
+            'stage': game_state.get('stage', 'Preflop'),
+            'num_players': len(game_state['players']),
+            'num_active': sum(1 for p in game_state['players'] if p.get('isInHand', False)),
+            'position': player.get('position', 0),
+            'is_dealer': player.get('isDealer', False),
+            'is_small_blind': player.get('isSmallBlind', False),
+            'is_big_blind': player.get('isBigBlind', False),
+            'big_blind': config.get('bigBlind', 20),
+            'small_blind': config.get('smallBlind', 10),
+            'starting_chips': config.get('startingChips', 1000),
+            'to_call': action_constraints.get('toCall', 0),
+            'min_bet': action_constraints.get('minBet', 20),
+            'min_raise_total': action_constraints.get('minRaiseTotal', 20),
+        }
+    
+    def _get_legal_actions(self, game_state: Dict) -> List[str]:
+        """Get legal actions from game state"""
+        action_constraints = game_state.get('actionConstraints', {})
+        return action_constraints.get('legalActions', [])
+    
+    def _create_legal_actions_mask(self, legal_actions: List[str]) -> torch.Tensor:
+        """Create legal actions mask tensor"""
+        return create_legal_actions_mask(legal_actions, self.device)
+    
+    def _idx_to_action_label(self, idx: int) -> str:
+        """Convert action index to label"""
+        return ACTION_NAMES[idx]
+    
+    def _convert_action(self, action_label: str, state: Dict) -> Tuple[str, int]:
+        """Convert action label to (type, amount)"""
+        return convert_action_label(action_label, state)
+    
+    def _random_action(self, legal_actions: List[str], state: Dict) -> Tuple[str, int, str]:
+        """Generate random action"""
+        action = random.choice(legal_actions)
+        
+        if action == 'bet':
+            size_fractions = [0.5, 0.75, 1.0]
+            size_fraction = random.choice(size_fractions)
+            action_label = f'bet_{int(size_fraction*100)}%'
+        elif action == 'raise':
+            size_fractions = [0.5, 0.75, 1.0]
+            size_fraction = random.choice(size_fractions)
+            action_label = f'raise_{int(size_fraction*100)}%'
+        else:
+            action_label = action
+            
+        action_type, amount = self._convert_action(action_label, state)
+        return action_type, amount, action_label
+
+
+# =============================================================================
+# Main Training Function
+# =============================================================================
 
 def main() -> int:
-    """Main training function"""
+    """Main RL training function"""
     parser = argparse.ArgumentParser(
-        description="Train a poker action prediction model from rollout data"
+        description="Train a poker AI using reinforcement learning (PPO)"
     )
     
-    parser.add_argument('--data', type=str, default='data/quickstart_rollouts.json',
-                       help='Path to rollout data JSON file or directory of JSON files')
-    parser.add_argument('--output', type=str, default='/tmp/pokersim/models/poker_model.pt',
-                       help='Output path for trained model')
-    parser.add_argument('--epochs', type=int, default=50,
-                       help='Number of training epochs')
-    parser.add_argument('--batch-size', type=int, default=32,
-                       help='Batch size')
-    parser.add_argument('--lr', type=float, default=0.001,
-                       help='Learning rate')
-    parser.add_argument('--hidden-dim', type=int, default=256,
-                       help='Hidden layer dimension (for transformer: embedding dimension)')
+    # Training parameters - optimized for convergence
+    parser.add_argument('--iterations', type=int, default=5000,
+                       help='Number of training iterations (default: 5000)')
+    parser.add_argument('--episodes-per-iter', type=int, default=200,
+                       help='Episodes per iteration (default: 200, increased for stability)')
+    parser.add_argument('--ppo-epochs', type=int, default=10,
+                       help='PPO epochs per update (default: 10)')
+    parser.add_argument('--mini-batch-size', type=int, default=128,
+                       help='Mini-batch size for PPO (default: 128)')
+    
+    # Game configuration
+    parser.add_argument('--num-players', type=int, default=2,
+                       help='Number of players (default: 2 for heads-up)')
+    parser.add_argument('--small-blind', type=int, default=10,
+                       help='Small blind (default: 10)')
+    parser.add_argument('--big-blind', type=int, default=20,
+                       help='Big blind (default: 20)')
+    parser.add_argument('--starting-chips', type=int, default=1000,
+                       help='Starting chips (default: 1000)')
+    
+    # PPO hyperparameters - optimized for stability and convergence
+    parser.add_argument('--learning-rate', type=float, default=3e-4,
+                       help='Learning rate (default: 3e-4)')
+    parser.add_argument('--gamma', type=float, default=0.99,
+                       help='Discount factor (default: 0.99)')
+    parser.add_argument('--gae-lambda', type=float, default=0.95,
+                       help='GAE lambda (default: 0.95)')
+    parser.add_argument('--clip-epsilon', type=float, default=0.2,
+                       help='PPO clip epsilon (default: 0.2)')
+    parser.add_argument('--entropy-coef', type=float, default=0.01,
+                       help='Entropy coefficient (default: 0.01)')
+    parser.add_argument('--value-loss-coef', type=float, default=0.5,
+                       help='Value loss coefficient (default: 0.5)')
+    
+    # Model architecture
+    parser.add_argument('--hidden-dim', type=int, default=512,
+                       help='Hidden dimension (default: 512)')
     parser.add_argument('--num-heads', type=int, default=8,
-                       help='Number of attention heads in transformer (default: 8)')
+                       help='Number of attention heads (default: 8)')
     parser.add_argument('--num-layers', type=int, default=4,
-                       help='Number of transformer encoder layers (default: 4)')
+                       help='Number of transformer layers (default: 4)')
     parser.add_argument('--dropout', type=float, default=0.1,
                        help='Dropout rate (default: 0.1)')
-    parser.add_argument('--weight-decay', type=float, default=0.001,
-                       help='Weight decay (L2 regularization) (default: 0.001)')
-    parser.add_argument('--early-stopping-patience', type=int, default=10,
-                       help='Early stopping patience (epochs without improvement)')
-    parser.add_argument('--lr-scheduler', type=str, default='cosine',
-                       choices=['none', 'step', 'cosine', 'plateau'],
-                       help='Learning rate scheduler (default: cosine)')
-    parser.add_argument('--lr-warmup-epochs', type=int, default=5,
-                       help='Number of warmup epochs for learning rate (default: 5)')
-    parser.add_argument('--gradient-checkpointing', action='store_true',
-                       help='Enable gradient checkpointing to save memory (slower but enables larger models)')
-    parser.add_argument('--mixed-precision', action='store_true',
-                       help='Enable mixed precision training (faster on modern GPUs)')
-    parser.add_argument('--checkpoint', type=str, default=None,
-                       help='Path to checkpoint to resume training from')
-    parser.add_argument('--model-version', type=int, default=MODEL_VERSION_CURRENT,
-                       choices=[MODEL_VERSION_LEGACY, MODEL_VERSION_TRANSFORMER],
-                       help=f'Model architecture version (1=legacy feed-forward, 2=transformer, default={MODEL_VERSION_CURRENT})')
+    parser.add_argument('--no-gradient-checkpointing', action='store_true',
+                       help='Disable gradient checkpointing (enabled by default for large models)')
     
-    # TensorBoard options
-    parser.add_argument('--tensorboard-dir', type=str, default='/tmp/pokersim/tensorboard',
-                       help='Directory for TensorBoard logs (default: /tmp/pokersim/tensorboard)')
+    # I/O
+    parser.add_argument('--output-dir', type=str, 
+                       default=f'/tmp/pokersim/rl_models_v{MODEL_VERSION}',
+                       help='Output directory for models')
+    parser.add_argument('--save-interval', type=int, default=100,
+                       help='Save checkpoint every N iterations (default: 100)')
+    parser.add_argument('--checkpoint', type=str, default=None,
+                       help='Checkpoint to resume from')
+    
+    # TensorBoard
+    parser.add_argument('--tensorboard-dir', type=str, default=f'/tmp/pokersim/tensorboard_v{MODEL_VERSION}',
+                       help='Directory for TensorBoard logs')
     parser.add_argument('--no-tensorboard', action='store_true',
                        help='Disable TensorBoard logging')
     
-    # Adaptive training schedule
-    parser.add_argument('--adaptive-schedule', action='store_true',
-                       help='Enable adaptive training schedule (start small, grow as loss plateaus)')
-    parser.add_argument('--initial-data-fraction', type=float, default=0.1,
-                       help='Initial fraction of data to train on (default: 0.1)')
-    parser.add_argument('--data-growth-factor', type=float, default=1.5,
-                       help='Factor to grow dataset by when plateauing (default: 1.5)')
-    parser.add_argument('--plateau-patience', type=int, default=5,
-                       help='Epochs without improvement before increasing data size (default: 5)')
-    parser.add_argument('--plateau-threshold', type=float, default=0.001,
-                       help='Minimum improvement to not be considered plateaued (default: 0.001)')
+    parser.add_argument('--eval-interval', type=int, default=20,
+                       help='Evaluate against random every N iterations (default: 20)')
+    parser.add_argument('--eval-episodes', type=int, default=50,
+                       help='Number of episodes for evaluation (default: 50)')
+    
+    # Other
+    parser.add_argument('--verbose', action='store_true',
+                       help='Verbose output')
     
     args = parser.parse_args()
     
-    # Load data - support both single file and directory
-    data_path = Path(args.data) if Path(args.data).is_absolute() else Path(__file__).parent / args.data
+    if LOG_LEVEL >= 1:
+        print("✓ Using fast C++ bindings for PokerEngine")
     
-    if not data_path.exists():
-        print(f"✗ Error: Data path not found: {data_path}")
-        print(f"  Please generate rollouts first:")
-        print(f"  python generate_rollouts.py --num-rollouts 1000")
-        return 1
+    # Setup Accelerator
+    # gradient_accumulation_steps is handled manually in PPO by mini_batch_size vs full batch
+    accelerator = Accelerator()
+    device = accelerator.device
     
-    rollouts = []
-    if data_path.is_dir():
-        # Load all JSON files from directory
-        json_files = sorted(data_path.glob("*.json"))
-        if not json_files:
-            print(f"✗ Error: No JSON files found in directory: {data_path}")
-            return 1
-        
-        print(f"📂 Loading data from {len(json_files)} files in {data_path}...")
-        for json_file in json_files:
-            try:
-                with open(json_file, 'r') as f:
-                    file_rollouts = json.load(f)
-                    rollouts.extend(file_rollouts)
-                    print(f"  ✓ Loaded {len(file_rollouts)} rollouts from {json_file.name}")
-            except Exception as e:
-                print(f"  ⚠️  Error loading {json_file.name}: {e}")
-    else:
-        # Load single file
-        with open(data_path, 'r') as f:
-            rollouts = json.load(f)
+    if LOG_LEVEL >= 1:
+        print(f"✓ Using device: {device}")
+        if accelerator.mixed_precision == 'fp16':
+            print("✓ Using FP16 mixed precision")
     
-    # Create full dataset
-    full_dataset = PokerDataset(rollouts)
+    # Create output directories
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    tensorboard_dir = Path(args.tensorboard_dir) if not args.no_tensorboard else None
     
-    if len(full_dataset) == 0:
-        print("✗ Error: No training samples found")
-        return 1
+    # Create model
+    if LOG_LEVEL >= 1:
+        print("\n📦 Creating Actor-Critic model...")
     
-    feature_dim = full_dataset.get_feature_dim()
+    # Get input dimension from encoder
+    temp_encoder = RLStateEncoder()
+    input_dim = temp_encoder.get_feature_dim()
     
-    print(f"✓ Loaded {len(rollouts)} rollouts ({len(full_dataset)} state-action pairs)")
+    model = create_actor_critic(
+        input_dim=input_dim,
+        hidden_dim=args.hidden_dim,
+        num_heads=args.num_heads,
+        num_layers=args.num_layers,
+        dropout=args.dropout,
+        gradient_checkpointing=not args.no_gradient_checkpointing
+    )
+    # accelerator.prepare will handle device placement
     
-    # Setup adaptive scheduler if enabled
-    adaptive_scheduler = None
-    if args.adaptive_schedule:
-        adaptive_scheduler = AdaptiveDataScheduler(
-            total_samples=len(full_dataset),
-            initial_fraction=args.initial_data_fraction,
-            growth_factor=args.data_growth_factor,
-            plateau_patience=args.plateau_patience,
-            plateau_threshold=args.plateau_threshold
-        )
-        print(f"\n🎯 Adaptive training schedule enabled:")
-        print(f"   Starting with {adaptive_scheduler.get_current_size():,} samples ({adaptive_scheduler.get_progress()*100:.1f}%)")
-        print(f"   Will grow by {args.data_growth_factor}x when loss plateaus")
-    
-    # Helper function to create dataloaders with current curriculum size
-    def create_dataloaders(dataset, current_size=None):
-        """Create train/val dataloaders, optionally with a subset of data"""
-        if current_size is None or current_size >= len(dataset):
-            # Use full dataset
-            working_dataset = dataset
-        else:
-            # Use subset
-            indices = list(range(len(dataset)))
-            import random
-            random.shuffle(indices)
-            subset_indices = indices[:current_size]
-            working_dataset = torch.utils.data.Subset(dataset, subset_indices)
-        
-        # Split into train/val (80/20)
-        train_size = int(0.8 * len(working_dataset))
-        val_size = len(working_dataset) - train_size
-        train_dataset, val_dataset = torch.utils.data.random_split(
-            working_dataset, [train_size, val_size]
-        )
-        
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=args.batch_size,
-            shuffle=True,
-            num_workers=0
-        )
-        
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=args.batch_size,
-            shuffle=False,
-            num_workers=0
-        )
-        
-        return train_loader, val_loader, train_size, val_size
-    
-    # Create initial dataloaders
-    if adaptive_scheduler:
-        train_loader, val_loader, train_size, val_size = create_dataloaders(
-            full_dataset, adaptive_scheduler.get_current_size()
-        )
-    else:
-        train_loader, val_loader, train_size, val_size = create_dataloaders(full_dataset)
-    
-    print(f"✓ Train samples: {train_size}, Validation samples: {val_size}")
-    
-    # Setup device (prioritize CUDA, then MPS, then CPU)
-    if torch.cuda.is_available():
-        device = torch.device('cuda')
-        print(f"✓ Using device: CUDA (GPU)")
-    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-        device = torch.device('mps')
-        print(f"✓ Using device: MPS (Apple Silicon GPU)")
-    else:
-        device = torch.device('cpu')
-        print(f"✓ Using device: CPU")
-    print(f"  Device: {device}")
-    
-    # Create model based on version
-    if args.model_version == MODEL_VERSION_LEGACY:
-        print(f"Using model version {MODEL_VERSION_LEGACY}: Legacy feed-forward network")
-        model = PokerNet(input_dim=feature_dim, hidden_dim=args.hidden_dim)
-    elif args.model_version == MODEL_VERSION_TRANSFORMER:
-        print(f"Using model version {MODEL_VERSION_TRANSFORMER}: Transformer-based network")
-        model = PokerTransformer(
-            input_dim=feature_dim, 
-            hidden_dim=args.hidden_dim,
-            num_heads=args.num_heads,
-            num_layers=args.num_layers,
-            dropout=args.dropout,
-            gradient_checkpointing=args.gradient_checkpointing
-        )
-        if args.gradient_checkpointing:
-            print(f"  ⚡ Gradient checkpointing enabled (saves memory, trades speed)")
-    else:
-        raise ValueError(f"Unknown model version: {args.model_version}")
-    model = model.to(device)
-    
-    # Count parameters
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"✓ Model parameters: {num_params:,}")
+    if LOG_LEVEL >= 1:
+        print(f"✓ Model created: {num_params:,} parameters")
     
-    # Loss and optimizer with weight decay (L2 regularization)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=(0.9, 0.999))
+    # Create PPO trainer
+    if LOG_LEVEL >= 1:
+        print("\n🎯 Creating PPO trainer...")
+    ppo_trainer = PPOTrainer(
+        model=model,
+        learning_rate=args.learning_rate,
+        gamma=args.gamma,
+        gae_lambda=args.gae_lambda,
+        clip_epsilon=args.clip_epsilon,
+        entropy_coef=args.entropy_coef,
+        value_loss_coef=args.value_loss_coef,
+        ppo_epochs=args.ppo_epochs,
+        mini_batch_size=args.mini_batch_size,
+        device=device,
+        accelerator=accelerator
+    )
+    if LOG_LEVEL >= 1:
+        print(f"✓ PPO trainer created")
+        print(f"  Learning rate: {args.learning_rate}")
+        print(f"  PPO epochs: {args.ppo_epochs}")
+        print(f"  Episodes per iteration: {args.episodes_per_iter}")
     
-    # Learning rate scheduler
-    scheduler = None
-    if args.lr_scheduler != 'none':
-        if args.lr_scheduler == 'cosine':
-            # Cosine annealing with warmup
-            scheduler = optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, 
-                T_max=args.epochs - args.lr_warmup_epochs,
-                eta_min=args.lr * 0.01  # Min LR is 1% of initial
-            )
-            print(f"✓ Using cosine annealing LR scheduler (warmup: {args.lr_warmup_epochs} epochs)")
-        elif args.lr_scheduler == 'step':
-            scheduler = optim.lr_scheduler.StepLR(
-                optimizer,
-                step_size=args.epochs // 3,
-                gamma=0.5
-            )
-            print(f"✓ Using step LR scheduler (decay every {args.epochs // 3} epochs)")
-        elif args.lr_scheduler == 'plateau':
-            scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer,
-                mode='min',
-                factor=0.5,
-                patience=5,
-                verbose=True
-            )
-            print(f"✓ Using plateau LR scheduler (reduce on val loss plateau)")
-    
-    # Mixed precision training
-    scaler = None
-    if args.mixed_precision and device.type in ['cuda', 'mps']:
-        if device.type == 'cuda':
-            scaler = torch.cuda.amp.GradScaler()
-            print(f"✓ Mixed precision training enabled (faster training)")
-        else:
-            print(f"⚠️  Mixed precision not fully supported on MPS, using standard precision")
-    
-    best_val_loss = float('inf')
-    epochs_without_improvement = 0
-    start_epoch = 1
-    
-    # Load from checkpoint if provided
+    # Load checkpoint if provided
+    start_iteration = 0
     if args.checkpoint:
-        checkpoint_path = Path(args.checkpoint) if Path(args.checkpoint).is_absolute() else Path(__file__).parent / args.checkpoint
+        checkpoint_path = Path(args.checkpoint)
         if checkpoint_path.exists():
             print(f"\n📂 Loading checkpoint from: {checkpoint_path}")
-            checkpoint = torch.load(checkpoint_path, map_location=device)
-            
-            # Check if checkpoint model version matches current version
-            # Handle legacy checkpoints that used 'model_type' string
-            if 'model_version' in checkpoint:
-                checkpoint_version = checkpoint['model_version']
-            else:
-                # Legacy checkpoint compatibility
-                checkpoint_model_type = checkpoint.get('model_type', 'legacy')
-                checkpoint_version = MODEL_VERSION_LEGACY if checkpoint_model_type == 'legacy' else MODEL_VERSION_TRANSFORMER
-            
-            if checkpoint_version != args.model_version:
-                print(f"⚠️  Warning: Checkpoint is model version {checkpoint_version} but current model is version {args.model_version}")
-                print(f"   Starting training from scratch with new architecture")
-            else:
-                try:
-                    model.load_state_dict(checkpoint['model_state_dict'])
-                    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-                    
-                    # Restore scheduler state if present
-                    if scheduler and 'scheduler_state_dict' in checkpoint:
-                        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-                    
-                    # Restore adaptive scheduler state if present
-                    if adaptive_scheduler and 'adaptive_scheduler_state_dict' in checkpoint:
-                        adaptive_scheduler.load_state_dict(checkpoint['adaptive_scheduler_state_dict'])
-                        print(f"   Resumed adaptive schedule: using {adaptive_scheduler.get_current_size():,} samples ({adaptive_scheduler.get_progress()*100:.1f}% of data)")
-                    
-                    start_epoch = checkpoint.get('epoch', 0) + 1
-                    best_val_loss = checkpoint.get('val_loss', float('inf'))
-                    print(f"✓ Resumed from epoch {checkpoint.get('epoch', 0)}, best val loss: {best_val_loss:.4f}")
-                except Exception as e:
-                    print(f"⚠️  Error loading checkpoint: {e}")
-                    print(f"   Starting training from scratch")
+            checkpoint = ppo_trainer.load_checkpoint(str(checkpoint_path))
+            start_iteration = checkpoint.get('epoch', 0)
+            print(f"✓ Resumed from iteration {start_iteration}")
         else:
             print(f"⚠️  Checkpoint not found: {checkpoint_path}, starting from scratch")
     
-    # Setup TensorBoard
-    writer = None
-    if not args.no_tensorboard:
-        log_dir = Path(args.tensorboard_dir) / f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        writer = SummaryWriter(log_dir=str(log_dir))
-        print(f"\n📊 TensorBoard logging to: {log_dir}")
-        print(f"   To view: tensorboard --logdir={args.tensorboard_dir}")
-        
-        # Log hyperparameters
-        hparams = {
-            'learning_rate': args.lr,
-            'batch_size': args.batch_size,
-            'hidden_dim': args.hidden_dim,
-            'weight_decay': args.weight_decay,
-            'model_version': args.model_version,
-            'adaptive_schedule': args.adaptive_schedule,
-        }
-        if args.model_version == MODEL_VERSION_TRANSFORMER:
-            hparams.update({
-                'num_heads': args.num_heads,
-                'num_layers': args.num_layers,
-                'dropout': args.dropout,
-            })
-        
-        # Log hyperparameters as text
-        hparam_str = '\n'.join([f'{k}: {v}' for k, v in hparams.items()])
-        writer.add_text('Hyperparameters', hparam_str, 0)
+    # Game configuration
+    game_config = {
+        'num_players': args.num_players,
+        'smallBlind': args.small_blind,
+        'bigBlind': args.big_blind,
+        'startingChips': args.starting_chips,
+        'minPlayers': args.num_players,
+        'maxPlayers': args.num_players
+    }
     
-    print(f"\nStarting training for {args.epochs} epochs...")
-    if start_epoch > 1:
-        print(f"  Continuing from epoch {start_epoch}")
-
-    current_epoch = start_epoch
-    total_epochs_run = 0
-    max_total_epochs = args.epochs * 5  # Safety limit to prevent infinite training
+    # Create training session
+    if LOG_LEVEL >= 1:
+        print("\n🚀 Starting RL training session...")
+        print(f"  Total iterations: {args.iterations}")
+        print(f"  Episodes per iteration: {args.episodes_per_iter}")
+        print(f"  Estimated total episodes: {args.iterations * args.episodes_per_iter:,}")
     
-    while total_epochs_run < max_total_epochs:
-        # Determine how many epochs to run in this phase
-        if adaptive_scheduler and not adaptive_scheduler.is_at_full_size():
-            # When using adaptive schedule, run fewer epochs per phase
-            epochs_this_phase = min(args.epochs, max_total_epochs - total_epochs_run)
-        else:
-            # Regular training or at full dataset size
-            epochs_this_phase = args.epochs
-        
-        phase_end_epoch = current_epoch + epochs_this_phase
-        
-        for epoch in range(current_epoch, phase_end_epoch):
-            # Learning rate warmup
-            if scheduler and epoch < args.lr_warmup_epochs:
-                warmup_lr = args.lr * (epoch + 1) / args.lr_warmup_epochs
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] = warmup_lr
-            
-            train_loss, train_acc = train_model(model, train_loader, optimizer, criterion, device, epoch, phase_end_epoch - 1, writer, scaler)
-            val_loss, val_acc = validate_model(model, val_loader, criterion, device)
-            
-            # Log epoch metrics to TensorBoard
-            if writer is not None:
-                writer.add_scalar('Loss/Train', train_loss, epoch)
-                writer.add_scalar('Loss/Validation', val_loss, epoch)
-                writer.add_scalar('Accuracy/Train', train_acc, epoch)
-                writer.add_scalar('Accuracy/Validation', val_acc, epoch)
-                writer.add_scalar('Learning_Rate', optimizer.param_groups[0]['lr'], epoch)
-                
-                # Log dataset size if using adaptive schedule
-                if adaptive_scheduler:
-                    writer.add_scalar('Dataset/Size', adaptive_scheduler.get_current_size(), epoch)
-                    writer.add_scalar('Dataset/Progress', adaptive_scheduler.get_progress(), epoch)
-            
-            # Progress indicator for adaptive schedule
-            if adaptive_scheduler:
-                progress_str = f" [Data: {adaptive_scheduler.get_progress()*100:.0f}%]"
-            else:
-                progress_str = ""
-            
-            print(f"Epoch {epoch}/{phase_end_epoch - 1}{progress_str} - Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}% | Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%", flush=True)
-            
-            # Update learning rate scheduler (after warmup)
-            if scheduler and epoch >= args.lr_warmup_epochs:
-                if args.lr_scheduler == 'plateau':
-                    scheduler.step(val_loss)
-                else:
-                    scheduler.step()
-            
-            # Save best model based on validation loss
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                epochs_without_improvement = 0
-                output_path = Path(args.output) if Path(args.output).is_absolute() else Path(__file__).parent / args.output
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                
-                # Save model state and metadata
-                checkpoint_data = {
-                    'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'train_loss': train_loss,
-                    'val_loss': val_loss,
-                    'feature_dim': feature_dim,
-                    'hidden_dim': args.hidden_dim,
-                    'action_names': ACTION_NAMES,
-                    'model_version': args.model_version,
-                }
-                
-                # Add scheduler state if present
-                if scheduler:
-                    checkpoint_data['scheduler_state_dict'] = scheduler.state_dict()
-                    checkpoint_data['lr_scheduler'] = args.lr_scheduler
-                
-                # Add adaptive scheduler state if present
-                if adaptive_scheduler:
-                    checkpoint_data['adaptive_scheduler_state_dict'] = adaptive_scheduler.state_dict()
-                
-                # Add version-specific parameters
-                if args.model_version == MODEL_VERSION_TRANSFORMER:
-                    checkpoint_data.update({
-                        'num_heads': args.num_heads,
-                        'num_layers': args.num_layers,
-                        'dropout': args.dropout,
-                        'gradient_checkpointing': args.gradient_checkpointing,
-                    })
-                
-                torch.save(checkpoint_data, output_path)
-                
-                print(f"  → Best model saved (val loss: {best_val_loss:.4f})", flush=True)
-            else:
-                epochs_without_improvement += 1
-                # Only trigger early stopping if not using adaptive schedule or already at full size
-                if (not adaptive_scheduler or adaptive_scheduler.is_at_full_size()) and \
-                   epochs_without_improvement >= args.early_stopping_patience:
-                    print(f"\n  ⚠️  Early stopping triggered after {epoch} epochs (no improvement for {args.early_stopping_patience} epochs)")
-                    total_epochs_run = max_total_epochs  # Exit outer loop too
-                    break
-            
-            # Update adaptive scheduler if enabled
-            if adaptive_scheduler:
-                dataset_grew = adaptive_scheduler.update(val_loss)
-                
-                if dataset_grew:
-                    # Recreate dataloaders with new dataset size
-                    train_loader, val_loader, train_size, val_size = create_dataloaders(
-                        full_dataset, adaptive_scheduler.get_current_size()
-                    )
-                    print(f"   New split - Train: {train_size:,}, Val: {val_size:,}")
-                    
-                    # Reset improvement counter when we grow dataset
-                    epochs_without_improvement = 0
-                    
-                    # Break to start new phase with larger dataset
-                    current_epoch = epoch + 1
-                    total_epochs_run += (epoch - current_epoch + epochs_this_phase)
-                    break
-        else:
-            # Completed this phase normally (no break)
-            total_epochs_run += epochs_this_phase
-            current_epoch = phase_end_epoch
-            
-            # If not using adaptive schedule or at full size, we're done
-            if not adaptive_scheduler or adaptive_scheduler.is_at_full_size():
-                break
-        
-        # Safety check
-        if total_epochs_run >= max_total_epochs:
-            print(f"\n  ⚠️  Reached maximum epochs ({max_total_epochs})")
-            break
+    session = RLTrainingSession(
+        model=model,
+        ppo_trainer=ppo_trainer,
+        game_config=game_config,
+        device=device,
+        output_dir=output_dir,
+        tensorboard_dir=tensorboard_dir,
+        log_level=LOG_LEVEL
+    )
     
-    print(f"\n✓ Training complete! Best validation loss: {best_val_loss:.4f}")
-    print(f"  Model saved to: {args.output}")
-    
-    # Log final metrics to TensorBoard
-    if writer is not None:
-        writer.add_hparams(
-            hparams,
-            {
-                'hparam/best_val_loss': best_val_loss,
-                'hparam/final_train_loss': train_loss if 'train_loss' in locals() else float('inf'),
-                'hparam/total_epochs': total_epochs_run,
+    # Test API connection before starting
+    if LOG_LEVEL >= 1:
+        print(f"\n🔗 API Configuration:")
+        print(f"   Using internal C++ binding (no server required)")
+        
+        # Test binding
+        try:
+            test_payload = {
+                'config': {'seed': 123},
+                'history': []
             }
+            
+            payload_bytes = json.dumps(test_payload)
+            payload_str = payload_bytes.decode('utf-8') if isinstance(payload_bytes, bytes) else payload_bytes
+            
+            test_response = json.loads(poker_api_binding.process_request(payload_str))
+            if test_response.get('success'):
+                    print(f"✓ Binding test successful\n")
+            else:
+                    print(f"⚠️  Binding test failed: {test_response.get('error')}\n")
+        except Exception as e:
+            print(f"❌ Binding test raised exception: {e}\n")
+    
+    # Set starting iteration if resuming
+    if start_iteration > 0:
+        session.stats['iteration'] = start_iteration
+    
+    # Training loop
+    for iteration in range(start_iteration, args.iterations):
+        # Train one iteration
+        stats = session.train_iteration(
+            num_episodes=args.episodes_per_iter,
+            verbose=args.verbose
         )
         
-        # Close TensorBoard writer
-        writer.close()
-        print(f"  TensorBoard logs: {log_dir}")
+        # Show minimal progress every 10 iterations
+        if LOG_LEVEL == 0 and (iteration + 1) % 10 == 0:
+            avg_reward = sum(list(session.stats['avg_reward'])[-10:]) / min(10, len(list(session.stats['avg_reward'])))
+            win_rate = sum(list(session.stats['win_rate'])[-10:]) / min(10, len(list(session.stats['win_rate'])))
+            print(f"Iter {iteration+1}/{args.iterations} - Avg Reward: {avg_reward:.3f}, Win Rate: {win_rate:.2%}")
+        
+        # Save checkpoint periodically
+        if (iteration + 1) % args.save_interval == 0:
+            session.save_checkpoint(name=f"iter_{iteration+1}")
+            session.save_checkpoint(name="latest")
+            
+        # Evaluate periodically
+        if (iteration + 1) % args.eval_interval == 0:
+            session.evaluate_vs_random(num_episodes=args.eval_episodes)
+    
+    # Save final model
+    session.save_checkpoint(name="final")
+    
+    print("\n✓ Training complete!")
+    print(f"  Total episodes: {session.stats['total_episodes']}")
+    print(f"  Total timesteps: {session.stats['total_timesteps']}")
+    if session.stats['avg_reward']:
+        print(f"  Final avg reward: {sum(list(session.stats['avg_reward']))/len(list(session.stats['avg_reward'])):.3f}")
+    if session.stats['win_rate']:
+        print(f"  Final win rate: {sum(list(session.stats['win_rate']))/len(list(session.stats['win_rate'])):.2%}")
+    
+    if session.writer:
+        session.writer.close()
     
     return 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
-

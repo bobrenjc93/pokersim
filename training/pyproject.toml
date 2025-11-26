@@ -7,21 +7,22 @@ requires-python = ">=3.9"
 dependencies = [
     "requests>=2.31.0",      # HTTP library for API calls
     "torch>=2.0.0",          # PyTorch for neural network training
+    "accelerate>=0.24.0",    # Hugging Face Accelerate for efficient hardware usage
     "numpy>=1.24.0",         # Required by PyTorch for numerical operations
     "psutil>=5.9.0",         # Cross-platform system and process utilities
     "tensorboard>=2.11.0",   # Visualize training metrics and model performance
+    "pytest>=7.0.0",         # Testing framework
+    "orjson>=3.9.0",         # Fast JSON serialization
 ]
 
 [project.scripts]
-generate-rollouts = "generate_rollouts:main"
 train-poker = "train:main"
 eval-poker = "eval:main"
-continuous-trainer = "continuous_trainer:main"
 
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["config", "continuous_trainer", "eval", "generate_rollouts", "train"]
+py-modules = ["config", "eval", "train", "rl_model", "rl_state_encoder", "ppo", "model_agent"]
 

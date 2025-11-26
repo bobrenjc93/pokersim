@@ -4,9 +4,8 @@ Evaluation Script - Play Against Random Agent
 
 This script evaluates a trained model by:
 1. Loading the trained model
-2. Playing 100 hands against a random agent
+2. Playing hands against a random agent
 3. Computing performance metrics (win rate, profit)
-4. Comparing performance to baseline
 
 Prerequisites:
 - Trained model (from train.py)
@@ -18,388 +17,259 @@ Usage:
 """
 
 import argparse
-import json
 import sys
 import random
-import subprocess
 import time
+import traceback
 from pathlib import Path
-from typing import Any, Optional
-from collections import defaultdict
+from typing import Any, Dict, List, Tuple
+
+try:
+    import orjson as json
+except ImportError:
+    import json
 
 import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader
 
-# Import from train.py
-from train import (PokerNet, PokerTransformer, PokerDataset, encode_state, encode_action, 
-                   ACTION_NAMES, BET_SIZE_MAP, MODEL_VERSION_LEGACY, MODEL_VERSION_TRANSFORMER)
+# Import agent classes
+from model_agent import ModelAgent, RandomAgent
 
-# Import model version from config
-from config import MODEL_VERSION
-
-# Import agent classes from generate_rollouts
+# Import poker_api_binding
 try:
-    from generate_rollouts import RandomAgent, RolloutGenerator
-    HAS_ROLLOUT_GENERATOR = True
+    import poker_api_binding
 except ImportError:
-    HAS_ROLLOUT_GENERATOR = False
-    print("⚠️  Warning: Could not import from generate_rollouts.py")
-
-# Try to import requests
-try:
-    import requests
-    HAS_REQUESTS = True
-except ImportError:
-    HAS_REQUESTS = False
+    print("Error: 'poker_api_binding' not found. Please compile the binding (cd api && make module).")
+    sys.exit(1)
 
 
-# =============================================================================
-# Model Agent
-# =============================================================================
-
-class ModelAgent:
-    """Agent that uses a trained neural network to make decisions"""
+class GameEvaluator:
+    """Evaluates agents by playing games via the API"""
     
-    def __init__(self, model: nn.Module, device: torch.device, player_id: str, name: str):
+    def __init__(self):
+        pass
+    
+    def check_server(self) -> bool:
+        """Check if API binding is working"""
+        try:
+            test_payload = {
+                'config': {'seed': 123},
+                'history': []
+            }
+            
+            payload_bytes = json.dumps(test_payload)
+            payload_str = payload_bytes.decode('utf-8') if isinstance(payload_bytes, bytes) else payload_bytes
+            
+            response_str = poker_api_binding.process_request(payload_str)
+            response = json.loads(response_str)
+            return response.get('success', False)
+        except:
+            return False
+
+    def play_hand(
+        self,
+        agents: List[Any],
+        config: Dict[str, Any],
+        verbose: bool = False
+    ) -> Dict[str, Any]:
         """
-        Initialize model agent.
+        Play a single hand.
         
         Args:
-            model: Trained PyTorch model
-            device: Device to run inference on
-            player_id: Player ID
-            name: Player name
-        """
-        self.model = model
-        self.device = device
-        self.player_id = player_id
-        self.name = name
-        self.model.eval()
-    
-    def select_action(self, state: dict[str, Any], legal_actions: list[str]) -> tuple[str, int, str]:
-        """
-        Select an action using the trained model.
-        
-        Args:
-            state: Game state dictionary
-            legal_actions: List of legal action strings
-        
+            agents: List of agent objects (must have player_id and select_action method)
+            config: Game configuration
+            verbose: Print detailed progress
+            
         Returns:
-            tuple: (action_type, amount, action_label)
+            Dictionary with hand results (rewards, etc.)
         """
-        if not legal_actions:
-            return ("fold", 0, "fold")
+        # Initialize game history
+        history = []
+        for agent in agents:
+            history.append({
+                'type': 'addPlayer',
+                'playerId': agent.player_id,
+                'playerName': agent.name
+            })
+            # Reset agent state
+            agent.reset_hand()
         
-        # Encode the state
-        state_tensor = encode_state(state).unsqueeze(0).to(self.device)
+        # Get initial state
+        response = self._call_api(config, history)
+        if not response['success']:
+            return {'success': False, 'error': response.get('error')}
         
-        # Get model prediction
-        with torch.no_grad():
-            outputs = self.model(state_tensor)
-            probs = torch.softmax(outputs, dim=1)
-            
-            # Build mapping of legal actions to granular actions
-            # For bet/raise, we need to consider all size variants
-            legal_granular_actions = []
-            legal_granular_probs = []
-            
-            for action_str in legal_actions:
-                if action_str == 'bet':
-                    # Consider all bet size variants
-                    for action_name in ACTION_NAMES:
-                        if action_name.startswith('bet_'):
-                            action_idx = ACTION_NAMES.index(action_name)
-                            legal_granular_actions.append(action_name)
-                            legal_granular_probs.append(probs[0, action_idx].item())
-                elif action_str == 'raise':
-                    # Consider all raise size variants
-                    for action_name in ACTION_NAMES:
-                        if action_name.startswith('raise_'):
-                            action_idx = ACTION_NAMES.index(action_name)
-                            legal_granular_actions.append(action_name)
-                            legal_granular_probs.append(probs[0, action_idx].item())
-                else:
-                    # Direct action (fold, check, call, all_in)
-                    if action_str in ACTION_NAMES:
-                        action_idx = ACTION_NAMES.index(action_str)
-                        legal_granular_actions.append(action_str)
-                        legal_granular_probs.append(probs[0, action_idx].item())
-            
-            # If no legal actions match our action space, pick randomly
-            if not legal_granular_probs:
-                action_label = random.choice(legal_actions)
-            else:
-                # Choose the legal action with highest probability
-                best_idx = legal_granular_probs.index(max(legal_granular_probs))
-                action_label = legal_granular_actions[best_idx]
+        game_state = response['gameState']
         
-        # Parse the action label to determine type and amount
-        amount = 0
+        # Main game loop
+        max_steps = 1000
+        step = 0
+        terminal_stages = {'complete', 'showdown'}
         
-        if action_label.startswith('bet_'):
-            action_type = 'bet'
-            pot = state.get('pot', 0)
-            min_bet = state.get('min_bet', state.get('big_blind', 20))
-            max_bet = state['player_chips']
+        while step < max_steps:
+            step += 1
             
-            # Get size fraction from label
-            size_fraction = BET_SIZE_MAP.get(action_label, 0.5)
-            target = int(pot * size_fraction)
-            amount = max(min_bet, min(max_bet, target))
+            # Check terminal condition
+            current_stage = game_state.get('stage', '').lower()
+            if current_stage in terminal_stages:
+                break
             
-        elif action_label.startswith('raise_'):
-            action_type = 'raise'
-            pot = state.get('pot', 0)
-            min_raise_total = state.get('min_raise_total', state.get('big_blind', 20))
-            max_raise = state['player_chips']
+            # Get current player
+            current_player_id = game_state.get('currentPlayerId')
+            if not current_player_id or current_player_id == 'none':
+                break
             
-            # Get size fraction from label
-            size_fraction = BET_SIZE_MAP.get(action_label, 1.0)
-            target = int(pot * size_fraction)
-            amount = max(min_raise_total, min(max_raise, target))
+            # Find agent for current player
+            current_agent = None
+            for agent in agents:
+                if agent.player_id == current_player_id:
+                    current_agent = agent
+                    break
             
-        elif action_label == 'all_in':
-            action_type = 'all_in'
-            amount = state['player_chips']
+            if current_agent is None:
+                break
             
-        else:
-            # fold, check, call
-            action_type = action_label
-            amount = 0
+            # Extract state
+            state_dict = self._extract_state(game_state, current_player_id)
+            legal_actions = self._get_legal_actions(game_state)
+            
+            if not legal_actions:
+                break
+            
+            # Agent selects action
+            action_type, amount, action_label = current_agent.select_action(state_dict, legal_actions)
+            
+            if verbose:
+                print(f"  {current_agent.name}: {action_label} ({amount})")
+            
+            # Observe action for all agents (for opponent modeling)
+            stage = state_dict.get('stage', 'Preflop')
+            pot = state_dict.get('pot', 0)
+            for agent in agents:
+                agent.observe_action(current_player_id, action_type, amount, pot, stage)
+            
+            # Apply action
+            history.append({
+                'type': 'playerAction',
+                'playerId': current_player_id,
+                'action': action_type,
+                'amount': amount
+            })
+            
+            # Get new state
+            response = self._call_api(config, history)
+            if not response['success']:
+                return {'success': False, 'error': response.get('error')}
+            
+            game_state = response['gameState']
         
-        return (action_type, amount, action_label)
+        # Calculate rewards (chips won/lost)
+        rewards = {}
+        initial_chips = config['startingChips']
+        
+        for player_data in game_state['players']:
+            player_id = player_data['id']
+            rewards[player_id] = player_data['chips'] - initial_chips
+            
+        return {
+            'success': True,
+            'rewards': rewards,
+            'steps': step
+        }
 
-
-# =============================================================================
-# Evaluation Metrics
-# =============================================================================
-
-class EvaluationMetrics:
-    """Track and compute evaluation metrics"""
-    
-    def __init__(self, num_actions: int = 22):
-        self.num_actions = num_actions
-        self.reset()
-    
-    def reset(self):
-        """Reset all metrics"""
-        self.total = 0
-        self.correct = 0
-        self.total_loss = 0.0
+    def _call_api(self, config: Dict, history: List[Dict]) -> Dict:
+        """Call poker API server"""
+        payload = {
+            'config': config,
+            'history': history
+        }
         
-        # Per-action metrics
-        self.action_counts = defaultdict(int)
-        self.action_correct = defaultdict(int)
-        self.action_predicted = defaultdict(int)
-        
-        # Confusion matrix
-        self.confusion = [[0] * self.num_actions for _ in range(self.num_actions)]
-    
-    def update(self, predictions: torch.Tensor, targets: torch.Tensor, loss: float):
-        """
-        Update metrics with batch results.
-        
-        Args:
-            predictions: Predicted action indices
-            targets: True action indices
-            loss: Loss value for this batch
-        """
-        self.total += targets.size(0)
-        self.total_loss += loss * targets.size(0)
-        
-        for pred, target in zip(predictions, targets):
-            pred_idx = pred.item()
-            target_idx = target.item()
+        try:
+            payload_bytes = json.dumps(payload)
+            payload_str = payload_bytes.decode('utf-8') if isinstance(payload_bytes, bytes) else payload_bytes
             
-            # Overall accuracy
-            if pred_idx == target_idx:
-                self.correct += 1
-                self.action_correct[target_idx] += 1
-            
-            # Per-action counts
-            self.action_counts[target_idx] += 1
-            self.action_predicted[pred_idx] += 1
-            
-            # Confusion matrix
-            self.confusion[target_idx][pred_idx] += 1
-    
-    def get_accuracy(self) -> float:
-        """Get overall accuracy"""
-        if self.total == 0:
-            return 0.0
-        return 100.0 * self.correct / self.total
-    
-    def get_average_loss(self) -> float:
-        """Get average loss"""
-        if self.total == 0:
-            return 0.0
-        return self.total_loss / self.total
-    
-    def get_per_action_accuracy(self) -> dict[int, float]:
-        """Get accuracy for each action"""
-        accuracies = {}
-        for action_idx in range(self.num_actions):
-            if self.action_counts[action_idx] > 0:
-                accuracies[action_idx] = (
-                    100.0 * self.action_correct[action_idx] / self.action_counts[action_idx]
-                )
-            else:
-                accuracies[action_idx] = 0.0
-        return accuracies
-    
-    def print_summary(self, action_names: list[str] = None):
-        """Print evaluation summary"""
-        if action_names is None:
-            action_names = [f"Action {i}" for i in range(self.num_actions)]
-        
-        print("=" * 60)
-        print("Evaluation Summary")
-        print("=" * 60)
-        print()
-        
-        # Overall metrics
-        print(f"Total samples: {self.total}")
-        print(f"Overall accuracy: {self.get_accuracy():.2f}%")
-        print(f"Average loss: {self.get_average_loss():.4f}")
-        print()
-        
-        # Per-action statistics
-        print("Per-Action Performance:")
-        print("-" * 60)
-        print(f"{'Action':<15} {'Count':<10} {'Predicted':<12} {'Accuracy':<10}")
-        print("-" * 60)
-        
-        per_action_acc = self.get_per_action_accuracy()
-        for action_idx in range(self.num_actions):
-            action_name = action_names[action_idx] if action_idx < len(action_names) else f"Action {action_idx}"
-            count = self.action_counts[action_idx]
-            predicted = self.action_predicted[action_idx]
-            accuracy = per_action_acc[action_idx]
-            print(f"{action_name:<15} {count:<10} {predicted:<12} {accuracy:>6.2f}%")
-        print()
-        
-        # Confusion matrix
-        print("Confusion Matrix (rows=true, cols=predicted):")
-        print("-" * 60)
-        
-        # Header
-        print(f"{'True \\ Pred':<15}", end="")
-        for action_idx in range(self.num_actions):
-            action_name = action_names[action_idx][:6] if action_idx < len(action_names) else f"A{action_idx}"
-            print(f"{action_name:<8}", end="")
-        print()
-        
-        # Matrix
-        for true_idx in range(self.num_actions):
-            true_name = action_names[true_idx][:12] if true_idx < len(action_names) else f"Action {true_idx}"
-            print(f"{true_name:<15}", end="")
-            for pred_idx in range(self.num_actions):
-                count = self.confusion[true_idx][pred_idx]
-                print(f"{count:<8}", end="")
-            print()
-        print()
+            response_str = poker_api_binding.process_request(payload_str)
+            return json.loads(response_str)
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
 
-
-# =============================================================================
-# Evaluation
-# =============================================================================
-
-def evaluate_model(
-    model: nn.Module,
-    test_loader: DataLoader,
-    criterion: nn.Module,
-    device: torch.device
-) -> EvaluationMetrics:
-    """
-    Evaluate the model on test data.
+    def _extract_state(self, game_state: Dict, player_id: str) -> Dict[str, Any]:
+        """Extract state for a specific player"""
+        player = None
+        for p in game_state['players']:
+            if p['id'] == player_id:
+                player = p
+                break
+        
+        if player is None:
+            return {}
+        
+        config = game_state.get('config', {})
+        action_constraints = game_state.get('actionConstraints', {})
+        
+        return {
+            'player_id': player_id,
+            'hole_cards': player.get('holeCards', []),
+            'community_cards': game_state.get('communityCards', []),
+            'pot': game_state.get('pot', 0),
+            'current_bet': game_state.get('currentBet', 0),
+            'player_chips': player.get('chips', 0),
+            'player_bet': player.get('bet', 0),
+            'player_total_bet': player.get('totalBet', 0),
+            'stage': game_state.get('stage', 'Preflop'),
+            'num_players': len(game_state['players']),
+            'num_active': sum(1 for p in game_state['players'] if p.get('isInHand', False)),
+            'position': player.get('position', 0),
+            'is_dealer': player.get('isDealer', False),
+            'is_small_blind': player.get('isSmallBlind', False),
+            'is_big_blind': player.get('isBigBlind', False),
+            'big_blind': config.get('bigBlind', 20),
+            'small_blind': config.get('smallBlind', 10),
+            'starting_chips': config.get('startingChips', 1000),
+            'to_call': action_constraints.get('toCall', 0),
+            'min_bet': action_constraints.get('minBet', 20),
+            'min_raise_total': action_constraints.get('minRaiseTotal', 20),
+        }
     
-    Args:
-        model: Neural network
-        test_loader: Test data loader
-        criterion: Loss function
-        device: Device to evaluate on
-    
-    Returns:
-        EvaluationMetrics object with results
-    """
-    model.eval()
-    metrics = EvaluationMetrics(num_actions=22)
-    
-    with torch.no_grad():
-        for batch_idx, (states, actions) in enumerate(test_loader):
-            states = states.to(device)
-            actions = actions.to(device)
-            
-            # Forward pass
-            outputs = model(states)
-            loss = criterion(outputs, actions)
-            
-            # Predictions
-            _, predicted = outputs.max(1)
-            
-            # Update metrics
-            metrics.update(predicted, actions, loss.item())
-            
-            # Progress
-            if batch_idx % 10 == 0:
-                print(f"  Batch {batch_idx}/{len(test_loader)}: "
-                      f"acc={metrics.get_accuracy():.2f}%")
-    
-    return metrics
+    def _get_legal_actions(self, game_state: Dict) -> List[str]:
+        """Get legal actions from game state"""
+        action_constraints = game_state.get('actionConstraints', {})
+        return action_constraints.get('legalActions', [])
 
-
-# =============================================================================
-# Play vs Random Agent
-# =============================================================================
 
 def play_vs_random(
-    model: nn.Module,
-    device: torch.device,
+    model_path: str,
     num_hands: int = 100,
     num_players: int = 2,
-    api_url: str = "http://localhost:8080/simulate",
     small_blind: int = 10,
     big_blind: int = 20,
     starting_chips: int = 1000,
-    verbose: bool = False
-) -> dict:
+    verbose: bool = False,
+    device_name: str = "cpu"
+) -> Dict[str, Any]:
     """
-    Play hands against random agent(s) to evaluate model performance.
-    
-    Args:
-        model: Trained model
-        device: Device for inference
-        num_hands: Number of hands to play
-        num_players: Total number of players (including model agent)
-        api_url: API server URL
-        small_blind: Small blind amount
-        big_blind: Big blind amount
-        starting_chips: Starting chips per hand
-        verbose: Print detailed progress
-    
-    Returns:
-        Dictionary with evaluation metrics
+    Play hands against random agent(s).
     """
-    if not HAS_ROLLOUT_GENERATOR:
-        print("✗ Error: Cannot import RolloutGenerator from generate_rollouts.py")
+    # Setup device
+    if device_name == "cuda" and torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif device_name == "mps" and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
+        
+    print(f"Using device: {device}")
+    
+    evaluator = GameEvaluator()
+    
+    if not evaluator.check_server():
+        print(f"✗ Error: Binding check failed.")
         return {}
     
-    generator = RolloutGenerator(api_url=api_url)
-    
-    # Check server
-    if not generator.check_server():
-        print(f"✗ Error: Cannot connect to API server at {api_url}")
-        print("  Make sure the API server is running:")
-        print("  cd api && ./build/poker_api 8080")
-        return {}
-    
-    print(f"✓ Connected to API server")
+    print(f"✓ Binding check passed")
     print(f"  Playing {num_hands} hands with {num_players} players")
-    print()
     
     # Track statistics
-    model_id = "p0"  # Model agent is always player 0
+    model_id = "p0"
     stats = {
         'hands_played': 0,
         'hands_won': 0,
@@ -416,15 +286,25 @@ def play_vs_random(
         agents = []
         
         # Model agent is player 0
-        model_agent = ModelAgent(model, device, model_id, "ModelAgent")
-        agents.append(model_agent)
+        try:
+            model_agent = ModelAgent(
+                player_id=model_id,
+                name="ModelAgent",
+                model_path=model_path,
+                device=device,
+                deterministic=True  # Use deterministic actions for evaluation
+            )
+            agents.append(model_agent)
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            return {}
         
-        # Other players are random
+        # Random agents
         for i in range(1, num_players):
             random_agent = RandomAgent(f"p{i}", f"RandomAgent{i}")
             agents.append(random_agent)
         
-        # Game configuration
+        # Game config
         config = {
             'smallBlind': small_blind,
             'bigBlind': big_blind,
@@ -434,241 +314,71 @@ def play_vs_random(
             'seed': random.randint(0, 1000000)
         }
         
-        # Generate rollout
-        rollout = generator.generate_rollout(
-            agents=agents,
-            config=config,
-            max_steps=1000,
-            verbose=verbose
-        )
+        # Play hand
+        result = evaluator.play_hand(agents, config, verbose)
         
-        # Calculate model's profit
-        model_profit = rollout['rewards'].get(model_id, 0)
-        stats['total_profit'] += model_profit
-        stats['profits'].append(model_profit)
+        if not result['success']:
+            print(f"Error in hand {hand_num+1}: {result.get('error')}")
+            continue
+            
+        # Update stats
+        profit = result['rewards'].get(model_id, 0)
+        stats['total_profit'] += profit
+        stats['profits'].append(profit)
         stats['hands_played'] += 1
         
-        if model_profit > 0:
+        if profit > 0:
             stats['hands_won'] += 1
-        elif model_profit < 0:
+        elif profit < 0:
             stats['hands_lost'] += 1
         else:
             stats['hands_tied'] += 1
-        
+            
         # Progress
         if (hand_num + 1) % 10 == 0:
             elapsed = time.time() - start_time
             rate = (hand_num + 1) / elapsed
             eta = (num_hands - hand_num - 1) / rate if rate > 0 else 0
-            print(f"  Progress: {hand_num+1}/{num_hands} hands "
-                  f"(win rate: {stats['hands_won']}/{stats['hands_played']}, "
-                  f"avg profit: {stats['total_profit']/stats['hands_played']:.1f}, "
-                  f"ETA: {eta:.0f}s)")
-    
+            win_rate = stats['hands_won'] / stats['hands_played'] * 100
+            avg_profit = stats['total_profit'] / stats['hands_played']
+            print(f"  Hand {hand_num+1}/{num_hands} | Win Rate: {win_rate:.1f}% | Avg Profit: {avg_profit:.1f} | ETA: {eta:.0f}s")
+
     return stats
 
 
-# =============================================================================
-# Main
-# =============================================================================
-
 def main() -> int:
-    """Main evaluation function"""
-    parser = argparse.ArgumentParser(
-        description="Evaluate a trained poker model by playing against random agents"
-    )
-    
-    parser.add_argument('--model', type=str, default=f'/tmp/pokersim/models_v{MODEL_VERSION}/poker_model.pt',
-                       help=f'Path to trained model (default: /tmp/pokersim/models_v{MODEL_VERSION}/poker_model.pt)')
-    parser.add_argument('--num-hands', type=int, default=100,
-                       help='Number of hands to play (default: 100)')
-    parser.add_argument('--num-players', type=int, default=2,
-                       help='Number of players including model (default: 2)')
-    parser.add_argument('--api-url', type=str, default='http://localhost:8080/simulate',
-                       help='API server URL (default: http://localhost:8080/simulate)')
-    parser.add_argument('--small-blind', type=int, default=10,
-                       help='Small blind amount (default: 10)')
-    parser.add_argument('--big-blind', type=int, default=20,
-                       help='Big blind amount (default: 20)')
-    parser.add_argument('--starting-chips', type=int, default=1000,
-                       help='Starting chips per hand (default: 1000)')
-    parser.add_argument('--verbose', action='store_true',
-                       help='Print detailed progress')
+    parser = argparse.ArgumentParser(description="Evaluate Poker AI Model")
+    parser.add_argument('--model', type=str, required=True, help='Path to model checkpoint')
+    parser.add_argument('--num-hands', type=int, default=100, help='Number of hands to play')
+    parser.add_argument('--num-players', type=int, default=2, help='Number of players')
+    parser.add_argument('--verbose', action='store_true', help='Verbose output')
+    parser.add_argument('--device', type=str, default='cpu', choices=['cpu', 'cuda', 'mps'], help='Device to use')
     
     args = parser.parse_args()
     
-    print("=" * 70)
-    print("Poker Model Evaluation - Play vs Random Agent")
-    print("=" * 70)
-    print()
-    
-    # Load model
-    print(f"Loading model from {args.model}...")
-    model_path = Path(args.model) if Path(args.model).is_absolute() else Path(__file__).parent / args.model
-    
+    model_path = Path(args.model)
     if not model_path.exists():
-        print(f"✗ Error: Model file not found: {model_path}")
-        print(f"  Please train a model first:")
-        print(f"  python train.py --data data/quickstart_rollouts.json")
+        print(f"Error: Model file not found: {model_path}")
         return 1
-    
-    checkpoint = torch.load(model_path, map_location='cpu')
-    feature_dim = checkpoint['feature_dim']
-    hidden_dim = checkpoint['hidden_dim']
-    
-    # Get model version (handle legacy checkpoints)
-    if 'model_version' in checkpoint:
-        model_version = checkpoint['model_version']
-    else:
-        # Legacy checkpoint compatibility
-        model_type = checkpoint.get('model_type', 'legacy')
-        model_version = MODEL_VERSION_LEGACY if model_type == 'legacy' else MODEL_VERSION_TRANSFORMER
-    
-    # Version name for display
-    version_names = {
-        MODEL_VERSION_LEGACY: "Legacy (feed-forward)",
-        MODEL_VERSION_TRANSFORMER: "Transformer"
-    }
-    version_name = version_names.get(model_version, f"Unknown (v{model_version})")
-    
-    print(f"✓ Model metadata:")
-    print(f"  - Model version: {model_version} ({version_name})")
-    print(f"  - Feature dim: {feature_dim}")
-    print(f"  - Hidden dim: {hidden_dim}")
-    print(f"  - Trained epoch: {checkpoint['epoch']}")
-    if 'val_loss' in checkpoint:
-        print(f"  - Validation loss: {checkpoint['val_loss']:.4f}")
-    
-    # Print version-specific parameters
-    if model_version == MODEL_VERSION_TRANSFORMER:
-        print(f"  - Transformer layers: {checkpoint.get('num_layers', 4)}")
-        print(f"  - Attention heads: {checkpoint.get('num_heads', 8)}")
-        print(f"  - Dropout: {checkpoint.get('dropout', 0.1)}")
-    print()
-    
-    # Setup device (prioritize CUDA, then MPS, then CPU)
-    if torch.cuda.is_available():
-        device = torch.device('cuda')
-        print(f"✓ Using device: CUDA (GPU)")
-    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-        device = torch.device('mps')
-        print(f"✓ Using device: MPS (Apple Silicon GPU)")
-    else:
-        device = torch.device('cpu')
-        print(f"✓ Using device: CPU")
-    print(f"  Device: {device}")
-    print()
-    
-    # Create and load model based on version
-    print("Loading model weights...")
-    if model_version == MODEL_VERSION_TRANSFORMER:
-        model = PokerTransformer(
-            input_dim=feature_dim, 
-            hidden_dim=hidden_dim,
-            num_heads=checkpoint.get('num_heads', 8),
-            num_layers=checkpoint.get('num_layers', 4),
-            dropout=checkpoint.get('dropout', 0.1)
-        )
-    elif model_version == MODEL_VERSION_LEGACY:
-        model = PokerNet(input_dim=feature_dim, hidden_dim=hidden_dim)
-    else:
-        print(f"✗ Error: Unknown model version {model_version}")
-        return 1
-    
-    model.load_state_dict(checkpoint['model_state_dict'])
-    model = model.to(device)
-    model.eval()
-    
-    print("✓ Model loaded successfully")
-    print()
-    
-    # Play against random agents
-    print("=" * 70)
-    print("Playing against Random Agents")
-    print("=" * 70)
-    print()
-    
+        
     stats = play_vs_random(
-        model=model,
-        device=device,
+        model_path=str(model_path),
         num_hands=args.num_hands,
         num_players=args.num_players,
-        api_url=args.api_url,
-        small_blind=args.small_blind,
-        big_blind=args.big_blind,
-        starting_chips=args.starting_chips,
-        verbose=args.verbose
+        verbose=args.verbose,
+        device_name=args.device
     )
     
-    if not stats:
-        print("✗ Evaluation failed")
+    if stats:
+        print("\nEvaluation Complete!")
+        print(f"Hands Played: {stats['hands_played']}")
+        print(f"Win Rate: {stats['hands_won'] / stats['hands_played'] * 100:.2f}%")
+        print(f"Total Profit: {stats['total_profit']}")
+        print(f"Avg Profit/Hand: {stats['total_profit'] / stats['hands_played']:.2f}")
+        return 0
+    else:
         return 1
-    
-    # Print results
-    print()
-    print("=" * 70)
-    print("Evaluation Results")
-    print("=" * 70)
-    print()
-    
-    hands_played = stats['hands_played']
-    hands_won = stats['hands_won']
-    hands_lost = stats['hands_lost']
-    hands_tied = stats['hands_tied']
-    total_profit = stats['total_profit']
-    avg_profit = total_profit / hands_played if hands_played > 0 else 0
-    
-    print(f"Hands played:     {hands_played}")
-    print(f"Hands won:        {hands_won} ({100*hands_won/hands_played:.1f}%)")
-    print(f"Hands lost:       {hands_lost} ({100*hands_lost/hands_played:.1f}%)")
-    print(f"Hands tied:       {hands_tied} ({100*hands_tied/hands_played:.1f}%)")
-    print()
-    print(f"Total profit:     {total_profit:+.0f} chips")
-    print(f"Average profit:   {avg_profit:+.2f} chips/hand")
-    print()
-    
-    # Calculate expected random baseline
-    # Against (n-1) random opponents, expected profit is 0 (fair game)
-    # But there's variance, so we estimate the random baseline
-    random_baseline = 0.0
-    improvement = avg_profit - random_baseline
-    
-    print("=" * 70)
-    print("Performance vs Random Baseline")
-    print("=" * 70)
-    print()
-    print(f"Random baseline:  {random_baseline:+.2f} chips/hand (expected)")
-    print(f"Model performance: {avg_profit:+.2f} chips/hand")
-    print(f"Improvement:      {improvement:+.2f} chips/hand")
-    print()
-    
-    if avg_profit > 10:
-        print("✓ EXCELLENT: Model is significantly outperforming random play!")
-    elif avg_profit > 5:
-        print("✓ GOOD: Model is outperforming random play")
-    elif avg_profit > 0:
-        print("⚠ FAIR: Model is slightly better than random")
-    elif avg_profit > -5:
-        print("⚠ POOR: Model is performing close to random baseline")
-    else:
-        print("✗ NEEDS IMPROVEMENT: Model is underperforming random play")
-    
-    print()
-    print("Tips for improvement:")
-    if avg_profit < 5:
-        print("- Train for more epochs")
-        print("- Generate more diverse training data")
-        print("- Try larger hidden dimensions")
-        print("- Add more features to state encoding")
-    else:
-        print("- Model is performing well!")
-        print("- Consider training against stronger opponents")
-        print("- Try fine-tuning with more data")
-    print()
-    
-    return 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
-
