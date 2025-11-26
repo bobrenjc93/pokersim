@@ -6,6 +6,7 @@ namespace py = pybind11;
 
 std::string process_request(const std::string& request_str) {
     try {
+        py::gil_scoped_release release;
         auto request_json = nlohmann::json::parse(request_str);
         PokerEngineAPI api;
         auto response_json = api.processRequest(request_json);
