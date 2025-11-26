@@ -90,6 +90,8 @@ pokersim/
     ├── rl_model.py        # Neural network model
     ├── rl_state_encoder.py # State encoding
     └── start_rl_training_optimized.sh # Training script
+└── arena/                 # AI vs AI Evaluation Arena
+    ├── arena.py           # Arena script
 ```
 
 ## Features
@@ -133,6 +135,43 @@ To evaluate a trained model against random agents:
 uv run python eval.py --model /path/to/model.pt --num-hands 100
 ```
 
+### Advanced Evaluation (Arena)
+
+For more comprehensive evaluation, including head-to-head matches and tournaments:
+
+```bash
+cd arena
+uv run python arena.py --help
+```
+
+#### Arena Usage
+
+**1. Evaluate a model vs Random**
+
+```bash
+python arena.py --models-dir /path/to/checkpoints --mode vs-random --hands 100
+```
+
+**2. Evaluate progression (Ladder)**
+
+Plays each checkpoint against the previous one to track improvement.
+
+```bash
+python arena.py --models-dir /path/to/checkpoints --mode ladder
+```
+
+**Output**
+
+Results are saved to `arena_results/` as CSV files and plots.
+
+**Arguments**
+
+- `--models-dir`: Directory containing `.pt` checkpoint files.
+- `--output-dir`: Directory to save results (default: `arena_results`).
+- `--hands`: Number of hands to play per match (default: 1000).
+- `--device`: Device to use (cpu, cuda, mps).
+- `--mode`: `ladder` or `vs-random`.
+
 ### Convergence Notes
 - **Short-term (<500 iters)**: Win rate fluctuates but avoids 0%.
 - **Medium-term (500-2000 iters)**: Win rate stabilizes around 45-55%.
@@ -168,6 +207,7 @@ This runs:
 1. **C++ Unit Tests**: Card, Deck, Hand, Player, Game
 2. **API Snapshot Tests**: Validates complex scenarios (side pots, all-ins) via Python
 3. **RL Training Tests**: Unit tests for PPO and state encoder
+4. **Arena Tests**: Tests for the evaluation arena
 
 ## Performance
 

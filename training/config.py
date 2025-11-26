@@ -16,7 +16,10 @@ Or customize game configs:
 # =============================================================================
 
 # Model version for RL training
-MODEL_VERSION = 15  # Current RL model version
+MODEL_VERSION = 16  # Current RL model version
+
+# Default directory for saving/loading models
+DEFAULT_MODELS_DIR = f"/tmp/pokersim/rl_models_v{MODEL_VERSION}"
 
 # =============================================================================
 # Logging Configuration

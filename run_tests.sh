@@ -60,5 +60,20 @@ else
 fi
 echo ""
 
+echo "📋 Part 4: Arena Tests"
+echo "---------------------"
+cd "$SCRIPT_DIR/arena"
+
+if command -v uv &> /dev/null; then
+    # Run arena tests
+    uv run --with pytest pytest tests/
+elif command -v pytest &> /dev/null; then
+    echo "⚠️  uv not found, trying system pytest..."
+    pytest tests/
+else
+    echo "⚠️  Skipping Arena tests: uv not found and pytest not in PATH"
+fi
+echo ""
+
 echo "✅ All tests completed successfully!"
 

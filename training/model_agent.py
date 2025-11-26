@@ -157,6 +157,54 @@ def create_legal_actions_mask(legal_actions: List[str], device: torch.device) ->
     return mask
 
 
+def extract_state(game_state: Dict, player_id: str) -> Dict[str, Any]:
+    """
+    Extract state for a specific player from the raw API game state.
+    
+    Args:
+        game_state: Raw game state from C++ API
+        player_id: Player ID to extract state for
+        
+    Returns:
+        Dictionary containing extracted state features
+    """
+    player = None
+    for p in game_state['players']:
+        if p['id'] == player_id:
+            player = p
+            break
+    
+    if player is None:
+        return {}
+    
+    config = game_state.get('config', {})
+    action_constraints = game_state.get('actionConstraints', {})
+    
+    return {
+        'player_id': player_id,
+        'hole_cards': player.get('holeCards', []),
+        'community_cards': game_state.get('communityCards', []),
+        'pot': game_state.get('pot', 0),
+        'current_bet': game_state.get('currentBet', 0),
+        'player_chips': player.get('chips', 0),
+        'player_bet': player.get('bet', 0),
+        'player_total_bet': player.get('totalBet', 0),
+        'stage': game_state.get('stage', 'Preflop'),
+        'num_players': len(game_state['players']),
+        'num_active': sum(1 for p in game_state['players'] if p.get('isInHand', False)),
+        'position': player.get('position', 0),
+        'is_dealer': player.get('isDealer', False),
+        'is_small_blind': player.get('isSmallBlind', False),
+        'is_big_blind': player.get('isBigBlind', False),
+        'big_blind': config.get('bigBlind', 20),
+        'small_blind': config.get('smallBlind', 10),
+        'starting_chips': config.get('startingChips', 1000),
+        'to_call': action_constraints.get('toCall', 0),
+        'min_bet': action_constraints.get('minBet', 20),
+        'min_raise_total': action_constraints.get('minRaiseTotal', 20),
+    }
+
+
 class ModelAgent:
     """
     Agent that uses a trained neural network model for action selection.
@@ -172,7 +220,8 @@ class ModelAgent:
         self,
         player_id: str,
         name: str,
-        model_path: str,
+        model_path: str = None,
+        model: PokerActorCritic = None,
         device: torch.device = None,
         temperature: float = 1.0,
         deterministic: bool = False
@@ -181,7 +230,8 @@ class ModelAgent:
         Args:
             player_id: Player ID
             name: Player name
-            model_path: Path to trained model checkpoint
+            model_path: Path to trained model checkpoint (optional if model is provided)
+            model: Pre-loaded model instance (optional)
             device: Device to run model on
             temperature: Sampling temperature (higher = more random)
             deterministic: If True, always pick argmax action
@@ -202,20 +252,64 @@ class ModelAgent:
         else:
             self.device = device
         
-        # Load model
-        self.model, self.encoder = self._load_model(model_path)
-        self.model.eval()  # Set to evaluation mode
+        # Load model or use provided one
+        if model is not None:
+            self.model = model
+            self.model.to(self.device)
+            self.model.eval()
+            # Create new encoder
+            self.encoder = RLStateEncoder()
+        elif model_path is not None:
+            self.model, self.encoder = self._load_model(model_path)
+            self.model.eval()
+        else:
+            raise ValueError("Must provide either model_path or model")
     
     def _load_model(self, model_path: str) -> Tuple[PokerActorCritic, RLStateEncoder]:
         """Load trained model from checkpoint"""
-        checkpoint = torch.load(model_path, map_location=self.device)
+        # weights_only=False is required to load checkpoints with numpy scalars
+        checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
         
         # Get model configuration from checkpoint
         input_dim = checkpoint.get('input_dim', 155)  # Default to RL encoder dim
-        hidden_dim = checkpoint.get('hidden_dim', 256)
-        num_heads = checkpoint.get('num_heads', 8)
-        num_layers = checkpoint.get('num_layers', 4)
         dropout = checkpoint.get('dropout', 0.1)
+
+        # Try to infer model architecture from state_dict if not in checkpoint
+        state_dict = checkpoint.get('model_state_dict', {})
+        
+        if 'hidden_dim' in checkpoint:
+            hidden_dim = checkpoint['hidden_dim']
+            num_heads = checkpoint.get('num_heads', 8)
+            num_layers = checkpoint.get('num_layers', 4)
+        elif 'pos_encoding' in state_dict:
+            # Infer from state dict
+            # pos_encoding shape: [1, 14, hidden_dim]
+            hidden_dim = state_dict['pos_encoding'].shape[2]
+            
+            # Infer num_layers
+            max_layer = 0
+            for key in state_dict.keys():
+                if key.startswith('transformer.layers.'):
+                    try:
+                        layer_idx = int(key.split('.')[2])
+                        max_layer = max(max_layer, layer_idx)
+                    except (IndexError, ValueError):
+                        pass
+            num_layers = max_layer + 1
+            
+            # Default num_heads to 8 (standard for this project)
+            num_heads = 8
+            
+            # Ensure hidden_dim is divisible by num_heads
+            if hidden_dim % num_heads != 0:
+                # Try 4 heads if 8 doesn't work
+                if hidden_dim % 4 == 0:
+                    num_heads = 4
+        else:
+            # Fallback to defaults
+            hidden_dim = checkpoint.get('hidden_dim', 256)
+            num_heads = checkpoint.get('num_heads', 8)
+            num_layers = checkpoint.get('num_layers', 4)
         
         # Create model
         model = PokerActorCritic(
@@ -303,9 +397,11 @@ class ModelAgent:
 def load_model_agent(
     player_id: str,
     name: str,
-    model_path: str,
+    model_path: str = None,
+    model: PokerActorCritic = None,
     temperature: float = 1.0,
-    deterministic: bool = False
+    deterministic: bool = False,
+    device: torch.device = None
 ) -> ModelAgent:
     """
     Factory function to create a ModelAgent.
@@ -314,8 +410,10 @@ def load_model_agent(
         player_id: Player ID
         name: Player name  
         model_path: Path to trained model
+        model: Pre-loaded model
         temperature: Sampling temperature
         deterministic: Use deterministic action selection
+        device: Device
     
     Returns:
         ModelAgent instance
@@ -324,8 +422,10 @@ def load_model_agent(
         player_id=player_id,
         name=name,
         model_path=model_path,
+        model=model,
         temperature=temperature,
-        deterministic=deterministic
+        deterministic=deterministic,
+        device=device
     )
 
 

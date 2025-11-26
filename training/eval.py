@@ -32,7 +32,7 @@ except ImportError:
 import torch
 
 # Import agent classes
-from model_agent import ModelAgent, RandomAgent
+from model_agent import ModelAgent, RandomAgent, extract_state
 
 # Import poker_api_binding
 try:
@@ -129,7 +129,7 @@ class GameEvaluator:
                 break
             
             # Extract state
-            state_dict = self._extract_state(game_state, current_player_id)
+            state_dict = extract_state(game_state, current_player_id)
             legal_actions = self._get_legal_actions(game_state)
             
             if not legal_actions:
@@ -191,44 +191,6 @@ class GameEvaluator:
             return json.loads(response_str)
         except Exception as e:
             return {'success': False, 'error': str(e)}
-
-    def _extract_state(self, game_state: Dict, player_id: str) -> Dict[str, Any]:
-        """Extract state for a specific player"""
-        player = None
-        for p in game_state['players']:
-            if p['id'] == player_id:
-                player = p
-                break
-        
-        if player is None:
-            return {}
-        
-        config = game_state.get('config', {})
-        action_constraints = game_state.get('actionConstraints', {})
-        
-        return {
-            'player_id': player_id,
-            'hole_cards': player.get('holeCards', []),
-            'community_cards': game_state.get('communityCards', []),
-            'pot': game_state.get('pot', 0),
-            'current_bet': game_state.get('currentBet', 0),
-            'player_chips': player.get('chips', 0),
-            'player_bet': player.get('bet', 0),
-            'player_total_bet': player.get('totalBet', 0),
-            'stage': game_state.get('stage', 'Preflop'),
-            'num_players': len(game_state['players']),
-            'num_active': sum(1 for p in game_state['players'] if p.get('isInHand', False)),
-            'position': player.get('position', 0),
-            'is_dealer': player.get('isDealer', False),
-            'is_small_blind': player.get('isSmallBlind', False),
-            'is_big_blind': player.get('isBigBlind', False),
-            'big_blind': config.get('bigBlind', 20),
-            'small_blind': config.get('smallBlind', 10),
-            'starting_chips': config.get('startingChips', 1000),
-            'to_call': action_constraints.get('toCall', 0),
-            'min_bet': action_constraints.get('minBet', 20),
-            'min_raise_total': action_constraints.get('minRaiseTotal', 20),
-        }
     
     def _get_legal_actions(self, game_state: Dict) -> List[str]:
         """Get legal actions from game state"""
@@ -279,30 +241,33 @@ def play_vs_random(
         'profits': []
     }
     
+    # Create agents (load model once)
+    agents_pool = []
+    
+    # Model agent is player 0
+    try:
+        model_agent = ModelAgent(
+            player_id=model_id,
+            name="ModelAgent",
+            model_path=model_path,
+            device=device,
+            deterministic=True  # Use deterministic actions for evaluation
+        )
+        agents_pool.append(model_agent)
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        return {}
+    
+    # Random agents
+    for i in range(1, num_players):
+        random_agent = RandomAgent(f"p{i}", f"RandomAgent{i}")
+        agents_pool.append(random_agent)
+    
     start_time = time.time()
     
     for hand_num in range(num_hands):
-        # Create agents
-        agents = []
-        
-        # Model agent is player 0
-        try:
-            model_agent = ModelAgent(
-                player_id=model_id,
-                name="ModelAgent",
-                model_path=model_path,
-                device=device,
-                deterministic=True  # Use deterministic actions for evaluation
-            )
-            agents.append(model_agent)
-        except Exception as e:
-            print(f"Error loading model: {e}")
-            return {}
-        
-        # Random agents
-        for i in range(1, num_players):
-            random_agent = RandomAgent(f"p{i}", f"RandomAgent{i}")
-            agents.append(random_agent)
+        # Use the agents pool
+        agents = agents_pool
         
         # Game config
         config = {
