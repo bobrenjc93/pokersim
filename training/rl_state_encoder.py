@@ -37,95 +37,275 @@ def encode_card(card: str) -> Tuple[int, int]:
     return (rank, suit)
 
 
+def estimate_preflop_strength(hole_cards: List[str]) -> float:
+    """
+    Estimate preflop hand strength using poker fundamentals.
+    
+    Based on Sklansky-Chubukov rankings and equity simulations.
+    Returns value between 0.0 (worst) and 1.0 (best).
+    """
+    if not hole_cards or len(hole_cards) < 2:
+        return 0.3
+    
+    # Extract ranks
+    ranks = sorted([RANK_MAP.get(card[0], 0) for card in hole_cards], reverse=True)
+    suits = [SUIT_MAP.get(card[1], 0) for card in hole_cards]
+    
+    high_rank = ranks[0]  # Higher card (0-12 where 12=Ace)
+    low_rank = ranks[1]   # Lower card
+    is_suited = suits[0] == suits[1]
+    is_pair = high_rank == low_rank
+    gap = high_rank - low_rank
+    
+    # Base strength from high cards (normalized 0-0.35)
+    base_strength = (high_rank + low_rank) / 48.0  # Max 24/48 = 0.5
+    
+    # Pair bonus (pairs are strong)
+    if is_pair:
+        # AA=1.0, KK=0.95, ..., 22=0.55
+        pair_strength = 0.55 + (high_rank / 12.0) * 0.45
+        return pair_strength
+    
+    # Premium unpaired hands
+    # Ace-high
+    if high_rank == 12:  # Ace
+        if low_rank >= 10:  # AT+
+            return 0.70 + (low_rank - 10) * 0.05 + (0.03 if is_suited else 0)  # AK=0.83, AQ=0.78, AJ=0.73, AT=0.70
+        elif low_rank >= 7:  # A7-A9
+            return 0.50 + (low_rank - 7) * 0.03 + (0.05 if is_suited else 0)
+        else:  # A2-A6
+            return 0.35 + (low_rank * 0.02) + (0.07 if is_suited else 0)
+    
+    # King-high
+    if high_rank == 11:  # King
+        if low_rank >= 10:  # KQ, KJ, KT
+            return 0.55 + (low_rank - 10) * 0.05 + (0.04 if is_suited else 0)
+        elif low_rank >= 7:
+            return 0.40 + (low_rank - 7) * 0.03 + (0.05 if is_suited else 0)
+        else:
+            return 0.25 + (0.06 if is_suited else 0)
+    
+    # Queen-high
+    if high_rank == 10:  # Queen
+        if low_rank >= 9:  # QJ, QT
+            return 0.48 + (low_rank - 9) * 0.04 + (0.04 if is_suited else 0)
+        else:
+            return 0.25 + (0.05 if is_suited else 0)
+    
+    # Connected cards (potential straights)
+    connectivity_bonus = 0.0
+    if gap == 1:  # Connectors
+        connectivity_bonus = 0.08
+    elif gap == 2:  # One-gappers
+        connectivity_bonus = 0.04
+    elif gap == 3:  # Two-gappers
+        connectivity_bonus = 0.02
+    
+    # Suited bonus
+    suited_bonus = 0.07 if is_suited else 0.0
+    
+    # Final calculation for other hands
+    strength = base_strength + connectivity_bonus + suited_bonus
+    
+    # Clamp to reasonable range for non-premium hands
+    return max(0.15, min(0.55, strength))
+
+
 def estimate_hand_strength(hole_cards: List[str], community_cards: List[str]) -> float:
     """
-    Estimate hand strength using an improved heuristic.
+    Estimate hand strength using improved heuristic.
     
+    Combines preflop strength with made hand strength postflop.
     Returns value between 0 and 1 representing relative hand strength.
     """
     if not hole_cards or len(hole_cards) < 2:
-        return 0.5
+        return 0.3
+    
+    # Preflop: use preflop-specific evaluation
+    if not community_cards:
+        return estimate_preflop_strength(hole_cards)
+    
+    # Postflop: evaluate made hand + draws
+    from collections import Counter
     
     # Extract ranks and suits
-    ranks = [RANK_MAP.get(card[0], 0) for card in hole_cards]
-    suits = [SUIT_MAP.get(card[1], 0) for card in hole_cards]
+    hole_ranks = [RANK_MAP.get(card[0], 0) for card in hole_cards]
+    hole_suits = [SUIT_MAP.get(card[1], 0) for card in hole_cards]
     
     comm_ranks = [RANK_MAP.get(card[0], 0) for card in community_cards]
     comm_suits = [SUIT_MAP.get(card[1], 0) for card in community_cards]
     
-    all_ranks = ranks + comm_ranks
-    all_suits = suits + comm_suits
+    all_ranks = hole_ranks + comm_ranks
+    all_suits = hole_suits + comm_suits
     
-    score = 0.0
-    
-    # 1. High Card Strength (normalized)
-    # Based on hole cards only relative to board
-    max_hole = max(ranks)
-    score += max_hole / 25.0  # Base contribution (0.0 - 0.48)
-    
-    # 2. Pair / Sets / Quads Detection
-    from collections import Counter
+    # Count ranks across all cards
     rank_counts = Counter(all_ranks)
+    board_rank_counts = Counter(comm_ranks)
+    
+    # Count suits
+    suit_counts = Counter(all_suits)
+    board_suit_counts = Counter(comm_suits)
+    
+    # Determine made hand strength
+    made_hand_rank = 0  # 0=high card, 1=pair, 2=two pair, 3=trips, 4=straight, 5=flush, 6=full house, 7=quads, 8=straight flush
+    
+    # Check for flush
+    max_suit = max(suit_counts.values()) if suit_counts else 0
+    has_flush = max_suit >= 5
+    
+    # Check if our hole cards contribute to the flush
+    flush_suit = None
+    if has_flush:
+        for suit, count in suit_counts.items():
+            if count >= 5:
+                flush_suit = suit
+                break
+        hole_contributes_to_flush = flush_suit is not None and any(s == flush_suit for s in hole_suits)
+    else:
+        hole_contributes_to_flush = False
+    
+    # Check for straight
+    unique_ranks = sorted(set(all_ranks))
+    # Add ace-low straight possibility
+    if 12 in unique_ranks:  # Ace
+        unique_ranks_with_ace_low = [-1] + unique_ranks
+    else:
+        unique_ranks_with_ace_low = unique_ranks
+    
+    has_straight = False
+    straight_high = 0
+    for i in range(len(unique_ranks) - 4):
+        if unique_ranks[i+4] - unique_ranks[i] == 4:
+            has_straight = True
+            straight_high = unique_ranks[i+4]
+            break
+    # Check wheel (A-2-3-4-5)
+    if not has_straight and set([0,1,2,3,12]).issubset(set(all_ranks)):
+        has_straight = True
+        straight_high = 3  # 5-high
+    
+    # Check if hole cards contribute to straight
+    hole_contributes_to_straight = False
+    if has_straight:
+        # Simplified check: at least one hole card is in the straight range
+        hole_contributes_to_straight = any(
+            r in range(max(0, straight_high-4), straight_high+1) or (r == 12 and straight_high <= 4)
+            for r in hole_ranks
+        )
+    
+    # Count pairs, trips, quads involving hole cards
     max_count = max(rank_counts.values()) if rank_counts else 1
     
-    # Check if we improved the board
-    board_counts = Counter(comm_ranks)
-    max_board_count = max(board_counts.values()) if board_counts else 1
+    # Check if hole cards make the pair/trips/quads (not just the board)
+    hole_contributes_pairs = False
+    pair_rank = 0
+    for rank in hole_ranks:
+        if rank_counts[rank] >= 2:
+            hole_contributes_pairs = True
+            if rank_counts[rank] >= pair_rank:
+                pair_rank = rank_counts[rank]
     
-    if max_count == 2:
-        # One pair
-        if max_board_count < 2:
-             # We have a pair that board doesn't
-             score += 0.3
+    # Two pair check
+    pairs = [r for r, c in rank_counts.items() if c >= 2]
+    has_two_pair = len(pairs) >= 2
+    hole_contributes_two_pair = has_two_pair and any(r in pairs for r in hole_ranks)
+    
+    # Full house check
+    trips = [r for r, c in rank_counts.items() if c >= 3]
+    has_full_house = len(trips) >= 1 and (len(pairs) >= 2 or len(trips) >= 2)
+    
+    # Straight flush check
+    has_straight_flush = has_flush and has_straight
+    if has_straight_flush:
+        # Verify same suit for straight
+        for suit in range(4):
+            suited_ranks = sorted([all_ranks[i] for i in range(len(all_ranks)) if all_suits[i] == suit])
+            if len(suited_ranks) >= 5:
+                for i in range(len(suited_ranks) - 4):
+                    if suited_ranks[i+4] - suited_ranks[i] == 4:
+                        made_hand_rank = 8
+                        break
+    
+    # Assign made hand rank
+    if made_hand_rank < 8:  # Not straight flush
+        if max_count == 4 and hole_contributes_pairs:
+            made_hand_rank = 7  # Quads
+        elif has_full_house and (any(r in trips for r in hole_ranks) or hole_contributes_two_pair):
+            made_hand_rank = 6  # Full house
+        elif has_flush and hole_contributes_to_flush:
+            made_hand_rank = 5  # Flush
+        elif has_straight and hole_contributes_to_straight:
+            made_hand_rank = 4  # Straight
+        elif max_count == 3 and hole_contributes_pairs:
+            made_hand_rank = 3  # Trips
+        elif hole_contributes_two_pair:
+            made_hand_rank = 2  # Two pair
+        elif hole_contributes_pairs:
+            made_hand_rank = 1  # Pair
         else:
-             # Board paired, check if we have better kicker/pair
-             score += 0.1
-    elif max_count == 3:
-        # Trips/Set
-        score += 0.5
-    elif max_count == 4:
-        # Quads
-        score += 0.9
+            made_hand_rank = 0  # High card
     
-    # Full House Check (3 of one, 2 of another)
-    if max_count >= 3:
-        counts = list(rank_counts.values())
-        if counts.count(2) >= 1 or counts.count(3) >= 2:
-             score = max(score, 0.7)
-             
-    # 3. Flush Detection
-    suit_counts = Counter(all_suits)
-    max_suit = max(suit_counts.values()) if suit_counts else 0
+    # Convert made hand rank to strength score
+    # Base strength from made hand (0.0 to 0.85)
+    made_hand_strengths = {
+        0: 0.15,  # High card
+        1: 0.35,  # Pair
+        2: 0.50,  # Two pair
+        3: 0.60,  # Trips
+        4: 0.70,  # Straight
+        5: 0.75,  # Flush
+        6: 0.85,  # Full house
+        7: 0.95,  # Quads
+        8: 1.00,  # Straight flush
+    }
+    base_strength = made_hand_strengths[made_hand_rank]
     
-    if max_suit >= 5:
-        score = max(score, 0.8)  # Made flush
-    elif max_suit == 4:
-        score += 0.15  # Flush draw
+    # Adjust based on kicker/pair strength
+    kicker_bonus = 0.0
+    if made_hand_rank <= 2:  # High card, pair, two pair
+        high_hole = max(hole_ranks)
+        kicker_bonus = (high_hole / 12.0) * 0.10
     
-    # 4. Straight Detection
-    unique_ranks = sorted(set(all_ranks))
-    max_consecutive = 1
-    current_consecutive = 1
-    # Handle Ace low (0, 1, 2, 3, 12 -> 12 should count as -1)
-    if 12 in unique_ranks: # Ace
-        unique_ranks_ace_low = [-1] + unique_ranks
+    # Draw potential (when not already made strong hand)
+    draw_bonus = 0.0
+    if made_hand_rank < 4:  # Less than straight
+        # Flush draw
+        for suit in range(4):
+            my_suited = sum(1 for s in all_suits if s == suit)
+            hole_in_suit = sum(1 for s in hole_suits if s == suit)
+            if my_suited == 4 and hole_in_suit >= 1:
+                draw_bonus += 0.08
+        
+        # Straight draw (open-ended or gutshot)
+        for i in range(len(unique_ranks) - 3):
+            if unique_ranks[i+3] - unique_ranks[i] <= 4:
+                if any(r in range(unique_ranks[i], unique_ranks[i+3]+1) for r in hole_ranks):
+                    draw_bonus += 0.05
+                    break
+    
+    final_strength = min(1.0, base_strength + kicker_bonus + draw_bonus)
+    
+    return final_strength
+
+
+def get_hand_category(hole_cards: List[str], community_cards: List[str]) -> str:
+    """
+    Get a categorical description of hand strength for logging/debugging.
+    
+    Returns one of: 'premium', 'strong', 'medium', 'weak', 'trash'
+    """
+    strength = estimate_hand_strength(hole_cards, community_cards)
+    
+    if strength >= 0.70:
+        return 'premium'
+    elif strength >= 0.50:
+        return 'strong'
+    elif strength >= 0.35:
+        return 'medium'
+    elif strength >= 0.25:
+        return 'weak'
     else:
-        unique_ranks_ace_low = unique_ranks
-        
-    for i in range(1, len(unique_ranks)):
-        if unique_ranks[i] == unique_ranks[i-1] + 1:
-            current_consecutive += 1
-            max_consecutive = max(max_consecutive, current_consecutive)
-        else:
-            current_consecutive = 1
-            
-    if max_consecutive >= 5:
-        score = max(score, 0.75) # Made straight
-    elif max_consecutive == 4:
-        score += 0.1 # Straight draw
-        
-    # Normalize
-    return min(1.0, max(0.0, score))
+        return 'trash'
 
 
 class ActionHistory:

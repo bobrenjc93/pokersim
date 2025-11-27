@@ -116,17 +116,46 @@ class PokerActorCritic(nn.Module):
         
         # Action space prior adjustment to balance probability mass
         # fold(1), check(1), call(1), bet(9), raise(9), all_in(1)
-        # To get uniform "action type" probabilities, we need to adjust for slot counts
-        # Single-slot actions need +log(9) ≈ 2.2 boost relative to multi-slot actions
-        # This is a learnable parameter initialized to the theoretical balance
+        # Single-slot actions need boost relative to multi-slot actions
         action_prior = torch.zeros(num_actions)
-        # Boost single-slot actions (fold=0, check=1, call=2, all_in=21)
-        single_slot_indices = [0, 1, 2, 21]
+        
         log_9 = 2.197  # log(9) 
-        for idx in single_slot_indices:
-            if idx < num_actions:
-                action_prior[idx] = log_9
+        
+        # Boost check and call, but REDUCE fold boost to prevent over-folding
+        # Fold should be less attractive than check/call to encourage playing
+        fold_idx = 0
+        check_idx = 1
+        call_idx = 2
+        
+        if fold_idx < num_actions:
+            action_prior[fold_idx] = log_9 * 0.5  # Reduced fold prior (was log_9)
+        if check_idx < num_actions:
+            action_prior[check_idx] = log_9 * 1.2  # Boost check to prefer over fold
+        if call_idx < num_actions:
+            action_prior[call_idx] = log_9 * 1.1  # Boost call slightly
+        
+        # VERY STRONG NEGATIVE prior for all_in to discourage overuse
+        # A value of -3.5 makes all-in roughly 33x less likely than without the prior
+        all_in_idx = 21
+        if all_in_idx < num_actions:
+            action_prior[all_in_idx] = -3.5  # Very strong penalty
+        
         self.register_buffer('action_prior', action_prior)
+        
+        # Hand-strength-aware action gating
+        # This network learns to penalize aggressive actions when hand strength is low
+        # It outputs a scaling factor for each action based on hand strength
+        self.hand_strength_gate = nn.Sequential(
+            nn.Linear(hidden_dim + 1, hidden_dim // 4),  # +1 for hand strength
+            nn.GELU(),
+            nn.Linear(hidden_dim // 4, num_actions),
+        )
+        
+        # All-in penalty weights based on hand strength
+        # This creates a direct penalty term for all-in when hand strength is low
+        # The model learns these weights, but they're initialized to penalize weak-hand all-ins
+        # Threshold lowered from 0.50 to 0.35 - only truly trash hands get penalized
+        self.hand_strength_threshold = 0.35  # Below this, all-in is strongly discouraged
         
         # Value head (critic) - outputs expected value
         self.value_head = nn.Sequential(
@@ -137,6 +166,17 @@ class PokerActorCritic(nn.Module):
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim // 4, 1)
+        )
+        
+        # Hand strength prediction head (auxiliary task)
+        # This forces the model to explicitly learn hand evaluation
+        # which helps with action selection (don't all-in with weak hands)
+        self.hand_strength_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 2, 1),
+            nn.Sigmoid()  # Output in [0, 1] range
         )
         
         # Initialize weights
@@ -158,23 +198,15 @@ class PokerActorCritic(nn.Module):
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
     
-    def forward(
-        self, 
-        x: torch.Tensor, 
-        legal_actions_mask: Optional[torch.Tensor] = None
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _encode_tokens(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass through actor-critic network.
+        Encode input features into transformer tokens and return pooled representation.
         
         Args:
             x: Input tensor of shape (batch_size, input_dim)
-            legal_actions_mask: Boolean mask of shape (batch_size, num_actions)
-                                True for legal actions, False for illegal
         
         Returns:
-            Tuple of:
-            - action_logits: Raw logits of shape (batch_size, num_actions)
-            - value: State value of shape (batch_size, 1)
+            pooled: Pooled representation of shape (batch_size, hidden_dim)
         """
         batch_size = x.size(0)
         
@@ -253,22 +285,123 @@ class PokerActorCritic(nn.Module):
         # Aggregate tokens using CLS token
         pooled = transformed[:, 0, :]  # (batch_size, hidden_dim)
         
+        return pooled
+    
+    def forward(
+        self, 
+        x: torch.Tensor, 
+        legal_actions_mask: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Forward pass through actor-critic network.
+        
+        Args:
+            x: Input tensor of shape (batch_size, input_dim)
+            legal_actions_mask: Boolean mask of shape (batch_size, num_actions)
+                                True for legal actions, False for illegal
+        
+        Returns:
+            Tuple of:
+            - action_logits: Raw logits of shape (batch_size, num_actions)
+            - value: State value of shape (batch_size, 1)
+        """
+        # Get pooled representation
+        pooled = self._encode_tokens(x)
+        
+        # Extract hand strength from input (last feature in the state encoding)
+        # Hand strength is at index 166 (0-indexed) = position 167 total
+        hand_strength = x[:, -1:].detach()  # (batch_size, 1)
+        
         # Policy head - compute action logits
         action_logits = self.policy_head(pooled)  # (batch_size, num_actions)
         
         # Apply action prior to balance probability mass across action types
-        # This compensates for bet/raise having 9 slots vs fold/check/call having 1 slot
         action_logits = action_logits + self.action_prior
+        
+        # Apply hand-strength-aware action gating
+        # This penalizes aggressive actions (especially all-in) when hand strength is low
+        gate_input = torch.cat([pooled, hand_strength], dim=-1)
+        action_gate = self.hand_strength_gate(gate_input)  # (batch_size, num_actions)
+        
+        # The gate outputs adjustments that are larger (more negative) for all-in with weak hands
+        # We scale the gate based on inverse hand strength for aggressive actions
+        # When hand_strength < threshold, all-in gets extra penalty
+        weak_hand_mask = (hand_strength < self.hand_strength_threshold).float()  # (batch_size, 1)
+        
+        # Create penalty tensor - mostly zeros, but penalize all-in when hand is weak
+        # Penalty reduced from -5.0 to -3.0 to allow some bluffing/semi-bluffs
+        all_in_penalty = torch.zeros_like(action_logits)
+        all_in_penalty[:, 21] = -3.0 * weak_hand_mask.squeeze()  # All-in index is 21
+        
+        # Also penalize large raises (indices 17-20: raise_100%, raise_150%, raise_200%, raise_300%)
+        # Penalty reduced from -2.0 to -1.0
+        for raise_idx in [17, 18, 19, 20]:
+            if raise_idx < action_logits.size(1):
+                all_in_penalty[:, raise_idx] = -1.0 * weak_hand_mask.squeeze()
+        
+        # Apply gate (learned adjustment) + fixed penalty
+        action_logits = action_logits + action_gate + all_in_penalty
         
         # Apply legal action mask if provided
         if legal_actions_mask is not None:
-            # Set illegal action logits to large negative value
             action_logits = action_logits.masked_fill(~legal_actions_mask, -1e9)
         
         # Value head - compute state value
         value = self.value_head(pooled)  # (batch_size, 1)
         
         return action_logits, value
+    
+    def forward_with_hand_strength(
+        self, 
+        x: torch.Tensor, 
+        legal_actions_mask: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Forward pass including hand strength prediction (for training with auxiliary loss).
+        
+        Args:
+            x: Input tensor of shape (batch_size, input_dim)
+            legal_actions_mask: Boolean mask of shape (batch_size, num_actions)
+        
+        Returns:
+            Tuple of:
+            - action_logits: Raw logits of shape (batch_size, num_actions)
+            - value: State value of shape (batch_size, 1)
+            - hand_strength_pred: Predicted hand strength of shape (batch_size, 1)
+        """
+        # Get pooled representation
+        pooled = self._encode_tokens(x)
+        
+        # Extract hand strength from input
+        hand_strength = x[:, -1:].detach()
+        
+        # Policy head
+        action_logits = self.policy_head(pooled)
+        action_logits = action_logits + self.action_prior
+        
+        # Apply hand-strength-aware action gating
+        gate_input = torch.cat([pooled, hand_strength], dim=-1)
+        action_gate = self.hand_strength_gate(gate_input)
+        
+        weak_hand_mask = (hand_strength < self.hand_strength_threshold).float()
+        all_in_penalty = torch.zeros_like(action_logits)
+        all_in_penalty[:, 21] = -3.0 * weak_hand_mask.squeeze()
+        for raise_idx in [17, 18, 19, 20]:
+            if raise_idx < action_logits.size(1):
+                all_in_penalty[:, raise_idx] = -1.0 * weak_hand_mask.squeeze()
+        
+        action_logits = action_logits + action_gate + all_in_penalty
+        
+        if legal_actions_mask is not None:
+            action_logits = action_logits.masked_fill(~legal_actions_mask, -1e9)
+        
+        # Value head
+        value = self.value_head(pooled)
+        
+        # Hand strength prediction head
+        hand_strength_pred = self.hand_strength_head(pooled)
+        
+        return action_logits, value, hand_strength_pred
     
     def get_action_probs(
         self, 
@@ -303,8 +436,9 @@ class PokerActorCritic(nn.Module):
         self,
         states: torch.Tensor,
         actions: torch.Tensor,
-        legal_actions_mask: Optional[torch.Tensor] = None
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        legal_actions_mask: Optional[torch.Tensor] = None,
+        return_hand_strength: bool = False
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, ...]:
         """
         Evaluate actions for PPO training.
         
@@ -312,14 +446,21 @@ class PokerActorCritic(nn.Module):
             states: State tensor of shape (batch_size, input_dim)
             actions: Action indices of shape (batch_size,)
             legal_actions_mask: Boolean mask for legal actions
+            return_hand_strength: If True, also return hand strength prediction
         
         Returns:
             Tuple of:
             - log_probs: Log probabilities of taken actions (batch_size,)
-            - values: State values (batch_size, 1)
+            - values: State values (batch_size,)
             - entropy: Policy entropy (batch_size,)
+            - (optional) hand_strength_pred: Predicted hand strength (batch_size,)
         """
-        action_logits, values = self.forward(states, legal_actions_mask)
+        if return_hand_strength:
+            action_logits, values, hand_strength_pred = self.forward_with_hand_strength(
+                states, legal_actions_mask
+            )
+        else:
+            action_logits, values = self.forward(states, legal_actions_mask)
         
         # Compute action probabilities
         action_probs = F.softmax(action_logits, dim=-1)
@@ -331,6 +472,8 @@ class PokerActorCritic(nn.Module):
         # Entropy for exploration bonus
         entropy = -(action_probs * log_probs).sum(dim=-1)
         
+        if return_hand_strength:
+            return action_log_probs, values.squeeze(1), entropy, hand_strength_pred.squeeze(1)
         return action_log_probs, values.squeeze(1), entropy
 
 

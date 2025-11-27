@@ -27,6 +27,7 @@ class PPOTrainer:
     - Improving the policy (learn better actions)
     - Staying close to old policy (stability)
     - Estimating state values accurately
+    - Predicting hand strength (auxiliary task to improve hand evaluation)
     """
     
     def __init__(
@@ -38,6 +39,7 @@ class PPOTrainer:
         clip_epsilon: float = 0.2,  # PPO clip parameter
         value_loss_coef: float = 0.5,  # Weight for value loss
         entropy_coef: float = 0.01,  # Weight for entropy bonus
+        hand_strength_loss_coef: float = 0.1,  # Weight for hand strength prediction loss (auxiliary task)
         max_grad_norm: float = 1.0,  # Gradient clipping (relaxed from 0.5)
         ppo_epochs: int = 4,  # Number of PPO epochs per update
         mini_batch_size: int = 64,  # Mini-batch size for PPO
@@ -69,6 +71,7 @@ class PPOTrainer:
         self.clip_epsilon = clip_epsilon
         self.value_loss_coef = value_loss_coef
         self.entropy_coef = entropy_coef
+        self.hand_strength_loss_coef = hand_strength_loss_coef
         self.max_grad_norm = max_grad_norm
         self.ppo_epochs = ppo_epochs
         self.mini_batch_size = mini_batch_size
@@ -102,7 +105,8 @@ class PPOTrainer:
             'learning_rate': [],
             'grad_norm': [],
             'value_mean': [],
-            'return_mean': []
+            'return_mean': [],
+            'hand_strength_loss': []  # Auxiliary hand strength prediction loss
         }
     
     def compute_gae(
@@ -162,10 +166,11 @@ class PPOTrainer:
         advantages: torch.Tensor,
         returns: torch.Tensor,
         legal_actions_masks: Optional[torch.Tensor] = None,
+        hand_strengths: Optional[torch.Tensor] = None,
         verbose: bool = False
     ) -> Dict[str, float]:
         """
-        Update policy using PPO algorithm.
+        Update policy using PPO algorithm with auxiliary hand strength prediction.
         
         Args:
             states: State tensor of shape (num_samples, state_dim)
@@ -175,6 +180,7 @@ class PPOTrainer:
             advantages: Advantage estimates of shape (num_samples,)
             returns: Target returns of shape (num_samples,)
             legal_actions_masks: Legal action masks of shape (num_samples, num_actions)
+            hand_strengths: Target hand strengths of shape (num_samples,) for auxiliary loss
             verbose: Whether to print detailed progress
         
         Returns:
@@ -185,6 +191,9 @@ class PPOTrainer:
         
         num_samples = states.size(0)
         
+        # Check if we have hand strength targets for auxiliary loss
+        use_hand_strength_loss = hand_strengths is not None and self.hand_strength_loss_coef > 0
+        
         # Track statistics
         epoch_stats = {
             'policy_loss': [],
@@ -192,7 +201,8 @@ class PPOTrainer:
             'entropy': [],
             'total_loss': [],
             'kl_divergence': [],
-            'clip_fraction': []
+            'clip_fraction': [],
+            'hand_strength_loss': []
         }
         
         # PPO epochs with gradient accumulation
@@ -224,10 +234,19 @@ class PPOTrainer:
                 if legal_actions_masks is not None:
                     mb_legal_masks = legal_actions_masks[mb_indices].to(self.device)
                 
-                # Evaluate actions with current policy
-                new_log_probs, values, entropy = self.model.evaluate_actions(
-                    mb_states, mb_actions, mb_legal_masks
-                )
+                mb_hand_strengths = None
+                if use_hand_strength_loss:
+                    mb_hand_strengths = hand_strengths[mb_indices].to(self.device)
+                
+                # Evaluate actions with current policy (optionally with hand strength prediction)
+                if use_hand_strength_loss:
+                    new_log_probs, values, entropy, hand_strength_pred = self.model.evaluate_actions(
+                        mb_states, mb_actions, mb_legal_masks, return_hand_strength=True
+                    )
+                else:
+                    new_log_probs, values, entropy = self.model.evaluate_actions(
+                        mb_states, mb_actions, mb_legal_masks, return_hand_strength=False
+                    )
                 
                 # PPO clipped surrogate loss
                 ratio = torch.exp(new_log_probs - mb_old_log_probs)
@@ -256,11 +275,18 @@ class PPOTrainer:
                 # Entropy bonus (encourages exploration)
                 entropy_loss = -entropy.mean()
                 
+                # Hand strength prediction loss (auxiliary task)
+                # This forces the model to learn hand evaluation explicitly
+                hand_strength_loss = torch.tensor(0.0, device=self.device)
+                if use_hand_strength_loss and mb_hand_strengths is not None:
+                    hand_strength_loss = F.mse_loss(hand_strength_pred, mb_hand_strengths)
+                
                 # Total loss - scale by accumulation steps for proper gradient averaging
                 loss = (
                     policy_loss +
                     self.value_loss_coef * value_loss +
-                    self.entropy_coef * entropy_loss
+                    self.entropy_coef * entropy_loss +
+                    self.hand_strength_loss_coef * hand_strength_loss
                 ) / self.gradient_accumulation_steps
                 
                 # Backward pass (accumulate gradients)
@@ -299,6 +325,7 @@ class PPOTrainer:
                     epoch_stats['total_loss'].append(unscaled_loss)
                     epoch_stats['kl_divergence'].append(kl_div.item())
                     epoch_stats['clip_fraction'].append(clip_fraction.item())
+                    epoch_stats['hand_strength_loss'].append(hand_strength_loss.item() if hasattr(hand_strength_loss, 'item') else hand_strength_loss)
                     if 'grad_norm' not in epoch_stats: epoch_stats['grad_norm'] = []
                     epoch_stats['grad_norm'].append(grad_norm.item() if hasattr(grad_norm, 'item') else grad_norm)
             

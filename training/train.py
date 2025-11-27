@@ -39,13 +39,18 @@ from torch.utils.tensorboard import SummaryWriter
 from accelerate import Accelerator
 
 # Import RL components
-from rl_state_encoder import RLStateEncoder
+from rl_state_encoder import RLStateEncoder, estimate_hand_strength, get_hand_category
 from rl_model import PokerActorCritic, create_actor_critic
 from ppo import PPOTrainer
 from model_agent import (
     ModelAgent, 
     RandomAgent,
     HeuristicAgent,
+    TightAgent,
+    LoosePassiveAgent,
+    AggressiveAgent,
+    CallingStationAgent,
+    HeroCallerAgent,
     ACTION_MAP, 
     ACTION_NAMES, 
     BET_SIZE_MAP,
@@ -53,6 +58,7 @@ from model_agent import (
     create_legal_actions_mask,
     extract_state
 )
+from rl_state_encoder import estimate_hand_strength
 
 # Import model version and log level from config
 from config import MODEL_VERSION, LOG_LEVEL, DEFAULT_MODELS_DIR
@@ -180,18 +186,39 @@ class RLTrainingSession:
         })
         
         # Opponent agents with diverse opponent selection for better generalization
+        # KEY INSIGHT: Need opponents that PUNISH all-in with weak hands by CALLING
+        # The main problem was that folding opponents make all-in "work"
         for i in range(1, num_players):
             player_id = f'p{i}'
             
-            # Opponent selection probabilities (optimized for self-play strength):
-            # - Past checkpoint: 50% (when pool available) - diverse self-play against history
-            # - Current model: 25% - immediate self-play for Nash equilibrium
-            # - Heuristic: 15% - strategic baseline  
-            # - Random: 10% - minimal exploration baseline
+            # Opponent selection probabilities (REBALANCED TO PUNISH BAD ALL-INS):
+            # - CallingStation: 25% - CRITICAL: Calls all-ins, shows model trash loses at showdown
+            # - HeroCaller: 15% - Calls down with medium hands when opponent is aggressive
+            # - Past checkpoint: 15% (when pool available) - diverse self-play
+            # - Current model: 10% - immediate self-play for Nash equilibrium
+            # - TightAgent: 15% - Punishes by only playing premium hands
+            # - Heuristic: 10% - Strategic baseline
+            # - AggressiveAgent: 5% - Teaches calling down bluffs
+            # - LoosePassive: 3% - Rewards value betting
+            # - Random: 2% - Minimal exploration
             roll = random.random()
             
-            if use_opponent_pool and self.opponent_pool and roll < 0.50:
-                # Use past checkpoint (50% of time when pool available)
+            if roll < 0.25:
+                # CallingStationAgent (25% of time) - CRITICAL FOR FIXING ALL-IN PROBLEM
+                # This agent CALLS all-ins with any decent hand, showing the model
+                # that trash hands lose at showdown
+                agents.append({
+                    'id': player_id,
+                    'type': 'calling_station'
+                })
+            elif roll < 0.40:
+                # HeroCallerAgent (15% of time) - Calls down suspected bluffs
+                agents.append({
+                    'id': player_id,
+                    'type': 'hero_caller'
+                })
+            elif use_opponent_pool and self.opponent_pool and roll < 0.55:
+                # Use past checkpoint (15% of time when pool available)
                 checkpoint_path = self._sample_opponent_checkpoint()
                 opponent_model = self._load_opponent_model(checkpoint_path)
                 if opponent_model is not None:
@@ -200,26 +227,43 @@ class RLTrainingSession:
                         'type': 'past_model',
                         'model': opponent_model,
                         'encoder': RLStateEncoder(),
-                        'checkpoint_path': str(checkpoint_path)  # Store for win rate tracking
+                        'checkpoint_path': str(checkpoint_path)
                     })
                 else:
-                    # Fallback to random if loading failed
-                    agents.append({'id': player_id, 'type': 'random'})
-            elif use_opponent_pool and roll < 0.75:
-                # Use current model as opponent (25% of time)
+                    agents.append({'id': player_id, 'type': 'calling_station'})
+            elif use_opponent_pool and roll < 0.65:
+                # Use current model as opponent (10% of time)
                 agents.append({
                     'id': player_id,
                     'type': 'model',
                     'encoder': RLStateEncoder()
                 })
-            elif use_opponent_pool and roll < 0.90:
-                # Use heuristic agent (15% of time)
+            elif roll < 0.80:
+                # Use TightAgent (15% of time) - Only plays premium hands
+                agents.append({
+                    'id': player_id,
+                    'type': 'tight'
+                })
+            elif roll < 0.90:
+                # Use heuristic agent (10% of time)
                 agents.append({
                     'id': player_id,
                     'type': 'heuristic'
                 })
+            elif roll < 0.95:
+                # Use AggressiveAgent (5% of time) - teaches model to call down
+                agents.append({
+                    'id': player_id,
+                    'type': 'aggressive'
+                })
+            elif roll < 0.98:
+                # Use LoosePassive agent (3% of time) - rewards value betting
+                agents.append({
+                    'id': player_id,
+                    'type': 'loose_passive'
+                })
             else:
-                # Use random agent (10% of time, or 100% if not using pool)
+                # Use random agent (2% of time)
                 agents.append({
                     'id': player_id,
                     'type': 'random'
@@ -268,6 +312,8 @@ class RLTrainingSession:
             'success': True,
             # Reward shaping tracking
             'action_types': [],  # Track action types taken by main player
+            'hand_strengths': [],  # Track hand strength at each decision
+            'step_rewards': [],  # Per-step reward shaping
             'folded_to_aggression': False,  # Did main player fold to bet/raise?
             'won_uncontested': False,  # Did main player win without showdown?
             'is_out_of_position': is_out_of_position,
@@ -319,6 +365,11 @@ class RLTrainingSession:
                 state_tensor = encoder.encode_state(state_dict).unsqueeze(0).to(self.device)
                 legal_mask = self._create_legal_actions_mask(legal_actions)
                 
+                # Compute hand strength for reward shaping
+                hole_cards = state_dict.get('hole_cards', [])
+                community_cards = state_dict.get('community_cards', [])
+                hand_strength = estimate_hand_strength(hole_cards, community_cards)
+                
                 with torch.no_grad():
                     action_logits, value = self.model(state_tensor, legal_mask)
                     action_probs = F.softmax(action_logits, dim=-1)
@@ -341,8 +392,15 @@ class RLTrainingSession:
                 action_label = self._idx_to_action_label(action_idx)
                 action_type, amount = self._convert_action(action_label, state_dict)
                 
-                # Track action types for reward shaping
+                # Track action types and hand strength for reward shaping
                 episode['action_types'].append(action_type)
+                episode['hand_strengths'].append(hand_strength)
+                
+                # Compute per-step reward shaping based on action appropriateness
+                step_reward = self._compute_action_shaping_reward(
+                    action_type, hand_strength, state_dict, last_action_was_opponent_aggression
+                )
+                episode['step_rewards'].append(step_reward)
                 
                 # Check if main player folded to opponent aggression
                 if action_type == 'fold' and last_action_was_opponent_aggression:
@@ -352,6 +410,32 @@ class RLTrainingSession:
                 # Use HeuristicAgent for action selection
                 heuristic = HeuristicAgent(current_player_id, "Heuristic")
                 action_type, amount, action_label = heuristic.select_action(state_dict, legal_actions)
+            
+            elif current_agent['type'] == 'tight':
+                # Use TightAgent - only plays premium hands, punishes random aggression
+                tight_agent = TightAgent(current_player_id, "Tight")
+                action_type, amount, action_label = tight_agent.select_action(state_dict, legal_actions)
+            
+            elif current_agent['type'] == 'aggressive':
+                # Use AggressiveAgent - bets/raises frequently
+                aggressive_agent = AggressiveAgent(current_player_id, "Aggressive")
+                action_type, amount, action_label = aggressive_agent.select_action(state_dict, legal_actions)
+            
+            elif current_agent['type'] == 'loose_passive':
+                # Use LoosePassiveAgent - calls too much, rewards value betting
+                loose_passive_agent = LoosePassiveAgent(current_player_id, "LoosePassive")
+                action_type, amount, action_label = loose_passive_agent.select_action(state_dict, legal_actions)
+            
+            elif current_agent['type'] == 'calling_station':
+                # Use CallingStationAgent - CRITICAL for punishing trash all-ins
+                # This agent calls all-ins to show model that weak hands lose at showdown
+                calling_station = CallingStationAgent(current_player_id, "CallingStation")
+                action_type, amount, action_label = calling_station.select_action(state_dict, legal_actions)
+            
+            elif current_agent['type'] == 'hero_caller':
+                # Use HeroCallerAgent - calls down suspected bluffs with medium hands
+                hero_caller = HeroCallerAgent(current_player_id, "HeroCaller")
+                action_type, amount, action_label = hero_caller.select_action(state_dict, legal_actions)
                 
             elif current_agent['type'] == 'past_model':
                 # Use past checkpoint model for action selection
@@ -837,6 +921,7 @@ class RLTrainingSession:
         all_advantages = []
         all_returns = []
         all_legal_masks = []
+        all_hand_strengths = []  # For auxiliary hand strength prediction loss
         
         episode_rewards = []
         episode_lengths = []
@@ -909,26 +994,121 @@ class RLTrainingSession:
                     normalized_reward = max(-2.0, min(5.0, normalized_reward))
                     
                     # === REWARD SHAPING for better learning signal ===
-                    shaping_bonus = 0.0
+                    # Key principle: Shaping must be STRONG enough to overwhelm poker variance
                     
-                    # 1. Bonus for winning pots uncontested (good bluffs/value bets that make opponent fold)
+                    # 1. Per-step action appropriateness rewards (based on hand strength)
+                    # These provide dense signal about whether actions matched hand quality
+                    per_step_shaping = episode.get('step_rewards', [])
+                    if per_step_shaping:
+                        for idx, shaping_reward in enumerate(per_step_shaping):
+                            if idx < num_steps:
+                                step_rewards[idx] += shaping_reward
+                    
+                    # 2. Episode-level shaping (STRONGLY ENHANCED)
+                    episode_shaping = 0.0
+                    
+                    hand_strengths = episode.get('hand_strengths', [])
+                    action_types = episode.get('action_types', [])
+                    
+                    # Detect problematic all-in behavior with detailed tracking
+                    all_in_with_weak = False
+                    all_in_with_trash = False
+                    all_in_count = 0
+                    fold_count = 0
+                    
+                    if hand_strengths and action_types:
+                        for hs, act in zip(hand_strengths, action_types):
+                            if act == 'all_in':
+                                all_in_count += 1
+                                if hs < 0.45:  # Weak threshold raised
+                                    all_in_with_weak = True
+                                if hs < 0.30:  # Trash threshold raised
+                                    all_in_with_trash = True
+                            if act == 'fold':
+                                fold_count += 1
+                    
+                    # === KEY ANTI-ALL-IN PENALTIES ===
+                    # These MUST be strong enough that the model learns:
+                    # "All-in with weak hands is ALWAYS bad, even if I got lucky this time"
+                    
+                    if all_in_with_trash:
+                        if normalized_reward > 0:
+                            # WON by luck with trash all-in
+                            # CRITICAL: Must HEAVILY penalize even winning to prevent exploitation learning
+                            episode_shaping -= 0.40  # "Lucky win" - still terrible play
+                        else:
+                            # LOST with trash all-in
+                            # Expected result, but reinforce that this was bad
+                            episode_shaping -= 0.30  # Strong additional penalty
+                    elif all_in_with_weak:
+                        if normalized_reward > 0:
+                            # Won with weak all-in - reduce reward significantly
+                            episode_shaping -= 0.25  # Penalize lucky wins
+                        else:
+                            # Lost with weak all-in - expected, but reinforce
+                            episode_shaping -= 0.15
+                    
+                    # === FOLD PENALTY TO DISCOURAGE OVER-FOLDING ===
+                    # Penalize folding to encourage playing and learning from outcomes
+                    if fold_count > 0 and hand_strengths:
+                        first_hand_strength = hand_strengths[0]
+                        if first_hand_strength < 0.25:
+                            # Folded with true trash - acceptable (no penalty)
+                            pass
+                        elif first_hand_strength < 0.35:
+                            # Folded with weak hand - small penalty to encourage playing
+                            episode_shaping -= 0.03
+                        elif first_hand_strength < 0.50:
+                            # Folded with playable hand - bigger penalty
+                            episode_shaping -= 0.08
+                        else:
+                            # Folded with decent+ hand - severe penalty
+                            episode_shaping -= 0.15
+                    
+                    # === HAND STRENGTH CORRELATION ===
+                    if hand_strengths:
+                        avg_hand_strength = sum(hand_strengths) / len(hand_strengths)
+                        
+                        if normalized_reward > 0:  # Won the hand
+                            if avg_hand_strength > 0.70:
+                                # Won with strong hand - expected and good value extraction
+                                episode_shaping += 0.10
+                            elif avg_hand_strength > 0.55:
+                                # Won with medium hand - good play
+                                episode_shaping += 0.05
+                            elif avg_hand_strength < 0.35:
+                                # Won with weak hand (bluff worked)
+                                # Small bonus only if we didn't do trash all-in
+                                if not all_in_with_trash and not all_in_with_weak:
+                                    episode_shaping += 0.03
+                        else:  # Lost the hand
+                            if avg_hand_strength > 0.70:
+                                # Lost with strong hand (cooler/bad luck)
+                                # Reduce penalty - this wasn't misplay
+                                episode_shaping += 0.05
+                            elif avg_hand_strength < 0.35:
+                                # Lost with weak hand
+                                # If we folded, that's good. If we played, that's bad.
+                                if fold_count == 0:
+                                    # Played weak hand without folding - bad
+                                    episode_shaping -= 0.08
+                    
+                    # Bonus for winning pots uncontested (good aggression that induces folds)
+                    # But NOT if we used trash all-in to do it
                     if episode.get('won_uncontested', False) and normalized_reward > 0:
-                        shaping_bonus += 0.1  # Reward successful aggression
+                        if not all_in_with_trash and not all_in_with_weak:
+                            episode_shaping += 0.06  # Reward controlled aggression
+                        # No bonus for all-in forcing fold - that's not skillful
                     
-                    # 2. Penalty for folding to aggression (being too passive/exploitable)
-                    if episode.get('folded_to_aggression', False):
-                        shaping_bonus -= 0.05  # Small penalty for being pushed around
-                    
-                    # 3. Position-aware adjustment (playing OOP is harder, slightly reduce penalty for losses)
+                    # Position-aware adjustment (playing OOP is harder)
                     if episode.get('is_out_of_position', False) and normalized_reward < 0:
-                        # Reduce the penalty slightly for OOP losses
-                        normalized_reward *= 0.9
+                        normalized_reward *= 0.95
                     
-                    # Apply shaping bonus to final reward
-                    normalized_reward += shaping_bonus
+                    # Apply episode-level shaping to final reward
+                    normalized_reward += episode_shaping
                     
                     # Main reward at the end
-                    step_rewards[-1] = normalized_reward
+                    step_rewards[-1] += normalized_reward
                     
                     # Compute GAE
                     advantages, returns = self.ppo_trainer.compute_gae(
@@ -946,6 +1126,11 @@ class RLTrainingSession:
                     all_advantages.append(advantages)
                     all_returns.append(returns)
                     all_legal_masks.append(episode['legal_actions_masks'])
+                    
+                    # Store hand strengths for auxiliary loss
+                    if episode.get('hand_strengths'):
+                        hs_tensor = torch.tensor(episode['hand_strengths'], dtype=torch.float32)
+                        all_hand_strengths.append(hs_tensor)
                     
                     episode_rewards.append(episode['main_reward'])
                     episode_lengths.append(num_steps)
@@ -973,6 +1158,49 @@ class RLTrainingSession:
         returns = torch.cat(all_returns, dim=0)
         legal_masks = torch.cat(all_legal_masks, dim=0)
         
+        # Concatenate hand strengths for auxiliary loss
+        hand_strengths = None
+        if all_hand_strengths:
+            hand_strengths = torch.cat(all_hand_strengths, dim=0)
+        
+        # === ACTION RATIO GUARDRAILS ===
+        # Apply global adjustment to advantages based on action ratios
+        # This nudges the model towards more balanced play
+        total_actions_count = sum(action_counts.values())
+        if total_actions_count > 0:
+            # Calculate action rates
+            grouped = {'fold': 0, 'check': 0, 'call': 0, 'bet': 0, 'raise': 0, 'all_in': 0}
+            for name, count in action_counts.items():
+                if name in grouped:
+                    grouped[name] += count
+                elif name.startswith('bet_'):
+                    grouped['bet'] += count
+                elif name.startswith('raise_'):
+                    grouped['raise'] += count
+            
+            fold_rate = grouped['fold'] / total_actions_count
+            check_rate = grouped['check'] / total_actions_count
+            call_rate = grouped['call'] / total_actions_count
+            
+            # Penalize high fold rate by reducing advantages when fold rate > 40%
+            # This creates global pressure to explore non-fold actions
+            if fold_rate > 0.40:
+                # Scale penalty by how much over threshold
+                excess_fold_rate = fold_rate - 0.40
+                fold_penalty = excess_fold_rate * 0.5  # Max ~0.3 penalty at 100% fold
+                advantages = advantages - fold_penalty
+                if self.log_level >= 2:
+                    print(f"  ⚠️ Applied fold rate penalty: -{fold_penalty:.4f} (fold rate: {fold_rate:.1%})")
+            
+            # Bonus for reasonable check+call rate (staying in hands)
+            passive_rate = check_rate + call_rate
+            if passive_rate > 0.25:
+                # Small bonus for healthy passive play rate
+                passive_bonus = min(0.1, (passive_rate - 0.25) * 0.3)
+                advantages = advantages + passive_bonus
+                if self.log_level >= 2:
+                    print(f"  ✓ Applied passive play bonus: +{passive_bonus:.4f} (check+call rate: {passive_rate:.1%})")
+        
         if self.log_level >= 1:
             print(f"\nCollected {len(states)} timesteps from {len(episode_rewards)} episodes")
             print(f"  Avg Episode Reward: {sum(episode_rewards)/len(episode_rewards):.3f}")
@@ -997,12 +1225,39 @@ class RLTrainingSession:
                     count = grouped_counts[act]
                     pct = count / total_actions
                     print(f"    {act.ljust(8)}: {pct:.1%} ({count})")
+                
+                # Alert if all-in rate is too high (should be < 10% for healthy play)
+                all_in_rate = grouped_counts['all_in'] / total_actions
+                fold_rate = grouped_counts['fold'] / total_actions
+                if all_in_rate > 0.15:
+                    print(f"    ⚠️  ALL-IN RATE TOO HIGH: {all_in_rate:.1%} (target: <15%)")
+                elif all_in_rate > 0.10:
+                    print(f"    ⚡ All-in rate elevated: {all_in_rate:.1%} (target: <10%)")
+                else:
+                    print(f"    ✓ All-in rate healthy: {all_in_rate:.1%}")
+                
+                if fold_rate > 0.50:
+                    print(f"    ⚠️  FOLD RATE TOO HIGH: {fold_rate:.1%} (target: <40%)")
+                elif fold_rate > 0.40:
+                    print(f"    ⚡ Fold rate elevated: {fold_rate:.1%} (target: <40%)")
+                else:
+                    print(f"    ✓ Fold rate healthy: {fold_rate:.1%}")
+                
+                # Check/call rate should be reasonable  
+                passive_rate = (grouped_counts['check'] + grouped_counts['call']) / total_actions
+                if passive_rate < 0.20:
+                    print(f"    ⚠️  CHECK+CALL RATE TOO LOW: {passive_rate:.1%} (target: >25%)")
+                elif passive_rate < 0.25:
+                    print(f"    ⚡ Check+call rate low: {passive_rate:.1%} (target: >25%)")
+                else:
+                    print(f"    ✓ Check+call rate healthy: {passive_rate:.1%}")
 
             print(f"\nRunning PPO update...")
         
-        # PPO update
+        # PPO update (with auxiliary hand strength prediction loss)
         ppo_stats = self.ppo_trainer.update(
             states, actions, old_log_probs, old_values, advantages, returns, legal_masks,
+            hand_strengths=hand_strengths,
             verbose=(self.log_level >= 2)
         )
         
@@ -1028,6 +1283,7 @@ class RLTrainingSession:
         if self.log_level >= 1:
             print(f"  Policy Loss: {ppo_stats['policy_loss']:.4f}")
             print(f"  Value Loss: {ppo_stats['value_loss']:.4f}")
+            print(f"  Hand Strength Loss: {ppo_stats.get('hand_strength_loss', 0.0):.4f}")
             print(f"  Entropy: {ppo_stats['entropy']:.4f}")
             print(f"  KL Divergence: {ppo_stats['kl_divergence']:.4f}")
             print(f"  Grad Norm: {ppo_stats.get('grad_norm', 0.0):.4f}")
@@ -1062,6 +1318,28 @@ class RLTrainingSession:
             if self.stats['avg_value_estimate']:
                 self.writer.add_scalar('Convergence/AvgValueEstimate', 
                                       sum(self.stats['avg_value_estimate']) / len(self.stats['avg_value_estimate']), 
+                                      iteration)
+            
+            # Log action distribution metrics (critical for monitoring hand selection learning)
+            total_actions = sum(action_counts.values())
+            if total_actions > 0:
+                grouped_counts = {'fold': 0, 'check': 0, 'call': 0, 'bet': 0, 'raise': 0, 'all_in': 0}
+                for name, count in action_counts.items():
+                    if name in grouped_counts:
+                        grouped_counts[name] += count
+                    elif name.startswith('bet_'):
+                        grouped_counts['bet'] += count
+                    elif name.startswith('raise_'):
+                        grouped_counts['raise'] += count
+                
+                for act, count in grouped_counts.items():
+                    self.writer.add_scalar(f'Actions/{act}_rate', count / total_actions, iteration)
+                
+                # Key metrics for hand selection health
+                self.writer.add_scalar('HandSelection/AllInRate', grouped_counts['all_in'] / total_actions, iteration)
+                self.writer.add_scalar('HandSelection/FoldRate', grouped_counts['fold'] / total_actions, iteration)
+                self.writer.add_scalar('HandSelection/AggressionRate', 
+                                      (grouped_counts['bet'] + grouped_counts['raise'] + grouped_counts['all_in']) / total_actions, 
                                       iteration)
         
         self.stats['iteration'] += 1
@@ -1287,6 +1565,192 @@ class RLTrainingSession:
             
         action_type, amount = self._convert_action(action_label, state)
         return action_type, amount, action_label
+    
+    def _compute_action_shaping_reward(
+        self,
+        action_type: str,
+        hand_strength: float,
+        state: Dict,
+        facing_aggression: bool
+    ) -> float:
+        """
+        Compute per-step reward shaping based on action appropriateness.
+        
+        This provides VERY STRONG dense learning signal to help the model learn proper
+        hand-action correlations. The key insight is that we need to OVERWHELM the
+        variance in poker outcomes with consistent, strong shaping rewards.
+        
+        Key principles:
+        - Folding weak hands = STRONGLY REWARDED (especially facing aggression)
+        - All-in with weak/trash hands = SEVERELY PENALIZED (regardless of outcome)
+        - Checking/calling with appropriate hands = mildly rewarded
+        - Betting/raising strong hands = rewarded
+        
+        Args:
+            action_type: The action taken (fold, check, call, bet, raise, all_in)
+            hand_strength: Estimated hand strength (0.0 to 1.0)
+            state: Current game state
+            facing_aggression: Whether opponent just bet/raised
+        
+        Returns:
+            Shaping reward (positive/negative value)
+        """
+        reward = 0.0
+        
+        # Define hand strength thresholds (calibrated for realistic poker)
+        # These are STRICT thresholds to enforce proper hand selection
+        TRASH_THRESHOLD = 0.30      # Hands we should almost always fold (bottom ~30%)
+        WEAK_THRESHOLD = 0.45       # Marginal hands - careful play required
+        MEDIUM_THRESHOLD = 0.55     # Playable hands
+        STRONG_THRESHOLD = 0.70     # Value betting hands
+        PREMIUM_THRESHOLD = 0.85    # Premium hands - can go all-in comfortably
+        
+        # Get game context
+        pot = state.get('pot', 0)
+        to_call = state.get('to_call', 0)
+        player_chips = state.get('player_chips', 0)
+        stage = state.get('stage', 'Preflop')
+        starting_chips = state.get('starting_chips', 1000)
+        
+        # Pot odds: what fraction of pot we need to win to break even
+        pot_odds = to_call / max(1, pot + to_call) if to_call > 0 else 0
+        
+        # Commitment level: how much of our stack is already in
+        player_bet = state.get('player_bet', 0)
+        commitment = player_bet / max(1, player_bet + player_chips)
+        
+        # Stack-to-pot ratio (SPR) - low SPR justifies more aggression
+        spr = player_chips / max(1, pot) if pot > 0 else 10.0
+        
+        # === VERY STRONG REWARD SHAPING RULES ===
+        # These values are LARGE to overcome poker variance
+        
+        # 1. FOLDING - Penalize most folds to encourage playing
+        # Key insight: Over-folding is worse than over-calling in training
+        # We want the model to PLAY hands and learn from outcomes
+        if action_type == 'fold':
+            if hand_strength < TRASH_THRESHOLD:
+                # Folding true trash facing aggression is acceptable (NEUTRAL to small penalty)
+                # But we don't reward it - we want model to sometimes call and see what happens
+                reward += -0.02 if facing_aggression else -0.05
+            elif hand_strength < WEAK_THRESHOLD:
+                # Folding weak hands - penalize to encourage playing
+                reward += -0.06 if facing_aggression else -0.10
+            elif hand_strength < MEDIUM_THRESHOLD:
+                # Folding medium hands is BAD - these are playable
+                reward += -0.10 if facing_aggression else -0.15
+            elif hand_strength < STRONG_THRESHOLD:
+                # Folding decent hands is VERY BAD
+                reward -= 0.18
+            else:
+                # Folding strong hands is TERRIBLE
+                reward -= 0.25
+        
+        # 2. ALL-IN - VERY STRONG penalties for all-in with weak hands
+        # This is the KEY section to fix the "always all-in" problem
+        elif action_type == 'all_in':
+            if hand_strength >= PREMIUM_THRESHOLD:
+                # All-in with premium hands is excellent
+                reward += 0.20
+            elif hand_strength >= STRONG_THRESHOLD:
+                # All-in with strong hands is good
+                reward += 0.10
+            elif hand_strength >= MEDIUM_THRESHOLD:
+                # All-in with medium hands is risky
+                if stage == 'Preflop' and hand_strength >= 0.60:
+                    # Standard play for medium-strong preflop
+                    reward += 0.02
+                elif commitment > 0.6:
+                    # Already pot-committed - all-in is forced
+                    reward += 0.0
+                elif spr < 2.0:
+                    # Low SPR justifies all-in with medium hands
+                    reward += 0.0
+                else:
+                    # Random all-in with medium hands when not committed = BAD
+                    reward -= 0.15
+            elif hand_strength >= WEAK_THRESHOLD:
+                # ALL-IN WITH WEAK HANDS IS VERY BAD
+                if commitment > 0.7:
+                    # Pot committed - can't fault them much
+                    reward -= 0.08
+                else:
+                    # This is BAD poker - STRONG penalty
+                    reward -= 0.35
+            else:
+                # ALL-IN WITH TRASH IS TERRIBLE - the #1 mistake to fix
+                # Even if committed, this is usually wrong (we shouldn't get here)
+                if commitment > 0.8:
+                    # Extremely pot committed - still penalize
+                    reward -= 0.20
+                else:
+                    # MASSIVE penalty for trash all-ins
+                    # This MUST outweigh any potential lucky wins
+                    reward -= 0.50
+        
+        # 3. BET / RAISE (aggressive actions)
+        elif action_type in ['bet', 'raise']:
+            if hand_strength >= STRONG_THRESHOLD:
+                # Betting/raising strong hands for value is excellent
+                reward += 0.12
+            elif hand_strength >= MEDIUM_THRESHOLD:
+                # Betting medium hands is acceptable (semi-bluff/value)
+                reward += 0.05 if stage in ['Preflop', 'Flop'] else 0.02
+            elif hand_strength >= WEAK_THRESHOLD:
+                # Betting weak hands is risky - small bluffs occasionally OK
+                reward -= 0.06
+            else:
+                # Betting trash: occasional bluffs OK, but usually bad
+                # Moderate penalty to discourage excessive bluffing
+                reward -= 0.12
+        
+        # 4. CALL - Encourage calling to see more showdowns and learn hand values
+        # Key insight: In early training, calling helps learn what hands win
+        elif action_type == 'call':
+            if hand_strength >= STRONG_THRESHOLD:
+                # Calling with strong hands is fine (slowplay, trap)
+                reward += 0.10
+            elif hand_strength >= MEDIUM_THRESHOLD:
+                # Calling with decent hands is standard - ENCOURAGE this
+                reward += 0.08
+            elif hand_strength >= WEAK_THRESHOLD:
+                # Calling with weak hands: acceptable for learning
+                if pot_odds > 0 and hand_strength > pot_odds * 1.2:
+                    # Good implied odds, reasonable call
+                    reward += 0.05
+                else:
+                    # Marginal call - still better than folding
+                    reward += 0.02
+            else:
+                # Calling with trash is risky but helps learning
+                # Small penalty but not too much
+                reward -= 0.05
+        
+        # 5. CHECK (passive, safe action) - STRONGLY prefer over folding
+        elif action_type == 'check':
+            if hand_strength >= STRONG_THRESHOLD:
+                # Checking strong hands (slowplay) - context-dependent
+                # Occasional slowplay is fine
+                reward += 0.03
+            elif hand_strength >= MEDIUM_THRESHOLD:
+                # Checking medium hands is reasonable pot control
+                reward += 0.06
+            elif hand_strength < WEAK_THRESHOLD:
+                # Checking weak hands is GOOD - pot control, MUCH better than folding
+                reward += 0.08
+            else:
+                # Checking medium-weak is positive - staying in hand
+                reward += 0.05
+        
+        # Scale rewards by stage (later streets = higher stakes decisions)
+        stage_multiplier = {
+            'Preflop': 1.0,
+            'Flop': 1.2,
+            'Turn': 1.4,
+            'River': 1.6
+        }.get(stage, 1.0)
+        
+        return reward * stage_multiplier
 
 
 # =============================================================================
@@ -1334,6 +1798,8 @@ def main() -> int:
                        help='Entropy coefficient (default: 0.01)')
     parser.add_argument('--value-loss-coef', type=float, default=0.5,
                        help='Value loss coefficient (default: 0.5)')
+    parser.add_argument('--hand-strength-loss-coef', type=float, default=0.10,
+                       help='Hand strength prediction loss coefficient for auxiliary task (default: 0.10)')
     
     # Model architecture
     parser.add_argument('--hidden-dim', type=int, default=512,
@@ -1424,6 +1890,7 @@ def main() -> int:
         clip_epsilon=args.clip_epsilon,
         entropy_coef=args.entropy_coef,
         value_loss_coef=args.value_loss_coef,
+        hand_strength_loss_coef=args.hand_strength_loss_coef,
         ppo_epochs=args.ppo_epochs,
         mini_batch_size=args.mini_batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,

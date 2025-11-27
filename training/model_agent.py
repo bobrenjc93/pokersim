@@ -570,3 +570,513 @@ class HeuristicAgent:
         action_type, amount = convert_action_label(action_label, state)
         
         return action_type, amount, action_label
+
+
+class TightAgent:
+    """
+    Tight-aggressive agent that only plays premium hands.
+    
+    This agent is crucial for training because it teaches the model that:
+    - Not all aggression works (tight player folds weak hands)
+    - Bluffing has diminishing returns against tight players
+    - Need to have actual hand strength to win
+    """
+    def __init__(self, player_id: str, name: str):
+        self.player_id = player_id
+        self.name = name
+        
+    def reset_hand(self):
+        pass
+        
+    def observe_action(self, player_id: str, action_type: str, amount: int, pot: int, stage: str):
+        pass
+        
+    def _parse_card(self, card) -> Tuple[int, int]:
+        """Parse card into (rank, suit) values."""
+        rank_map = {'2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9, 
+                   'T': 10, 'J': 11, 'Q': 12, 'K': 13, 'A': 14}
+        suit_map = {'C': 0, 'D': 1, 'H': 2, 'S': 3}
+        
+        if isinstance(card, str):
+            rank = rank_map.get(card[0], 2)
+            suit = suit_map.get(card[1], 0) if len(card) > 1 else 0
+        elif isinstance(card, dict):
+            rank = rank_map.get(card.get('rank', '2'), 2)
+            suit = suit_map.get(card.get('suit', 'C'), 0)
+        else:
+            rank, suit = 2, 0
+        return rank, suit
+    
+    def _get_preflop_strength(self, hole_cards: List) -> float:
+        """Get preflop hand strength (0-1)."""
+        if not hole_cards or len(hole_cards) < 2:
+            return 0.0
+            
+        ranks_suits = [self._parse_card(c) for c in hole_cards]
+        ranks = sorted([r for r, s in ranks_suits], reverse=True)
+        suits = [s for r, s in ranks_suits]
+        
+        h1, h2 = ranks[0], ranks[1]
+        is_suited = suits[0] == suits[1]
+        is_pair = h1 == h2
+        
+        # Premium pairs: AA, KK, QQ, JJ
+        if is_pair and h1 >= 11:
+            return 0.9 + (h1 - 11) * 0.025
+        
+        # Medium pairs: TT-77
+        if is_pair and h1 >= 7:
+            return 0.6 + (h1 - 7) * 0.05
+        
+        # Small pairs: 66-22
+        if is_pair:
+            return 0.35 + (h1 - 2) * 0.03
+        
+        # Big Ace (AK, AQ, AJ, AT)
+        if h1 == 14:  # Ace
+            if h2 >= 10:
+                base = 0.65 + (h2 - 10) * 0.05
+                return base + (0.05 if is_suited else 0)
+            elif h2 >= 7:
+                return 0.45 + (0.05 if is_suited else 0)
+            else:
+                return 0.30 + (0.06 if is_suited else 0)
+        
+        # Broadway cards
+        if h1 >= 10 and h2 >= 10:
+            return 0.50 + (0.05 if is_suited else 0)
+        
+        # Suited connectors
+        if is_suited and abs(h1 - h2) == 1:
+            return 0.35 + (h1 / 14) * 0.1
+        
+        # Other suited cards
+        if is_suited:
+            return 0.25 + (h1 / 14) * 0.1
+        
+        # Offsuit connected
+        if abs(h1 - h2) <= 2:
+            return 0.20 + (h1 / 14) * 0.1
+        
+        # Trash
+        return 0.15
+
+    def select_action(self, state: Dict[str, Any], legal_actions: List[str]) -> Tuple[str, int, str]:
+        hole_cards = state.get('hole_cards', [])
+        community_cards = state.get('community_cards', [])
+        
+        can_check = 'check' in legal_actions
+        can_call = 'call' in legal_actions
+        can_bet = 'bet' in legal_actions
+        can_raise = 'raise' in legal_actions
+        
+        # Preflop - tight hand selection
+        if not community_cards:
+            strength = self._get_preflop_strength(hole_cards)
+            
+            # Only play premium hands (top ~15%)
+            if strength >= 0.65:
+                # Premium - raise/3-bet
+                if can_raise:
+                    action_label = 'raise_75%'
+                elif can_bet:
+                    action_label = 'bet_75%'
+                elif can_call:
+                    action_label = 'call'
+                else:
+                    action_label = 'check' if can_check else 'fold'
+            elif strength >= 0.50:
+                # Strong but not premium - call or small raise
+                if can_call:
+                    action_label = 'call'
+                elif can_check:
+                    action_label = 'check'
+                else:
+                    action_label = 'fold'
+            elif strength >= 0.35:
+                # Medium - only call in position, otherwise fold
+                if can_check:
+                    action_label = 'check'
+                else:
+                    action_label = 'fold'
+            else:
+                # Weak/trash - always fold if facing bet
+                action_label = 'check' if can_check else 'fold'
+        else:
+            # Postflop - simplified: bet/raise strong, check/fold weak
+            # Use simple heuristic for postflop strength
+            strength = self._get_preflop_strength(hole_cards)  # Simplified
+            
+            to_call = state.get('to_call', 0)
+            pot = state.get('pot', 0)
+            pot_odds = to_call / max(1, pot + to_call) if to_call > 0 else 0
+            
+            # Strong made hand - bet for value
+            if strength >= 0.65:
+                if can_bet:
+                    action_label = 'bet_50%'
+                elif can_raise:
+                    action_label = 'raise_50%'
+                elif can_call:
+                    action_label = 'call'
+                else:
+                    action_label = 'check' if can_check else 'fold'
+            # Medium - play passively
+            elif strength >= 0.45:
+                if can_check:
+                    action_label = 'check'
+                elif can_call and pot_odds < 0.3:
+                    action_label = 'call'
+                else:
+                    action_label = 'fold'
+            # Weak - check/fold
+            else:
+                action_label = 'check' if can_check else 'fold'
+        
+        action_type, amount = convert_action_label(action_label, state)
+        return action_type, amount, action_label
+
+
+class LoosePassiveAgent:
+    """
+    Loose-passive agent that calls too much but rarely raises.
+    
+    This agent is useful for training because:
+    - Teaches value of thin value bets (they call with weak hands)
+    - Shows that passive play is exploitable
+    - Provides contrast to tight aggressive play
+    """
+    def __init__(self, player_id: str, name: str):
+        self.player_id = player_id
+        self.name = name
+        
+    def reset_hand(self):
+        pass
+        
+    def observe_action(self, player_id: str, action_type: str, amount: int, pot: int, stage: str):
+        pass
+
+    def select_action(self, state: Dict[str, Any], legal_actions: List[str]) -> Tuple[str, int, str]:
+        can_check = 'check' in legal_actions
+        can_call = 'call' in legal_actions
+        can_bet = 'bet' in legal_actions
+        can_raise = 'raise' in legal_actions
+        
+        # Loose-passive: calls most of the time, rarely bets/raises
+        roll = random.random()
+        
+        # Can check - usually check
+        if can_check:
+            if roll < 0.85:
+                action_label = 'check'
+            elif can_bet:
+                action_label = 'bet_33%'  # Small bet sometimes
+            else:
+                action_label = 'check'
+        # Facing bet - call most of the time
+        elif can_call:
+            if roll < 0.75:
+                action_label = 'call'
+            elif roll < 0.80 and can_raise:
+                action_label = 'raise_50%'  # Rare raise
+            else:
+                action_label = 'fold'  # Sometimes fold
+        else:
+            action_label = 'fold'
+        
+        action_type, amount = convert_action_label(action_label, state)
+        return action_type, amount, action_label
+
+
+class AggressiveAgent:
+    """
+    Loose-aggressive agent that bets and raises frequently.
+    
+    This agent is useful for training because:
+    - Tests model's ability to call down with marginal hands
+    - Shows that not all aggression has real hands behind it
+    - Provides pressure scenarios
+    """
+    def __init__(self, player_id: str, name: str):
+        self.player_id = player_id
+        self.name = name
+        
+    def reset_hand(self):
+        pass
+        
+    def observe_action(self, player_id: str, action_type: str, amount: int, pot: int, stage: str):
+        pass
+
+    def select_action(self, state: Dict[str, Any], legal_actions: List[str]) -> Tuple[str, int, str]:
+        can_check = 'check' in legal_actions
+        can_call = 'call' in legal_actions
+        can_bet = 'bet' in legal_actions
+        can_raise = 'raise' in legal_actions
+        
+        roll = random.random()
+        
+        # Aggressive: bets and raises frequently
+        if can_bet:
+            if roll < 0.65:
+                # Bet most of the time when we can
+                sizes = ['bet_50%', 'bet_75%', 'bet_100%']
+                action_label = random.choice(sizes)
+            elif roll < 0.85:
+                action_label = 'check' if can_check else random.choice(['bet_50%', 'bet_75%'])
+            else:
+                action_label = 'check' if can_check else 'bet_50%'
+        elif can_raise:
+            if roll < 0.55:
+                # Raise frequently
+                sizes = ['raise_50%', 'raise_75%', 'raise_100%']
+                action_label = random.choice(sizes)
+            elif roll < 0.85:
+                action_label = 'call'
+            else:
+                action_label = 'fold'
+        elif can_call:
+            if roll < 0.70:
+                action_label = 'call'
+            else:
+                action_label = 'fold'
+        elif can_check:
+            action_label = 'check'
+        else:
+            action_label = 'fold'
+        
+        action_type, amount = convert_action_label(action_label, state)
+        return action_type, amount, action_label
+
+
+class CallingStationAgent:
+    """
+    Calling Station agent that calls almost everything, especially all-ins.
+    
+    CRITICAL FOR TRAINING: This agent is essential for teaching the model that
+    all-in with weak hands LOSES MONEY. If the model only plays against folding
+    opponents, it will learn that all-in "works" because opponents fold.
+    
+    This agent CALLS most bets and raises, including all-ins, to show the model
+    that trash hands lose at showdown.
+    """
+    def __init__(self, player_id: str, name: str):
+        self.player_id = player_id
+        self.name = name
+        
+    def reset_hand(self):
+        pass
+        
+    def observe_action(self, player_id: str, action_type: str, amount: int, pot: int, stage: str):
+        pass
+    
+    def _parse_card(self, card) -> Tuple[int, int]:
+        """Parse card into (rank, suit) values."""
+        rank_map = {'2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9, 
+                   'T': 10, 'J': 11, 'Q': 12, 'K': 13, 'A': 14}
+        suit_map = {'C': 0, 'D': 1, 'H': 2, 'S': 3}
+        
+        if isinstance(card, str):
+            rank = rank_map.get(card[0], 2)
+            suit = suit_map.get(card[1], 0) if len(card) > 1 else 0
+        elif isinstance(card, dict):
+            rank = rank_map.get(card.get('rank', '2'), 2)
+            suit = suit_map.get(card.get('suit', 'C'), 0)
+        else:
+            rank, suit = 2, 0
+        return rank, suit
+    
+    def _get_hand_strength(self, hole_cards: List) -> float:
+        """Simple hand strength estimate (higher = better)."""
+        if not hole_cards or len(hole_cards) < 2:
+            return 0.3
+        
+        ranks_suits = [self._parse_card(c) for c in hole_cards]
+        ranks = sorted([r for r, s in ranks_suits], reverse=True)
+        suits = [s for r, s in ranks_suits]
+        
+        h1, h2 = ranks[0], ranks[1]
+        is_suited = suits[0] == suits[1]
+        is_pair = h1 == h2
+        
+        # Pairs
+        if is_pair:
+            return 0.5 + (h1 / 14) * 0.4
+        
+        # High cards
+        base = (h1 / 14) * 0.4 + (h2 / 14) * 0.2
+        if is_suited:
+            base += 0.08
+        if abs(h1 - h2) <= 2:
+            base += 0.05
+        
+        return max(0.15, min(0.85, base))
+
+    def select_action(self, state: Dict[str, Any], legal_actions: List[str]) -> Tuple[str, int, str]:
+        """
+        Calling Station strategy: Call almost everything with any reasonable hand.
+        Key: This agent CALLS ALL-INS frequently to punish weak all-in strategies.
+        """
+        can_check = 'check' in legal_actions
+        can_call = 'call' in legal_actions
+        can_bet = 'bet' in legal_actions
+        can_raise = 'raise' in legal_actions
+        
+        hole_cards = state.get('hole_cards', [])
+        hand_strength = self._get_hand_strength(hole_cards)
+        to_call = state.get('to_call', 0)
+        pot = state.get('pot', 0)
+        player_chips = state.get('player_chips', 0)
+        
+        # Calculate if this is an all-in situation (to_call >= player_chips)
+        is_facing_all_in = to_call >= player_chips * 0.5  # Facing large bet
+        
+        roll = random.random()
+        
+        # Check if we can
+        if can_check:
+            if roll < 0.10 and can_bet:
+                # Occasionally bet (10%)
+                action_label = 'bet_33%'
+            else:
+                action_label = 'check'
+        # Facing bet or raise - CALL FREQUENTLY
+        elif can_call:
+            # CRITICAL: Call even all-ins with any decent hand
+            # This is what punishes trashy all-in strategies
+            if is_facing_all_in:
+                # Facing all-in: call if hand is remotely decent
+                if hand_strength >= 0.25:  # Call with almost anything
+                    action_label = 'call'
+                elif roll < 0.40:  # Even call some trash (40% of time)
+                    action_label = 'call'
+                else:
+                    action_label = 'fold'
+            else:
+                # Regular bet: almost always call
+                if hand_strength >= 0.20:
+                    action_label = 'call'
+                elif roll < 0.60:  # Call 60% of trash too
+                    action_label = 'call'
+                else:
+                    action_label = 'fold'
+        else:
+            action_label = 'fold'
+        
+        action_type, amount = convert_action_label(action_label, state)
+        return action_type, amount, action_label
+
+
+class HeroCallerAgent:
+    """
+    Hero Caller agent that specifically calls down suspected bluffs.
+    
+    This agent evaluates hand strength more carefully and makes "hero calls"
+    with medium-strength hands when facing aggression. This teaches the model
+    that bluffing and aggressive all-ins don't always work.
+    """
+    def __init__(self, player_id: str, name: str):
+        self.player_id = player_id
+        self.name = name
+        self.opponent_aggression_count = 0  # Track opponent aggression this hand
+        
+    def reset_hand(self):
+        self.opponent_aggression_count = 0
+        
+    def observe_action(self, player_id: str, action_type: str, amount: int, pot: int, stage: str):
+        # Track opponent aggression
+        if player_id != self.player_id and action_type in ['bet', 'raise', 'all_in']:
+            self.opponent_aggression_count += 1
+    
+    def _parse_card(self, card) -> Tuple[int, int]:
+        """Parse card into (rank, suit) values."""
+        rank_map = {'2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9, 
+                   'T': 10, 'J': 11, 'Q': 12, 'K': 13, 'A': 14}
+        suit_map = {'C': 0, 'D': 1, 'H': 2, 'S': 3}
+        
+        if isinstance(card, str):
+            rank = rank_map.get(card[0], 2)
+            suit = suit_map.get(card[1], 0) if len(card) > 1 else 0
+        elif isinstance(card, dict):
+            rank = rank_map.get(card.get('rank', '2'), 2)
+            suit = suit_map.get(card.get('suit', 'C'), 0)
+        else:
+            rank, suit = 2, 0
+        return rank, suit
+    
+    def _get_hand_strength(self, hole_cards: List, community_cards: List) -> float:
+        """Estimate hand strength (0-1)."""
+        if not hole_cards or len(hole_cards) < 2:
+            return 0.3
+        
+        ranks_suits = [self._parse_card(c) for c in hole_cards]
+        ranks = sorted([r for r, s in ranks_suits], reverse=True)
+        suits = [s for r, s in ranks_suits]
+        
+        h1, h2 = ranks[0], ranks[1]
+        is_suited = suits[0] == suits[1]
+        is_pair = h1 == h2
+        
+        # Preflop strength
+        if not community_cards:
+            if is_pair:
+                return 0.5 + (h1 / 14) * 0.45
+            base = (h1 / 14) * 0.4 + (h2 / 14) * 0.2
+            if is_suited:
+                base += 0.08
+            return max(0.15, min(0.75, base))
+        
+        # Postflop: simplified - add pair bonus if we hit
+        comm_ranks = [self._parse_card(c)[0] for c in community_cards]
+        paired = h1 in comm_ranks or h2 in comm_ranks
+        two_pair = h1 in comm_ranks and h2 in comm_ranks
+        
+        base = (h1 / 14) * 0.25 + (h2 / 14) * 0.1
+        if is_pair:
+            base += 0.20
+        if paired:
+            base += 0.25
+        if two_pair:
+            base += 0.35
+        
+        return max(0.15, min(0.90, base))
+
+    def select_action(self, state: Dict[str, Any], legal_actions: List[str]) -> Tuple[str, int, str]:
+        """
+        Hero Caller strategy: Call down with medium+ hands when opponent is aggressive.
+        The more aggressive the opponent has been, the lighter we call.
+        """
+        can_check = 'check' in legal_actions
+        can_call = 'call' in legal_actions
+        can_bet = 'bet' in legal_actions
+        can_raise = 'raise' in legal_actions
+        
+        hole_cards = state.get('hole_cards', [])
+        community_cards = state.get('community_cards', [])
+        hand_strength = self._get_hand_strength(hole_cards, community_cards)
+        to_call = state.get('to_call', 0)
+        pot = state.get('pot', 0)
+        
+        # Adjust call threshold based on opponent aggression
+        # More aggressive opponent = lighter calls
+        call_threshold = max(0.20, 0.45 - (self.opponent_aggression_count * 0.10))
+        
+        roll = random.random()
+        
+        if can_check:
+            if hand_strength >= 0.55 and can_bet and roll < 0.50:
+                action_label = 'bet_50%'
+            else:
+                action_label = 'check'
+        elif can_call:
+            # Hero call logic: call more loosely when opponent is aggressive
+            if hand_strength >= call_threshold:
+                action_label = 'call'
+            elif roll < 0.20:  # Occasional light call even with weak hands
+                action_label = 'call'
+            else:
+                action_label = 'fold'
+        else:
+            action_label = 'fold'
+        
+        action_type, amount = convert_action_label(action_label, state)
+        return action_type, amount, action_label

@@ -344,6 +344,7 @@ class JobManager:
         # Initialize results tracking for each checkpoint with starting chips
         results = {}
         chip_history = {}  # iter -> list of (hand_num, chips)
+        action_counts = {}  # iter -> {fold: N, call: N, check: N, raise: N, all_in: N}
         
         for iter_num, path in sorted_cps:
             results[iter_num] = {
@@ -357,6 +358,7 @@ class JobManager:
                 'eliminated_at_hand': None,
             }
             chip_history[iter_num] = [(0, STARTING_CHIPS)]  # Initial chips at hand 0
+            action_counts[iter_num] = {'fold': 0, 'call': 0, 'check': 0, 'raise': 0, 'bet': 0, 'all_in': 0}
         
         # Pre-load all models to avoid reloading during tournament
         print(f"Pre-loading {total_checkpoints} checkpoints...")
@@ -481,9 +483,11 @@ class JobManager:
                     if swap:
                         id_to_name = {'p0': config_b['name'], 'p1': config_a['name']}
                         id_to_agent = {'p0': 'b', 'p1': 'a'}
+                        id_to_iter = {'p0': iter_b, 'p1': iter_a}
                     else:
                         id_to_name = {'p0': config_a['name'], 'p1': config_b['name']}
                         id_to_agent = {'p0': 'a', 'p1': 'b'}
+                        id_to_iter = {'p0': iter_a, 'p1': iter_b}
                     
                     for pid, cards in details.get('hole_cards', {}).items():
                         agent_key = id_to_agent.get(pid, pid)
@@ -491,6 +495,15 @@ class JobManager:
                     
                     for action in details.get('actions', []):
                         pid = action.get('player_id')
+                        action_type = action.get('action', '').lower()
+                        
+                        # Track action counts per iteration
+                        iter_for_action = id_to_iter.get(pid)
+                        if iter_for_action is not None and iter_for_action in action_counts:
+                            # Normalize action types (raise and bet are aggressive actions)
+                            if action_type in action_counts[iter_for_action]:
+                                action_counts[iter_for_action][action_type] += 1
+                        
                         hand_details['actions'].append({
                             'agent': id_to_agent.get(pid, pid),
                             'agent_name': id_to_name.get(pid, action.get('player_name', pid)),
@@ -542,10 +555,11 @@ class JobManager:
                     'active_count': len(active_iters),
                 })
                 
-                # Periodically broadcast full chip history and leaderboard (every 10 hands)
+                # Periodically broadcast full chip history, leaderboard, and action frequencies (every 10 hands)
                 if hand_num % 10 == 0:
                     self._broadcast_chip_update(results, chip_history, active_iters)
                     self._broadcast_leaderboard(results)
+                    self._broadcast_action_frequencies(action_counts)
                 
             except Exception as e:
                 print(f"Error in hand {hand_num}: {e}")
@@ -573,6 +587,7 @@ class JobManager:
         # Final broadcasts
         self._broadcast_chip_update(results, chip_history, active_iters, final=True)
         self._broadcast_leaderboard(results, final=True)
+        self._broadcast_action_frequencies(action_counts, final=True)
     
     def _broadcast_chip_update(self, results, chip_history, active_iters, final=False):
         """Broadcast chip counts for all iterations."""
@@ -617,6 +632,37 @@ class JobManager:
         self.broadcast({
             'type': event_type,
             'leaderboard': leaderboard
+        })
+    
+    def _broadcast_action_frequencies(self, action_counts, final=False):
+        """Broadcast action frequencies (fold/call/check/raise/bet/all_in) per iteration."""
+        action_data = {}
+        for iter_num, counts in action_counts.items():
+            total = sum(counts.values())
+            if total > 0:
+                # Calculate frequencies as percentages
+                frequencies = {
+                    action: (count / total) * 100 
+                    for action, count in counts.items()
+                }
+                # Also group aggressive actions (raise + bet) for easier visualization
+                frequencies['aggressive'] = frequencies.get('raise', 0) + frequencies.get('bet', 0)
+                frequencies['passive'] = frequencies.get('call', 0) + frequencies.get('check', 0)
+            else:
+                frequencies = {action: 0 for action in counts}
+                frequencies['aggressive'] = 0
+                frequencies['passive'] = 0
+            
+            action_data[iter_num] = {
+                'counts': counts,
+                'frequencies': frequencies,
+                'total_actions': total
+            }
+        
+        self.broadcast({
+            'type': 'action_frequencies',
+            'action_data': action_data,
+            'final': final
         })
 
 

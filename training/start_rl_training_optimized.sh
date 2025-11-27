@@ -29,14 +29,15 @@ API_DIR="$(dirname "$SCRIPT_DIR")/api"
 # API_URL="http://localhost:8080/simulate"
 # API_PID_FILE="/tmp/pokersim_api.pid"
 
-# Training parameters (optimized for convergence)
+# Training parameters (optimized for convergence and proper hand selection)
 ITERATIONS=5000
-EPISODES_PER_ITER=500    # Balanced for variance reduction vs speed (was 2000, now 500)
-PPO_EPOCHS=20            # Increased to extract more from data (was 10)
+EPISODES_PER_ITER=500    # Balanced for variance reduction vs speed
+PPO_EPOCHS=20            # Increased to extract more from data
 MINI_BATCH_SIZE=512      # Standard batch size
 LEARNING_RATE=0.0002     # Slightly increased with larger batch size
-ENTROPY_COEF=0.02        # Increased exploration
+ENTROPY_COEF=0.03        # Increased exploration to prevent early convergence to all-in
 VALUE_LOSS_COEF=0.5      # Default 0.5
+HAND_STRENGTH_LOSS_COEF=0.15  # Auxiliary loss for hand strength prediction (teaches hand evaluation)
 GAE_LAMBDA=0.95          # Default 0.95
 NUM_PLAYERS=2            # Heads-up (simpler)
 SMALL_BLIND=10
@@ -145,11 +146,14 @@ fi
 echo ""
 echo -e "${BLUE}📊 Optimizations Enabled:${NC}"
 echo "   ✓ Heads-up play (2 players) - simpler to learn"
-echo "   ✓ Diverse opponent pool - Random, Heuristic, Past checkpoints, Self-play"
+echo "   ✓ Diverse opponent pool - CallingStation, HeroCaller, Tight, Heuristic, Self-play"
 echo "   ✓ Learning rate: ${LEARNING_RATE} - adjusted for stability"
 echo "   ✓ Entropy coefficient: ${ENTROPY_COEF} with very slow decay (0.9999) to 0.01"
+echo "   ✓ Hand strength auxiliary loss: ${HAND_STRENGTH_LOSS_COEF} - teaches hand evaluation"
 echo "   ✓ Model size: Large (1024 dim, 8 layers, 16 heads)"
-echo "   ✓ Reward normalization - improved stability"
+echo "   ✓ Hand-strength-aware action gating - penalizes all-in with weak hands"
+echo "   ✓ Strong reward shaping - punishes bad all-ins even when they win"
+echo "   ✓ CallingStation opponents - calls all-ins to show trash hands lose"
 echo "   ✓ Learning rate scheduling - aligned with ${ITERATIONS} iterations"
 echo "   ✓ ${EPISODES_PER_ITER} episodes/iteration - variance reduction"
 echo "   ✓ Evaluation vs both Random and Heuristic baselines"
@@ -186,6 +190,7 @@ uv run python train.py \
     --learning-rate "$LEARNING_RATE" \
     --entropy-coef "$ENTROPY_COEF" \
     --value-loss-coef "$VALUE_LOSS_COEF" \
+    --hand-strength-loss-coef "$HAND_STRENGTH_LOSS_COEF" \
     --gae-lambda "$GAE_LAMBDA" \
     --hidden-dim 1024 \
     --num-heads 16 \
