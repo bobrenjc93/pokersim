@@ -16,7 +16,7 @@ Or customize game configs:
 # =============================================================================
 
 # Model version for RL training
-MODEL_VERSION = 23  # Current RL model version
+MODEL_VERSION = 24  # Current RL model version
 
 # Default directory for saving/loading models
 DEFAULT_MODELS_DIR = f"/tmp/pokersim/rl_models_v{MODEL_VERSION}"

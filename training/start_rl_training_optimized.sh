@@ -4,11 +4,12 @@
 #
 # This script starts RL training with optimized hyperparameters for better convergence:
 # - Heads-up (2 player) for simpler learning
+# - Diverse opponent pool: Random (35%), Heuristic (20%), Past checkpoints (30%), Self-play (15%)
 # - Increased learning rate (3e-4) for faster learning
-# - More exploration via entropy bonus
+# - More exploration via entropy bonus with slower decay
 # - Reward normalization for stability
-# - Learning rate scheduling
-# - 50 episodes per iteration for balanced learning
+# - Learning rate scheduling aligned with total iterations
+# - Periodic evaluation against both Random and Heuristic baselines
 #
 
 set -euo pipefail
@@ -91,11 +92,13 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Optimized settings:"
             echo "  - Heads-up (2 players) for simpler learning"
+            echo "  - Diverse opponents: Random, Heuristic, Past checkpoints, Self-play"
             echo "  - Learning rate: 3e-4 (standard for PPO)"
-            echo "  - Entropy coefficient: 0.02 (increased exploration)"
-            echo "  - Episodes per iteration: 50 (balanced)"
+            echo "  - Entropy coefficient: 0.02 with slow decay to 0.005"
+            echo "  - Episodes per iteration: 500 (variance reduction)"
             echo "  - Reward normalization enabled"
-            echo "  - Learning rate scheduling enabled"
+            echo "  - Learning rate scheduling aligned with total iterations"
+            echo "  - Evaluation against both Random and Heuristic"
             exit 0
             ;;
         *)
@@ -142,12 +145,14 @@ fi
 echo ""
 echo -e "${BLUE}📊 Optimizations Enabled:${NC}"
 echo "   ✓ Heads-up play (2 players) - simpler to learn"
+echo "   ✓ Diverse opponent pool - Random, Heuristic, Past checkpoints, Self-play"
 echo "   ✓ Learning rate: ${LEARNING_RATE} - adjusted for stability"
-echo "   ✓ Entropy coefficient: ${ENTROPY_COEF} - increased exploration"
+echo "   ✓ Entropy coefficient: ${ENTROPY_COEF} with slow decay (0.9995) to 0.005"
 echo "   ✓ Model size: Large (1024 dim, 8 layers, 16 heads)"
 echo "   ✓ Reward normalization - improved stability"
-echo "   ✓ Learning rate scheduling - adaptive learning"
-echo "   ✓ ${EPISODES_PER_ITER} episodes/iteration - massive variance reduction"
+echo "   ✓ Learning rate scheduling - aligned with ${ITERATIONS} iterations"
+echo "   ✓ ${EPISODES_PER_ITER} episodes/iteration - variance reduction"
+echo "   ✓ Evaluation vs both Random and Heuristic baselines"
 
 echo ""
 echo -e "${BLUE}📊 TensorBoard Monitoring:${NC}"

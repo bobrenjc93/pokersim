@@ -1,0 +1,5 @@
+---
+alwaysApply: true
+---
+
+Almost all code you write should be reachable via a shell script. For training, you'll always want your changes such that the training/start_rl_training_optimized.sh entrypoint can use it.

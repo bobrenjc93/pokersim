@@ -229,11 +229,10 @@ class JobManager:
                 except queue.Full:
                     pass
 
-    def start_job(self, hands: int, models_dir: str = DEFAULT_MODELS_DIR):
-        """Start an evaluation job with random pairing mode.
+    def start_job(self, models_dir: str = DEFAULT_MODELS_DIR):
+        """Start an evaluation job that plays until one player wins all chips.
         
         Args:
-            hands: Total number of hands to play (each hand pairs two random checkpoints)
             models_dir: Directory containing model checkpoints
         """
         if self.thread and self.thread.is_alive():
@@ -244,16 +243,15 @@ class JobManager:
             "status": "running",
             "current_match": "Initializing...",
             "progress": 0,
-            "total_hands": hands,
             "hands_played": 0,
             "results": [],
         }
         
-        self.broadcast({'type': 'job_started', 'total_hands': hands, 'device': DEVICE})
+        self.broadcast({'type': 'job_started', 'mode': 'play_until_winner', 'device': DEVICE})
         
         self.thread = threading.Thread(
             target=self._run_evaluation,
-            args=(hands, models_dir),
+            args=(models_dir,),
             daemon=True
         )
         self.thread.start()
@@ -267,7 +265,7 @@ class JobManager:
             return True
         return False
 
-    def _run_evaluation(self, hands: int, models_dir_str: str):
+    def _run_evaluation(self, models_dir_str: str):
         """Run round-robin tournament evaluation, streaming results."""
         try:
             self.arena = StreamingArena(device=DEVICE, output_dir="arena_results")
@@ -284,7 +282,28 @@ class JobManager:
                 return
 
             sorted_cps = sorted(checkpoints, key=lambda x: x[0])
-            self._run_round_robin(sorted_cps, hands)
+            
+            # Limit to max 4 checkpoints with evenly spaced sampling
+            MAX_CHECKPOINTS = 4
+            if len(sorted_cps) > MAX_CHECKPOINTS:
+                n = len(sorted_cps)
+                # Always include first and last, then evenly space the rest
+                indices = [0]  # First
+                step = (n - 1) / (MAX_CHECKPOINTS - 1)
+                for i in range(1, MAX_CHECKPOINTS - 1):
+                    indices.append(round(i * step))
+                indices.append(n - 1)  # Last
+                # Remove duplicates while preserving order
+                seen = set()
+                unique_indices = []
+                for idx in indices:
+                    if idx not in seen:
+                        seen.add(idx)
+                        unique_indices.append(idx)
+                sorted_cps = [sorted_cps[i] for i in unique_indices]
+                print(f"Sampled {len(sorted_cps)} checkpoints from {n} total (evenly spaced)")
+            
+            self._run_round_robin(sorted_cps)
 
             if not self.stop_event.is_set():
                 self.status["status"] = "completed"
@@ -303,10 +322,10 @@ class JobManager:
             self.status["current_match"] = f"Error: {str(e)}"
             self.broadcast({'type': 'error', 'message': str(e)})
 
-    def _run_round_robin(self, sorted_cps, total_hands):
+    def _run_round_robin(self, sorted_cps):
         """
         Run bankroll survival tournament - each iteration starts with 10k chips.
-        Iterations are eliminated when they go bankrupt (0 chips).
+        Plays until one player wins all chips (all others eliminated).
         """
         import random as rand
         
@@ -368,30 +387,16 @@ class JobManager:
         # Broadcast tournament start with chip info
         self.broadcast({
             'type': 'tournament_started',
-            'mode': 'bankroll-survival',
+            'mode': 'play-until-winner',
             'checkpoints': len(available_iters),
-            'total_hands': total_hands,
             'starting_chips': STARTING_CHIPS,
             'initial_chip_history': {iter_num: STARTING_CHIPS for iter_num in available_iters}
         })
         
-        # Play hands with random pairings
-        for hand_num in range(1, total_hands + 1):
-            if self.stop_event.is_set():
-                break
-            
-            # Check if we still have at least 2 active iterations
-            if len(active_iters) < 2:
-                # Find the winner
-                if len(active_iters) == 1:
-                    winner_iter = list(active_iters)[0]
-                    self.broadcast({
-                        'type': 'tournament_winner',
-                        'winner_iteration': winner_iter,
-                        'final_chips': results[winner_iter]['chips'],
-                        'hands_played': hand_num - 1
-                    })
-                break
+        # Play hands until only one player remains
+        hand_num = 0
+        while len(active_iters) > 1 and not self.stop_event.is_set():
+            hand_num += 1
             
             # Randomly select two different ACTIVE checkpoints
             active_list = list(active_iters)
@@ -403,7 +408,8 @@ class JobManager:
             swap = rand.random() < 0.5
             
             self.status["current_match"] = f"Hand {hand_num}: {config_a['name']} vs {config_b['name']}"
-            self.status["progress"] = (hand_num / total_hands) * 100
+            self.status["hands_played"] = hand_num
+            self.status["active_players"] = len(active_iters)
             
             try:
                 if swap:
@@ -520,7 +526,6 @@ class JobManager:
                 self.broadcast({
                     'type': 'hand',
                     'hand_num': hand_num,
-                    'total_hands': total_hands,
                     'agent_a': config_a['name'],
                     'agent_b': config_b['name'],
                     'iter_a': iter_a,
@@ -546,6 +551,25 @@ class JobManager:
                 print(f"Error in hand {hand_num}: {e}")
                 self.broadcast({'type': 'error', 'message': str(e)})
         
+        # Tournament ended - broadcast winner if there is one
+        if len(active_iters) == 1:
+            winner_iter = list(active_iters)[0]
+            self.broadcast({
+                'type': 'tournament_winner',
+                'winner_iteration': winner_iter,
+                'winner_name': f'Iter_{winner_iter}',
+                'final_chips': results[winner_iter]['chips'],
+                'hands_played': hand_num
+            })
+            print(f"Tournament winner: Iter_{winner_iter} with {results[winner_iter]['chips']} chips after {hand_num} hands")
+        elif len(active_iters) == 0:
+            # Edge case: both eliminated simultaneously
+            self.broadcast({
+                'type': 'tournament_ended',
+                'reason': 'draw',
+                'hands_played': hand_num
+            })
+        
         # Final broadcasts
         self._broadcast_chip_update(results, chip_history, active_iters, final=True)
         self._broadcast_leaderboard(results, final=True)
@@ -559,7 +583,7 @@ class JobManager:
                 'chips': stats['chips'],
                 'eliminated': stats['eliminated'],
                 'eliminated_at_hand': stats['eliminated_at_hand'],
-                'history': chip_history[iter_num][-50:],  # Last 50 data points
+                'history': chip_history[iter_num],  # Full chip history
             }
         
         self.broadcast({
@@ -619,12 +643,11 @@ def get_config():
 
 @app.route('/api/start', methods=['POST'])
 def start_job():
-    """Start an evaluation job."""
-    data = request.json
-    hands = int(data.get('hands', 100))
+    """Start an evaluation job that plays until one player wins all chips."""
+    data = request.json or {}
     models_dir = data.get('models_dir', DEFAULT_MODELS_DIR)
     
-    success, msg = job_manager.start_job(hands, models_dir)
+    success, msg = job_manager.start_job(models_dir)
     return jsonify({'success': success, 'message': msg})
 
 

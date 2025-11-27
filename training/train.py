@@ -45,6 +45,7 @@ from ppo import PPOTrainer
 from model_agent import (
     ModelAgent, 
     RandomAgent,
+    HeuristicAgent,
     ACTION_MAP, 
     ACTION_NAMES, 
     BET_SIZE_MAP,
@@ -112,6 +113,10 @@ class RLTrainingSession:
         self.opponent_pool: List[Path] = []
         self.max_opponent_pool_size = 10  # Increased from 5 for more diversity
         
+        # Cache for loaded opponent models to avoid reloading
+        self._opponent_model_cache: Dict[str, PokerActorCritic] = {}
+        self._max_opponent_cache_size = 5  # Keep at most 5 models in memory
+        
         # TensorBoard writer
         self.writer = None
         if tensorboard_dir:
@@ -165,22 +170,46 @@ class RLTrainingSession:
             'encoder': encoder
         })
         
-        # Opponent agents
+        # Opponent agents with diverse opponent selection for better generalization
         for i in range(1, num_players):
             player_id = f'p{i}'
             
-            # Mix of random agents and self-play (current model)
-            # TODO: Implement loading past opponents from self.opponent_pool
-            # Currently we use the current model for self-play (which is effective for PPO)
-            if use_opponent_pool and random.random() < 0.5:
-                # Use current model as opponent (Self-Play)
+            # Opponent selection probabilities:
+            # - Past checkpoint: 30% (when pool available) - diverse self-play
+            # - Heuristic: 20% - strategic baseline  
+            # - Current model: 15% - immediate self-play
+            # - Random: 35% - exploration baseline
+            roll = random.random()
+            
+            if use_opponent_pool and self.opponent_pool and roll < 0.30:
+                # Use past checkpoint (30% of time when pool available)
+                checkpoint_path = random.choice(self.opponent_pool)
+                opponent_model = self._load_opponent_model(checkpoint_path)
+                if opponent_model is not None:
+                    agents.append({
+                        'id': player_id,
+                        'type': 'past_model',
+                        'model': opponent_model,
+                        'encoder': RLStateEncoder()
+                    })
+                else:
+                    # Fallback to random if loading failed
+                    agents.append({'id': player_id, 'type': 'random'})
+            elif use_opponent_pool and roll < 0.50:
+                # Use heuristic agent (20% of time)
+                agents.append({
+                    'id': player_id,
+                    'type': 'heuristic'
+                })
+            elif use_opponent_pool and roll < 0.65:
+                # Use current model as opponent (15% of time)
                 agents.append({
                     'id': player_id,
                     'type': 'model',
-                    'encoder': RLStateEncoder()  # New encoder for opponent
+                    'encoder': RLStateEncoder()
                 })
             else:
-                # Use random agent
+                # Use random agent (35% of time, or 100% if not using pool)
                 agents.append({
                     'id': player_id,
                     'type': 'random'
@@ -250,8 +279,8 @@ class RLTrainingSession:
                 break
             
             # Select action based on agent type
-            if current_agent['type'] == 'model' or (current_player_id == main_player_id):
-                # Use current model
+            if current_player_id == main_player_id:
+                # Main agent always uses current model with trajectory tracking
                 state_tensor = encoder.encode_state(state_dict).unsqueeze(0).to(self.device)
                 legal_mask = self._create_legal_actions_mask(legal_actions)
                 
@@ -261,33 +290,65 @@ class RLTrainingSession:
                     
                     if deterministic:
                         action_idx = torch.argmax(action_probs.squeeze(0)).item()
-                        # Log prob is not well-defined for deterministic, but we can just take the log prob of the action
                         log_prob = F.log_softmax(action_logits, dim=-1)[0, action_idx]
                     else:
                         action_idx = torch.multinomial(action_probs.squeeze(0), 1).item()
                         log_prob = F.log_softmax(action_logits, dim=-1)[0, action_idx]
                 
-                # Store trajectory data (only for main agent)
-                if current_player_id == main_player_id:
-                    episode['states'].append(state_tensor.squeeze(0).cpu())
-                    episode['actions'].append(action_idx)
-                    episode['log_probs'].append(log_prob.cpu())
-                    episode['values'].append(value.squeeze().cpu())
-                    episode['legal_actions_masks'].append(legal_mask.squeeze(0).cpu())
-                    episode['dones'].append(0)  # Will set last one to 1
+                # Store trajectory data for main agent
+                episode['states'].append(state_tensor.squeeze(0).cpu())
+                episode['actions'].append(action_idx)
+                episode['log_probs'].append(log_prob.cpu())
+                episode['values'].append(value.squeeze().cpu())
+                episode['legal_actions_masks'].append(legal_mask.squeeze(0).cpu())
+                episode['dones'].append(0)  # Will set last one to 1
+                
+                action_label = self._idx_to_action_label(action_idx)
+                action_type, amount = self._convert_action(action_label, state_dict)
+                
+            elif current_agent['type'] == 'heuristic':
+                # Use HeuristicAgent for action selection
+                heuristic = HeuristicAgent(current_player_id, "Heuristic")
+                action_type, amount, action_label = heuristic.select_action(state_dict, legal_actions)
+                
+            elif current_agent['type'] == 'past_model':
+                # Use past checkpoint model for action selection
+                opponent_model = current_agent['model']
+                opponent_encoder = current_agent['encoder']
+                state_tensor = opponent_encoder.encode_state(state_dict).unsqueeze(0).to(self.device)
+                legal_mask = self._create_legal_actions_mask(legal_actions)
+                
+                with torch.no_grad():
+                    action_logits, _ = opponent_model(state_tensor, legal_mask)
+                    action_probs = F.softmax(action_logits, dim=-1)
+                    action_idx = torch.multinomial(action_probs.squeeze(0), 1).item()
+                
+                action_label = self._idx_to_action_label(action_idx)
+                action_type, amount = self._convert_action(action_label, state_dict)
+                
+            elif current_agent['type'] == 'model':
+                # Opponent using current model (self-play)
+                opponent_encoder = current_agent['encoder']
+                state_tensor = opponent_encoder.encode_state(state_dict).unsqueeze(0).to(self.device)
+                legal_mask = self._create_legal_actions_mask(legal_actions)
+                
+                with torch.no_grad():
+                    action_logits, _ = self.model(state_tensor, legal_mask)
+                    action_probs = F.softmax(action_logits, dim=-1)
+                    action_idx = torch.multinomial(action_probs.squeeze(0), 1).item()
                 
                 action_label = self._idx_to_action_label(action_idx)
                 action_type, amount = self._convert_action(action_label, state_dict)
                 
             else:
-                # Random agent
+                # Random agent (default)
                 action_type, amount, action_label = self._random_action(legal_actions, state_dict)
             
             # Observe action for all agents' encoders
             stage = state_dict.get('stage', 'Preflop')
             pot = state_dict.get('pot', 0)
             for agent in agents:
-                if agent['type'] == 'model' and 'encoder' in agent:
+                if agent['type'] in ('model', 'past_model') and 'encoder' in agent:
                     agent['encoder'].add_action(current_player_id, action_type, amount, pot, stage)
             
             # Apply action
@@ -436,6 +497,262 @@ class RLTrainingSession:
             'win_rate': win_rate,
             'bb_per_100': bb_per_100
         }
+
+    def evaluate_vs_heuristic(self, num_episodes: int = 50) -> Dict[str, float]:
+        """
+        Evaluate current model against HeuristicAgent.
+        
+        Args:
+            num_episodes: Number of episodes to play
+            
+        Returns:
+            Dictionary of evaluation metrics
+        """
+        if self.log_level >= 1:
+            print(f"\n📊 Evaluating vs Heuristic ({num_episodes} episodes)...")
+            
+        wins = 0
+        total_reward_bb = 0
+        total_episodes = 0
+        
+        # Track action counts for evaluation
+        eval_action_counts = {name: 0 for name in ACTION_NAMES}
+        
+        # Run evaluation episodes
+        max_workers = min(num_episodes, 10)
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Use a special method to collect episodes vs heuristic
+            futures = [
+                executor.submit(self._collect_episode_vs_heuristic, deterministic=True)
+                for _ in range(num_episodes)
+            ]
+            
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    episode = future.result()
+                    
+                    if not episode['success']:
+                        continue
+                        
+                    total_episodes += 1
+                    
+                    # Update eval action counts
+                    for act_idx in episode['actions']:
+                        eval_action_counts[ACTION_NAMES[act_idx.item()]] += 1
+                    
+                    # Check if won (profit > 0)
+                    main_reward = episode['main_reward']
+                    
+                    # Calculate raw profit in chips
+                    starting_chips = self.game_config['startingChips']
+                    raw_profit = main_reward * starting_chips
+                    
+                    # Convert to Big Blinds
+                    big_blind = self.game_config['bigBlind']
+                    bb_profit = raw_profit / big_blind
+                    total_reward_bb += bb_profit
+                    
+                    if raw_profit > 0:
+                        wins += 1
+                        
+                except Exception as e:
+                    print(f"⚠️  Error in heuristic evaluation episode: {e}")
+        
+        if total_episodes == 0:
+            return {}
+            
+        win_rate = wins / total_episodes
+        avg_bb_per_hand = total_reward_bb / total_episodes
+        bb_per_100 = avg_bb_per_hand * 100
+        
+        if self.log_level >= 1:
+            print(f"  Win Rate: {win_rate:.2%}")
+            print(f"  BB/100: {bb_per_100:.2f}")
+            
+            # Print action distribution for evaluation
+            total_eval_actions = sum(eval_action_counts.values())
+            if total_eval_actions > 0:
+                print("  Eval Action Distribution:")
+                grouped_counts = {'fold': 0, 'check': 0, 'call': 0, 'bet': 0, 'raise': 0, 'all_in': 0}
+                for name, count in eval_action_counts.items():
+                    if name in grouped_counts:
+                        grouped_counts[name] += count
+                    elif name.startswith('bet_'):
+                        grouped_counts['bet'] += count
+                    elif name.startswith('raise_'):
+                        grouped_counts['raise'] += count
+                
+                for act in ['fold', 'check', 'call', 'bet', 'raise', 'all_in']:
+                    count = grouped_counts[act]
+                    pct = count / total_eval_actions
+                    print(f"    {act.ljust(8)}: {pct:.1%} ({count})")
+            
+        # Log to TensorBoard
+        if self.writer:
+            iteration = self.stats['iteration']
+            self.writer.add_scalar('Evaluation/WinRate_vs_Heuristic', win_rate, iteration)
+            self.writer.add_scalar('Evaluation/BB100_vs_Heuristic', bb_per_100, iteration)
+            
+        return {
+            'win_rate': win_rate,
+            'bb_per_100': bb_per_100
+        }
+    
+    def _collect_episode_vs_heuristic(self, deterministic: bool = True) -> Dict[str, Any]:
+        """
+        Collect one episode specifically against HeuristicAgent.
+        Similar to collect_episode but forces heuristic opponent.
+        """
+        # Create encoder for this episode
+        encoder = RLStateEncoder()
+        
+        # Create agents - main agent vs heuristic
+        main_player_id = 'p0'
+        agents = [
+            {'id': main_player_id, 'type': 'model', 'encoder': encoder},
+            {'id': 'p1', 'type': 'heuristic'}
+        ]
+        
+        # Initialize game history
+        history = []
+        for agent in agents:
+            history.append({
+                'type': 'addPlayer',
+                'playerId': agent['id'],
+                'playerName': f"Player_{agent['id']}"
+            })
+        
+        # Get initial state
+        response = self._call_api(history)
+        if not response['success']:
+            return {'states': [], 'actions': [], 'rewards': {}, 'success': False}
+        
+        game_state = response['gameState']
+        
+        # Track episode data
+        episode = {
+            'states': [],
+            'actions': [],
+            'log_probs': [],
+            'values': [],
+            'rewards': {},
+            'legal_actions_masks': [],
+            'dones': [],
+            'success': True
+        }
+        
+        # Main game loop
+        max_steps = 1000
+        step = 0
+        terminal_stages = {'complete', 'showdown'}
+        
+        while step < max_steps:
+            step += 1
+            
+            current_stage = game_state.get('stage', '').lower()
+            if current_stage in terminal_stages:
+                break
+            
+            current_player_id = game_state.get('currentPlayerId')
+            if not current_player_id or current_player_id == 'none':
+                break
+            
+            # Find agent for current player
+            current_agent = None
+            for agent in agents:
+                if agent['id'] == current_player_id:
+                    current_agent = agent
+                    break
+            
+            if current_agent is None:
+                break
+            
+            # Extract state
+            state_dict = extract_state(game_state, current_player_id)
+            legal_actions = self._get_legal_actions(game_state)
+            
+            if not legal_actions:
+                break
+            
+            # Select action based on agent type
+            if current_player_id == main_player_id:
+                # Main agent uses current model
+                state_tensor = encoder.encode_state(state_dict).unsqueeze(0).to(self.device)
+                legal_mask = self._create_legal_actions_mask(legal_actions)
+                
+                with torch.no_grad():
+                    action_logits, value = self.model(state_tensor, legal_mask)
+                    action_probs = F.softmax(action_logits, dim=-1)
+                    
+                    if deterministic:
+                        action_idx = torch.argmax(action_probs.squeeze(0)).item()
+                        log_prob = F.log_softmax(action_logits, dim=-1)[0, action_idx]
+                    else:
+                        action_idx = torch.multinomial(action_probs.squeeze(0), 1).item()
+                        log_prob = F.log_softmax(action_logits, dim=-1)[0, action_idx]
+                
+                # Store trajectory data
+                episode['states'].append(state_tensor.squeeze(0).cpu())
+                episode['actions'].append(action_idx)
+                episode['log_probs'].append(log_prob.cpu())
+                episode['values'].append(value.squeeze().cpu())
+                episode['legal_actions_masks'].append(legal_mask.squeeze(0).cpu())
+                episode['dones'].append(0)
+                
+                action_label = self._idx_to_action_label(action_idx)
+                action_type, amount = self._convert_action(action_label, state_dict)
+            else:
+                # Heuristic opponent
+                heuristic = HeuristicAgent(current_player_id, "Heuristic")
+                action_type, amount, action_label = heuristic.select_action(state_dict, legal_actions)
+            
+            # Observe action for encoder
+            stage = state_dict.get('stage', 'Preflop')
+            pot = state_dict.get('pot', 0)
+            encoder.add_action(current_player_id, action_type, amount, pot, stage)
+            
+            # Apply action
+            history.append({
+                'type': 'playerAction',
+                'playerId': current_player_id,
+                'action': action_type,
+                'amount': amount
+            })
+            
+            # Get new state
+            response = self._call_api(history)
+            if not response['success']:
+                episode['success'] = False
+                break
+            
+            game_state = response['gameState']
+        
+        # Calculate rewards
+        initial_chips = self.game_config['startingChips']
+        
+        for player_data in game_state['players']:
+            player_id = player_data['id']
+            episode['rewards'][player_id] = player_data['chips'] - initial_chips
+        
+        # Mark last state as done
+        if episode['dones']:
+            episode['dones'][-1] = 1
+        
+        # Normalize rewards
+        main_reward = episode['rewards'].get(main_player_id, 0) / initial_chips
+        episode['main_reward'] = main_reward
+        
+        # Convert episode data to tensors
+        if episode['states']:
+            episode['states'] = torch.stack(episode['states'])
+            episode['actions'] = torch.tensor(episode['actions'], dtype=torch.long)
+            episode['log_probs'] = torch.stack(episode['log_probs'])
+            episode['values'] = torch.stack(episode['values'])
+            episode['legal_actions_masks'] = torch.stack(episode['legal_actions_masks'])
+            episode['dones'] = torch.tensor(episode['dones'], dtype=torch.float32)
+        
+        return episode
 
     def train_iteration(
         self,
@@ -606,8 +923,9 @@ class RLTrainingSession:
             verbose=(self.log_level >= 2)
         )
         
-        # Anneal entropy coefficient (decay to 0.001 minimum)
-        self.ppo_trainer.entropy_coef = max(0.001, self.ppo_trainer.entropy_coef * 0.999)
+        # Anneal entropy coefficient (slower decay to 0.005 minimum for better exploration)
+        # Changed from 0.999 decay to 0.9995 and minimum from 0.001 to 0.005
+        self.ppo_trainer.entropy_coef = max(0.005, self.ppo_trainer.entropy_coef * 0.9995)
         if self.writer:
              self.writer.add_scalar('PPO/EntropyCoef', self.ppo_trainer.entropy_coef, self.stats['iteration'])
         
@@ -680,6 +998,49 @@ class RLTrainingSession:
             self.opponent_pool.pop(0)
         
         self.opponent_pool.append(checkpoint_path)
+    
+    def _load_opponent_model(self, checkpoint_path: Path) -> PokerActorCritic:
+        """
+        Load a past checkpoint for use as opponent in self-play.
+        
+        Caches loaded models to avoid repeated disk reads.
+        """
+        path_str = str(checkpoint_path)
+        
+        # Check cache first
+        if path_str in self._opponent_model_cache:
+            return self._opponent_model_cache[path_str]
+        
+        # Load from disk
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+            
+            # Create model with same architecture as current model
+            model = create_actor_critic(
+                input_dim=self.model.input_dim,
+                hidden_dim=self.model.hidden_dim,
+                num_heads=self.model.num_heads,
+                num_layers=len(self.model.transformer.layers),
+                dropout=0.1,  # Default dropout
+                gradient_checkpointing=False  # Disable for inference
+            )
+            model.load_state_dict(checkpoint['model_state_dict'])
+            model.to(self.device)
+            model.eval()
+            
+            # Manage cache size
+            if len(self._opponent_model_cache) >= self._max_opponent_cache_size:
+                # Remove oldest entry
+                oldest_key = next(iter(self._opponent_model_cache))
+                del self._opponent_model_cache[oldest_key]
+            
+            self._opponent_model_cache[path_str] = model
+            return model
+            
+        except Exception as e:
+            if self.log_level >= 1:
+                print(f"⚠️  Failed to load opponent model {checkpoint_path}: {e}")
+            return None
     
     def _call_api(self, history: List[Dict]) -> Dict:
         """Call poker API server"""
@@ -875,6 +1236,7 @@ def main() -> int:
         value_loss_coef=args.value_loss_coef,
         ppo_epochs=args.ppo_epochs,
         mini_batch_size=args.mini_batch_size,
+        lr_schedule_steps=args.iterations,  # Align LR schedule with total training iterations
         device=device,
         accelerator=accelerator
     )
@@ -976,6 +1338,7 @@ def main() -> int:
         # Evaluate periodically
         if (iteration + 1) % args.eval_interval == 0:
             session.evaluate_vs_random(num_episodes=args.eval_episodes)
+            session.evaluate_vs_heuristic(num_episodes=args.eval_episodes)
     
     # Save final model
     session.save_checkpoint(name="final")

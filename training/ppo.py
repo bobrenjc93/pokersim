@@ -42,6 +42,7 @@ class PPOTrainer:
         ppo_epochs: int = 4,  # Number of PPO epochs per update
         mini_batch_size: int = 64,  # Mini-batch size for PPO
         target_kl: Optional[float] = 0.02,  # Early stopping KL threshold (relaxed for poker)
+        lr_schedule_steps: int = 5000,  # Total steps for LR scheduling (should match training iterations)
         device: torch.device = torch.device('cpu'),
         accelerator = None
     ):
@@ -81,9 +82,10 @@ class PPOTrainer:
             self.model, self.optimizer = self.accelerator.prepare(self.model, self.optimizer)
         
         # Learning rate scheduler (cosine annealing for smooth decay)
+        # T_max should match total training iterations for proper scheduling
         self.initial_lr = learning_rate
         self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer, T_max=1000, eta_min=learning_rate * 0.1
+            self.optimizer, T_max=lr_schedule_steps, eta_min=learning_rate * 0.1
         )
         
         # Training statistics
