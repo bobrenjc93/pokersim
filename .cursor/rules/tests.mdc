@@ -1,5 +1,0 @@
----
-alwaysApply: true
----
-
-Tests are run via the ./run_tests.sh shell script in the root of the repository. Anytime you add a test, make sure it is callable via the script. Also anytimes you make meaningful changes in the code, make sure to run all the tests with this script.

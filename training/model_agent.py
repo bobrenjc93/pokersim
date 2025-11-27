@@ -45,19 +45,6 @@ BET_SIZE_MAP = {
 }
 
 
-def calculate_bet_amount(
-    pot: int,
-    size_fraction: float,
-    min_amount: int,
-    max_amount: int
-) -> int:
-    """Calculate bet amount based on pot size and constraints"""
-    target = int(pot * size_fraction)
-    amount = max(min_amount, target)
-    amount = min(max_amount, amount)
-    return amount
-
-
 def convert_action_label(
     action_label: str,
     state: Dict[str, Any]
@@ -72,6 +59,8 @@ def convert_action_label(
     Returns:
         Tuple of (action_type, amount)
     """
+    player_chips = state.get('player_chips', 0)
+    
     # Simple actions
     if action_label in ['fold', 'check', 'call', 'all_in']:
         return action_label, 0
@@ -80,13 +69,17 @@ def convert_action_label(
     if action_label.startswith('bet_'):
         pot = state.get('pot', 0)
         min_bet = state.get('min_bet', state.get('big_blind', 20))
-        max_bet = state.get('player_chips', 0)
         
         # Get bet size fraction
         size_fraction = BET_SIZE_MAP.get(action_label, 0.5)
         
-        # Calculate amount
-        amount = calculate_bet_amount(pot, size_fraction, min_bet, max_bet)
+        # Calculate amount based on pot size
+        target_amount = int(pot * size_fraction) if pot > 0 else min_bet
+        amount = max(min_bet, target_amount)
+        
+        # If bet would use all or most of our chips, go all-in instead
+        if amount >= player_chips:
+            return 'all_in', 0
         
         return 'bet', amount
     
@@ -94,30 +87,27 @@ def convert_action_label(
     if action_label.startswith('raise_'):
         pot = state.get('pot', 0)
         player_bet = state.get('player_bet', 0)
-        player_chips = state.get('player_chips', 0)
         current_bet = state.get('current_bet', 0)
-        to_call = current_bet - player_bet
+        to_call = max(0, current_bet - player_bet)
+        min_raise = state.get('min_raise_total', state.get('big_blind', 20))
         
         # Get raise size fraction
         size_fraction = BET_SIZE_MAP.get(action_label, 0.5)
-        raise_size = int(pot * size_fraction)
+        raise_size = int(pot * size_fraction) if pot > 0 else min_raise
         
-        # The amount is: call + raise (this is ADDITIONAL chips to add)
-        # Total bet will be: player_bet + amount
+        # The amount is the additional chips to add (call + raise increment)
         amount = to_call + raise_size
         
         # Ensure we meet minimum raise requirement
-        # min_raise_total is the total chips needed (including call)
-        min_raise_total = state.get('min_raise_total', state.get('big_blind', 20))
-        if amount < min_raise_total:
-            amount = min_raise_total
+        if amount < min_raise:
+            amount = min_raise
         
-        # Cap at player's available chips
-        amount = min(amount, player_chips)
+        # If raise would use all or most of our chips, go all-in
+        if amount >= player_chips:
+            return 'all_in', 0
         
-        # CRITICAL FIX: If after capping we can't meet minimum raise, go all-in instead
-        # This prevents invalid raises that the API will reject
-        if amount < min_raise_total:
+        # If we can't afford the minimum raise, go all-in instead
+        if player_chips < min_raise:
             return 'all_in', 0
         
         return 'raise', amount
@@ -388,10 +378,6 @@ class ModelAgent:
     def _convert_action(self, action_label: str, state: Dict[str, Any]) -> Tuple[str, int]:
         """Wrapper for standalone function"""
         return convert_action_label(action_label, state)
-    
-    def _calculate_bet_amount(self, pot: int, size_fraction: float, min_amount: int, max_amount: int) -> int:
-        """Wrapper for standalone function"""
-        return calculate_bet_amount(pot, size_fraction, min_amount, max_amount)
 
 
 def load_model_agent(
@@ -477,7 +463,16 @@ class HeuristicAgent:
     def observe_action(self, player_id: str, action_type: str, amount: int, pot: int, stage: str):
         pass
         
-    def _get_hand_strength(self, hole_cards: List[Dict], community_cards: List[Dict]) -> float:
+    def _parse_card_rank(self, card) -> str:
+        """Parse card rank from either string format ('9H', 'TH') or dict format."""
+        if isinstance(card, str):
+            # String format: first char is rank (T for 10)
+            return card[0] if card else '2'
+        elif isinstance(card, dict):
+            return card.get('rank', '2')
+        return '2'
+    
+    def _get_hand_strength(self, hole_cards: List, community_cards: List) -> float:
         """
         Estimate hand strength (0.0 to 1.0).
         Simple proxy: pair check, high card, etc.
@@ -485,16 +480,16 @@ class HeuristicAgent:
         """
         # Placeholder for simple heuristic
         # Return random strength for now, biased by card ranks
-        if not hole_cards:
+        if not hole_cards or len(hole_cards) < 2:
             return 0.0
             
-        # Parse ranks
+        # Parse ranks - handles both string format ("9H") and dict format ({"rank": "9", "suit": "H"})
         rank_map = {'2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9, 
                    'T': 10, 'J': 11, 'Q': 12, 'K': 13, 'A': 14}
         
         ranks = []
         for c in hole_cards:
-            r = c.get('rank', '2')
+            r = self._parse_card_rank(c)
             ranks.append(rank_map.get(r, 2))
             
         h1, h2 = sorted(ranks, reverse=True)

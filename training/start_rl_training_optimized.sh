@@ -30,7 +30,7 @@ API_DIR="$(dirname "$SCRIPT_DIR")/api"
 
 # Training parameters (optimized for convergence)
 ITERATIONS=5000
-EPISODES_PER_ITER=2000    # Significantly increased for better variance reduction (was 100)
+EPISODES_PER_ITER=500    # Balanced for variance reduction vs speed (was 2000, now 500)
 PPO_EPOCHS=20            # Increased to extract more from data (was 10)
 MINI_BATCH_SIZE=512      # Standard batch size
 LEARNING_RATE=0.0002     # Slightly increased with larger batch size
@@ -41,7 +41,7 @@ NUM_PLAYERS=2            # Heads-up (simpler)
 SMALL_BLIND=10
 BIG_BLIND=20
 STARTING_CHIPS=1000
-SAVE_INTERVAL=100
+SAVE_INTERVAL=1
 
 # Model version from config
 if [ -z "${MODEL_VERSION:-}" ]; then

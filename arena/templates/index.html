@@ -1,0 +1,2125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Poker Arena</title>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --bg-primary: #0c0c0f;
+            --bg-secondary: #12131a;
+            --bg-tertiary: #191a24;
+            --bg-card: #14151f;
+            --bg-hover: #1c1d29;
+            --border-color: #2a2b3d;
+            --border-highlight: #3d3e56;
+            --text-primary: #f0f0f5;
+            --text-secondary: #a0a0b8;
+            --text-muted: #606078;
+            --accent-cyan: #00d4ff;
+            --accent-cyan-glow: rgba(0, 212, 255, 0.25);
+            --accent-emerald: #00ff9d;
+            --accent-emerald-glow: rgba(0, 255, 157, 0.25);
+            --accent-rose: #ff4d6d;
+            --accent-rose-glow: rgba(255, 77, 109, 0.25);
+            --accent-amber: #ffb800;
+            --accent-violet: #a855f7;
+            --gradient-main: linear-gradient(135deg, #00d4ff 0%, #a855f7 100%);
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Outfit', sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            background-image: 
+                radial-gradient(ellipse at 0% 0%, rgba(0, 212, 255, 0.06) 0%, transparent 40%),
+                radial-gradient(ellipse at 100% 100%, rgba(168, 85, 247, 0.06) 0%, transparent 40%),
+                linear-gradient(180deg, var(--bg-primary) 0%, #0a0a0d 100%);
+        }
+        
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: 1.5rem 2rem;
+        }
+        
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+        
+        .logo-icon {
+            width: 40px;
+            height: 40px;
+            background: var(--gradient-main);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.25rem;
+        }
+        
+        h1 {
+            font-size: 1.75rem;
+            font-weight: 800;
+            letter-spacing: -0.02em;
+        }
+        
+        .header-status {
+            display: flex;
+            align-items: center;
+            gap: 1.5rem;
+        }
+        
+        .device-badge {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+        }
+        
+        .device-badge .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--accent-emerald);
+            box-shadow: 0 0 8px var(--accent-emerald-glow);
+        }
+        
+        .connection-status {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+        
+        .connection-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--text-muted);
+            transition: all 0.3s;
+        }
+        
+        .connection-dot.connected {
+            background: var(--accent-emerald);
+            box-shadow: 0 0 8px var(--accent-emerald-glow);
+        }
+        
+        .main-layout {
+            display: grid;
+            grid-template-columns: 300px 1fr;
+            gap: 1.5rem;
+        }
+        
+        .sidebar {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+        
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+        
+        .card-header {
+            padding: 1rem 1.25rem;
+            border-bottom: 1px solid var(--border-color);
+            font-weight: 600;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--text-secondary);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        
+        .card-header-badge {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 0.7rem;
+            padding: 0.25rem 0.5rem;
+            background: var(--bg-tertiary);
+            border-radius: 4px;
+            color: var(--text-muted);
+        }
+        
+        .card-body {
+            padding: 1.25rem;
+        }
+        
+        .form-group {
+            margin-bottom: 1rem;
+        }
+        
+        .form-label {
+            display: block;
+            font-size: 0.75rem;
+            font-weight: 500;
+            color: var(--text-muted);
+            margin-bottom: 0.5rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        
+        .form-control {
+            width: 100%;
+            padding: 0.75rem 1rem;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 0.9rem;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+        
+        .form-control:focus {
+            outline: none;
+            border-color: var(--accent-cyan);
+            box-shadow: 0 0 0 3px var(--accent-cyan-glow);
+        }
+        
+        .btn-group {
+            display: flex;
+            gap: 0.75rem;
+            margin-top: 1.25rem;
+        }
+        
+        .btn {
+            flex: 1;
+            padding: 0.875rem 1rem;
+            border: none;
+            border-radius: 8px;
+            font-family: 'Outfit', sans-serif;
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .btn-primary {
+            background: var(--gradient-main);
+            color: white;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .btn-primary::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
+            transition: left 0.5s;
+        }
+        
+        .btn-primary:hover:not(:disabled)::before {
+            left: 100%;
+        }
+        
+        .btn-primary:hover:not(:disabled) {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 20px var(--accent-cyan-glow);
+        }
+        
+        .btn-danger {
+            background: transparent;
+            border: 1px solid var(--accent-rose);
+            color: var(--accent-rose);
+        }
+        
+        .btn-danger:hover:not(:disabled) {
+            background: var(--accent-rose-glow);
+        }
+        
+        .btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+        
+        .status-grid {
+            display: grid;
+            gap: 0.75rem;
+        }
+        
+        .status-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.5rem 0;
+        }
+        
+        .status-row:not(:last-child) {
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        .status-label {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        
+        .status-value {
+            font-family: 'IBM Plex Mono', monospace;
+            font-weight: 600;
+            font-size: 0.85rem;
+        }
+        
+        .status-value.running {
+            color: var(--accent-emerald);
+        }
+        
+        .status-value.idle {
+            color: var(--text-muted);
+        }
+        
+        .status-value.completed {
+            color: var(--accent-cyan);
+        }
+        
+        .status-value.error {
+            color: var(--accent-rose);
+        }
+        
+        .progress-container {
+            margin-top: 1rem;
+        }
+        
+        .progress-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 0.5rem;
+            font-size: 0.75rem;
+        }
+        
+        .progress-bar-wrapper {
+            background: var(--bg-tertiary);
+            border-radius: 6px;
+            height: 8px;
+            overflow: hidden;
+        }
+        
+        .progress-bar {
+            height: 100%;
+            background: var(--gradient-main);
+            border-radius: 6px;
+            transition: width 0.3s ease;
+            position: relative;
+        }
+        
+        .progress-bar::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.3) 50%, transparent 100%);
+            animation: shimmer 2s infinite;
+        }
+        
+        @keyframes shimmer {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(100%); }
+        }
+        
+        .main-content {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+        
+        .stats-row {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 1rem;
+        }
+        
+        .stat-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 1.25rem;
+            text-align: center;
+            transition: border-color 0.2s;
+        }
+        
+        .stat-card:hover {
+            border-color: var(--border-highlight);
+        }
+        
+        .stat-value {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 1.75rem;
+            font-weight: 700;
+            margin-bottom: 0.25rem;
+            background: var(--gradient-main);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .stat-value.positive {
+            background: var(--accent-emerald);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .stat-value.negative {
+            background: var(--accent-rose);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .stat-label {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
+        
+        .charts-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+        }
+        
+        .chart-container {
+            height: 280px;
+        }
+        
+        /* Prominent Chip Chart Styling */
+        .chip-chart-card {
+            background: linear-gradient(135deg, var(--bg-card) 0%, rgba(0, 212, 255, 0.05) 100%);
+            border: 2px solid var(--accent-cyan);
+            box-shadow: 0 0 30px var(--accent-cyan-glow);
+        }
+        
+        .chip-chart-card .card-header {
+            background: linear-gradient(90deg, rgba(0, 212, 255, 0.1) 0%, transparent 100%);
+            font-size: 0.95rem;
+        }
+        
+        .chip-chart-container {
+            height: 400px;
+        }
+        
+        .chip-legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+            margin-top: 1rem;
+            padding-top: 1rem;
+            border-top: 1px solid var(--border-color);
+        }
+        
+        .chip-legend-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 0.75rem;
+            padding: 0.4rem 0.6rem;
+            background: var(--bg-tertiary);
+            border-radius: 4px;
+            transition: opacity 0.2s;
+        }
+        
+        .chip-legend-item.eliminated {
+            opacity: 0.5;
+            text-decoration: line-through;
+        }
+        
+        .chip-legend-item .color-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+        
+        .chip-legend-item .chips {
+            color: var(--accent-amber);
+            font-weight: 600;
+        }
+        
+        .chip-legend-item.eliminated .chips {
+            color: var(--accent-rose);
+        }
+        
+        .bottom-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+        }
+        
+        .leaderboard-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.8rem;
+        }
+        
+        .leaderboard-table th {
+            text-align: left;
+            padding: 0.75rem 1rem;
+            background: var(--bg-tertiary);
+            color: var(--text-muted);
+            font-weight: 600;
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            position: sticky;
+            top: 0;
+        }
+        
+        .leaderboard-table th:first-child {
+            border-radius: 6px 0 0 0;
+        }
+        
+        .leaderboard-table th:last-child {
+            border-radius: 0 6px 0 0;
+        }
+        
+        .leaderboard-table td {
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--border-color);
+            font-family: 'IBM Plex Mono', monospace;
+        }
+        
+        .leaderboard-table tr:hover td {
+            background: var(--bg-hover);
+        }
+        
+        .rank-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 28px;
+            height: 28px;
+            border-radius: 6px;
+            font-weight: 700;
+            font-size: 0.85rem;
+        }
+        
+        .rank-1 {
+            background: linear-gradient(135deg, #ffd700, #ffb800);
+            color: #1a1a1a;
+        }
+        
+        .rank-2 {
+            background: linear-gradient(135deg, #c0c0c0, #a0a0a0);
+            color: #1a1a1a;
+        }
+        
+        .rank-3 {
+            background: linear-gradient(135deg, #cd7f32, #a0522d);
+            color: white;
+        }
+        
+        .rank-other {
+            background: var(--bg-tertiary);
+            color: var(--text-muted);
+        }
+        
+        .badge {
+            display: inline-block;
+            padding: 0.25rem 0.6rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        
+        .badge-positive {
+            background: var(--accent-emerald-glow);
+            color: var(--accent-emerald);
+        }
+        
+        .badge-negative {
+            background: var(--accent-rose-glow);
+            color: var(--accent-rose);
+        }
+        
+        .badge-neutral {
+            background: var(--bg-tertiary);
+            color: var(--text-muted);
+        }
+        
+        .table-container {
+            max-height: 340px;
+            overflow-y: auto;
+        }
+        
+        .table-container::-webkit-scrollbar {
+            width: 6px;
+        }
+        
+        .table-container::-webkit-scrollbar-track {
+            background: var(--bg-tertiary);
+            border-radius: 3px;
+        }
+        
+        .table-container::-webkit-scrollbar-thumb {
+            background: var(--border-color);
+            border-radius: 3px;
+        }
+        
+        .hands-feed {
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+            max-height: 340px;
+            overflow-y: auto;
+        }
+        
+        .hands-feed::-webkit-scrollbar {
+            width: 6px;
+        }
+        
+        .hands-feed::-webkit-scrollbar-track {
+            background: var(--bg-tertiary);
+            border-radius: 3px;
+        }
+        
+        .hands-feed::-webkit-scrollbar-thumb {
+            background: var(--border-color);
+            border-radius: 3px;
+        }
+        
+        .hand-item {
+            display: grid;
+            grid-template-columns: 60px 1fr 80px;
+            align-items: center;
+            gap: 1rem;
+            padding: 0.6rem 0.8rem;
+            background: var(--bg-tertiary);
+            border-radius: 6px;
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 0.8rem;
+            animation: slideIn 0.15s ease;
+        }
+        
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-5px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        .hand-num {
+            color: var(--text-muted);
+            font-size: 0.75rem;
+        }
+        
+        .hand-matchup {
+            color: var(--text-secondary);
+            font-size: 0.75rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        
+        .hand-result {
+            text-align: right;
+            font-weight: 600;
+        }
+        
+        .hand-result.positive {
+            color: var(--accent-emerald);
+        }
+        
+        .hand-result.negative {
+            color: var(--accent-rose);
+        }
+        
+        .hand-result.neutral {
+            color: var(--text-muted);
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 3rem;
+            color: var(--text-muted);
+        }
+        
+        .empty-state-icon {
+            font-size: 2.5rem;
+            margin-bottom: 0.75rem;
+            opacity: 0.5;
+        }
+        
+        .empty-state p {
+            font-size: 0.85rem;
+        }
+        
+        /* Hand Detail Modal */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.8);
+            backdrop-filter: blur(4px);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.2s, visibility 0.2s;
+        }
+        
+        .modal-overlay.active {
+            opacity: 1;
+            visibility: visible;
+        }
+        
+        .modal {
+            background: var(--bg-card);
+            border: 1px solid var(--border-highlight);
+            border-radius: 16px;
+            width: 90%;
+            max-width: 700px;
+            max-height: 85vh;
+            overflow: hidden;
+            transform: scale(0.95);
+            transition: transform 0.2s;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+        }
+        
+        .modal-overlay.active .modal {
+            transform: scale(1);
+        }
+        
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1.25rem 1.5rem;
+            border-bottom: 1px solid var(--border-color);
+            background: var(--bg-tertiary);
+        }
+        
+        .modal-title {
+            font-size: 1.1rem;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+        
+        .modal-close {
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            font-size: 1.5rem;
+            cursor: pointer;
+            padding: 0.25rem;
+            line-height: 1;
+            transition: color 0.2s;
+        }
+        
+        .modal-close:hover {
+            color: var(--text-primary);
+        }
+        
+        .modal-body {
+            padding: 1.5rem;
+            overflow-y: auto;
+            max-height: calc(85vh - 70px);
+        }
+        
+        /* Hand Replay Sections */
+        .hand-section {
+            margin-bottom: 1.5rem;
+        }
+        
+        .hand-section:last-child {
+            margin-bottom: 0;
+        }
+        
+        .hand-section-title {
+            font-size: 0.7rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            margin-bottom: 0.75rem;
+        }
+        
+        /* Player Cards Display */
+        .players-cards {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+        }
+        
+        .player-card-box {
+            background: var(--bg-tertiary);
+            border-radius: 10px;
+            padding: 1rem;
+            border: 1px solid var(--border-color);
+        }
+        
+        .player-card-box.winner {
+            border-color: var(--accent-emerald);
+            box-shadow: 0 0 15px var(--accent-emerald-glow);
+        }
+        
+        .player-card-box.loser {
+            border-color: var(--accent-rose);
+            opacity: 0.8;
+        }
+        
+        .player-name {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.5rem;
+        }
+        
+        .player-cards {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 0.75rem;
+        }
+        
+        .playing-card {
+            width: 48px;
+            height: 68px;
+            background: linear-gradient(135deg, #fff 0%, #f0f0f0 100%);
+            border-radius: 6px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            font-family: 'IBM Plex Mono', monospace;
+            font-weight: 700;
+            font-size: 1.1rem;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+            color: #1a1a1a;
+        }
+        
+        .playing-card.hearts, .playing-card.diamonds {
+            color: #dc2626;
+        }
+        
+        .playing-card.spades, .playing-card.clubs {
+            color: #1a1a1a;
+        }
+        
+        .card-rank {
+            line-height: 1;
+        }
+        
+        .card-suit {
+            font-size: 1rem;
+            line-height: 1;
+        }
+        
+        .player-result {
+            font-family: 'IBM Plex Mono', monospace;
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
+        
+        .player-result.positive {
+            color: var(--accent-emerald);
+        }
+        
+        .player-result.negative {
+            color: var(--accent-rose);
+        }
+        
+        /* Community Cards */
+        .community-cards {
+            display: flex;
+            gap: 0.5rem;
+            justify-content: center;
+            padding: 1rem;
+            background: var(--bg-tertiary);
+            border-radius: 10px;
+        }
+        
+        .community-cards .playing-card {
+            width: 52px;
+            height: 72px;
+        }
+        
+        /* Action Timeline */
+        .action-timeline {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+        
+        .action-item {
+            display: grid;
+            grid-template-columns: 100px 1fr 80px;
+            align-items: center;
+            gap: 1rem;
+            padding: 0.6rem 0.8rem;
+            background: var(--bg-tertiary);
+            border-radius: 6px;
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 0.8rem;
+        }
+        
+        .action-stage {
+            color: var(--accent-cyan);
+            font-size: 0.7rem;
+            text-transform: uppercase;
+        }
+        
+        .action-desc {
+            color: var(--text-secondary);
+        }
+        
+        .action-desc .agent-name {
+            color: var(--text-primary);
+            font-weight: 600;
+        }
+        
+        .action-amount {
+            text-align: right;
+            color: var(--accent-amber);
+            font-weight: 600;
+        }
+        
+        /* Final Pot */
+        .final-pot {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 1rem;
+            background: linear-gradient(135deg, var(--bg-tertiary) 0%, var(--bg-secondary) 100%);
+            border-radius: 10px;
+            border: 1px solid var(--border-color);
+        }
+        
+        .pot-label {
+            color: var(--text-muted);
+            font-size: 0.75rem;
+            text-transform: uppercase;
+        }
+        
+        .pot-value {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 1.25rem;
+            font-weight: 700;
+            color: var(--accent-amber);
+        }
+        
+        /* Clickable Hand Item */
+        .hand-item {
+            cursor: pointer;
+            transition: background 0.15s, transform 0.15s;
+        }
+        
+        .hand-item:hover {
+            background: var(--bg-hover);
+            transform: translateX(4px);
+        }
+        
+        .hand-item:active {
+            transform: translateX(2px);
+        }
+        
+        .hand-item .view-hint {
+            font-size: 0.65rem;
+            color: var(--text-muted);
+            opacity: 0;
+            transition: opacity 0.15s;
+        }
+        
+        .hand-item:hover .view-hint {
+            opacity: 1;
+        }
+        
+        .tournament-info {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            padding: 0.75rem 1rem;
+            background: var(--bg-tertiary);
+            border-radius: 8px;
+            margin-bottom: 1rem;
+        }
+        
+        .tournament-info-item {
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+        }
+        
+        .tournament-info-label {
+            font-size: 0.65rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        
+        .tournament-info-value {
+            font-family: 'IBM Plex Mono', monospace;
+            font-weight: 600;
+            font-size: 0.9rem;
+            color: var(--accent-cyan);
+        }
+        
+        @media (max-width: 1200px) {
+            .main-layout {
+                grid-template-columns: 1fr;
+            }
+            
+            .stats-row {
+                grid-template-columns: repeat(4, 1fr);
+            }
+            
+            .charts-row,
+            .bottom-row {
+                grid-template-columns: 1fr;
+            }
+        }
+        
+        @media (max-width: 768px) {
+            .stats-row {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            
+            header {
+                flex-direction: column;
+                gap: 1rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="logo">
+                <div class="logo-icon">♠</div>
+                <h1>Poker Arena</h1>
+            </div>
+            <div class="header-status">
+                <div class="device-badge">
+                    <span class="dot"></span>
+                    <span id="deviceDisplay">Detecting...</span>
+                </div>
+                <div class="connection-status">
+                    <span class="connection-dot" id="connectionDot"></span>
+                    <span id="connectionText">Connecting...</span>
+                </div>
+            </div>
+        </header>
+        
+        <div class="main-layout">
+            <aside class="sidebar">
+                <div class="card">
+                    <div class="card-header">
+                        Tournament Config
+                        <span class="card-header-badge">Random Pairing</span>
+                    </div>
+                    <div class="card-body">
+                        <form id="configForm">
+                            <div class="form-group">
+                                <label class="form-label">Total Hands to Play</label>
+                                <input type="number" class="form-control" id="hands" value="500" min="10" step="10">
+                            </div>
+                            <div class="btn-group">
+                                <button type="submit" class="btn btn-primary" id="startBtn">Start Tournament</button>
+                                <button type="button" class="btn btn-danger" id="stopBtn" disabled>Stop</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <div class="card-header">Status</div>
+                    <div class="card-body">
+                        <div class="status-grid">
+                            <div class="status-row">
+                                <span class="status-label">State</span>
+                                <span class="status-value idle" id="statusState">Idle</span>
+                            </div>
+                            <div class="status-row">
+                                <span class="status-label">Current Match</span>
+                                <span class="status-value" id="statusMatch" style="font-size: 0.75rem;">—</span>
+                            </div>
+                        </div>
+                        <div class="progress-container">
+                            <div class="progress-header">
+                                <span class="status-label">Progress</span>
+                                <span id="statusProgress">0%</span>
+                            </div>
+                            <div class="progress-bar-wrapper">
+                                <div id="progressBar" class="progress-bar" style="width: 0%"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <div class="card-header">Tournament Info</div>
+                    <div class="card-body">
+                        <div id="tournamentInfo" class="tournament-info" style="display: none;">
+                            <div class="tournament-info-item">
+                                <span class="tournament-info-label">Checkpoints</span>
+                                <span class="tournament-info-value" id="infoCheckpoints">—</span>
+                            </div>
+                            <div class="tournament-info-item">
+                                <span class="tournament-info-label">Total Hands</span>
+                                <span class="tournament-info-value" id="infoTotalHands">—</span>
+                            </div>
+                        </div>
+                        <div id="tournamentEmpty" class="empty-state" style="padding: 1.5rem;">
+                            <p style="font-size: 0.8rem;">Start a tournament to see info</p>
+                        </div>
+                    </div>
+                </div>
+            </aside>
+            
+            <main class="main-content">
+                <div class="stats-row">
+                    <div class="stat-card">
+                        <div class="stat-value" id="statCheckpoints">0</div>
+                        <div class="stat-label">Total Checkpoints</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="statActive" style="color: var(--accent-emerald)">0</div>
+                        <div class="stat-label">Still Active</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="statEliminated" style="color: var(--accent-rose)">0</div>
+                        <div class="stat-label">Eliminated</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="statHandsPlayed">0</div>
+                        <div class="stat-label">Hands Played</div>
+                    </div>
+                </div>
+                
+                <!-- PROMINENT: Chip Count Over Time Chart -->
+                <div class="card chip-chart-card">
+                    <div class="card-header">
+                        <span style="display: flex; align-items: center; gap: 0.5rem;">
+                            <span style="font-size: 1.2rem;">💰</span>
+                            Bankroll Survival — Chip Count Over Time
+                        </span>
+                        <span class="card-header-badge" id="chipChartBadge">Starting: 10,000 chips</span>
+                    </div>
+                    <div class="card-body">
+                        <div class="chip-chart-container">
+                            <canvas id="chipChart"></canvas>
+                        </div>
+                        <div class="chip-legend" id="chipLegend"></div>
+                    </div>
+                </div>
+                
+                <div class="charts-row">
+                    <div class="card">
+                        <div class="card-header">
+                            Performance by Training Iteration
+                            <span class="card-header-badge">BB/100</span>
+                        </div>
+                        <div class="card-body">
+                            <div class="chart-container">
+                                <canvas id="performanceChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="card">
+                        <div class="card-header">
+                            Win Rate by Iteration
+                            <span class="card-header-badge">%</span>
+                        </div>
+                        <div class="card-body">
+                            <div class="chart-container">
+                                <canvas id="winRateChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="bottom-row">
+                    <div class="card">
+                        <div class="card-header">
+                            Survival Leaderboard
+                            <span class="card-header-badge" id="leaderboardCount">0 checkpoints</span>
+                        </div>
+                        <div class="card-body" style="padding: 0;">
+                            <div class="table-container">
+                                <table class="leaderboard-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Rank</th>
+                                            <th>Iteration</th>
+                                            <th>Chips</th>
+                                            <th>Status</th>
+                                            <th>Win Rate</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="leaderboardBody">
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="card">
+                        <div class="card-header">
+                            Live Hand Feed
+                            <span class="card-header-badge" id="handFeedCount">0 hands</span>
+                        </div>
+                        <div class="card-body">
+                            <div class="hands-feed" id="handsFeed">
+                                <div class="empty-state">
+                                    <div class="empty-state-icon">🃏</div>
+                                    <p>Hands will stream here in real-time</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+    
+    <!-- Hand Detail Modal -->
+    <div class="modal-overlay" id="handModal">
+        <div class="modal">
+            <div class="modal-header">
+                <div class="modal-title">
+                    <span>🃏</span>
+                    <span id="modalTitle">Hand #1</span>
+                </div>
+                <button class="modal-close" onclick="closeHandModal()">&times;</button>
+            </div>
+            <div class="modal-body" id="modalBody">
+                <!-- Dynamic content -->
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Chart configurations
+        const chartColors = {
+            cyan: '#00d4ff',
+            emerald: '#00ff9d',
+            violet: '#a855f7',
+            amber: '#ffb800',
+            rose: '#ff4d6d'
+        };
+        
+        const chartOptions = {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: {
+                intersect: false,
+                mode: 'index'
+            },
+            plugins: {
+                legend: {
+                    display: true,
+                    position: 'top',
+                    labels: {
+                        color: '#a0a0b8',
+                        font: { size: 11, family: 'Outfit' },
+                        usePointStyle: true,
+                        pointStyle: 'circle',
+                        padding: 15
+                    }
+                },
+                tooltip: {
+                    backgroundColor: '#14151f',
+                    borderColor: '#2a2b3d',
+                    borderWidth: 1,
+                    titleColor: '#f0f0f5',
+                    bodyColor: '#a0a0b8',
+                    titleFont: { family: 'IBM Plex Mono', weight: '600' },
+                    bodyFont: { family: 'IBM Plex Mono' },
+                    padding: 12,
+                    cornerRadius: 8
+                }
+            },
+            scales: {
+                x: {
+                    title: { 
+                        display: true, 
+                        text: 'Training Iteration', 
+                        color: '#606078',
+                        font: { size: 11, family: 'Outfit' }
+                    },
+                    grid: { color: 'rgba(42, 43, 61, 0.5)', drawBorder: false },
+                    ticks: { color: '#a0a0b8', font: { family: 'IBM Plex Mono', size: 10 } }
+                },
+                y: {
+                    title: { 
+                        display: true, 
+                        text: 'BB/100', 
+                        color: '#606078',
+                        font: { size: 11, family: 'Outfit' }
+                    },
+                    grid: { color: 'rgba(42, 43, 61, 0.5)', drawBorder: false },
+                    ticks: { color: '#a0a0b8', font: { family: 'IBM Plex Mono', size: 10 } }
+                }
+            }
+        };
+        
+        // Performance Chart (BB/100)
+        const perfCtx = document.getElementById('performanceChart').getContext('2d');
+        const performanceChart = new Chart(perfCtx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [
+                    {
+                        label: 'BB/100 vs All Checkpoints',
+                        data: [],
+                        borderColor: chartColors.cyan,
+                        backgroundColor: 'rgba(0, 212, 255, 0.1)',
+                        borderWidth: 2,
+                        fill: true,
+                        tension: 0.3,
+                        pointRadius: 4,
+                        pointBackgroundColor: chartColors.cyan,
+                        pointBorderColor: '#14151f',
+                        pointBorderWidth: 2
+                    }
+                ]
+            },
+            options: chartOptions
+        });
+        
+        // Win Rate Chart
+        const winRateCtx = document.getElementById('winRateChart').getContext('2d');
+        const winRateChart = new Chart(winRateCtx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [
+                    {
+                        label: 'Win Rate',
+                        data: [],
+                        borderColor: chartColors.violet,
+                        backgroundColor: 'rgba(168, 85, 247, 0.1)',
+                        borderWidth: 2,
+                        fill: true,
+                        tension: 0.3,
+                        pointRadius: 4,
+                        pointBackgroundColor: chartColors.violet,
+                        pointBorderColor: '#14151f',
+                        pointBorderWidth: 2
+                    }
+                ]
+            },
+            options: {
+                ...chartOptions,
+                scales: {
+                    ...chartOptions.scales,
+                    y: {
+                        ...chartOptions.scales.y,
+                        title: { display: true, text: 'Win Rate %', color: '#606078', font: { size: 11, family: 'Outfit' } },
+                        min: 0,
+                        max: 100
+                    }
+                }
+            }
+        });
+        
+        // PROMINENT: Chip Count Over Time Chart
+        const chipCtx = document.getElementById('chipChart').getContext('2d');
+        const chipChart = new Chart(chipCtx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: []
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: {
+                    intersect: false,
+                    mode: 'index'
+                },
+                plugins: {
+                    legend: {
+                        display: false  // We use custom legend below chart
+                    },
+                    tooltip: {
+                        backgroundColor: '#14151f',
+                        borderColor: '#2a2b3d',
+                        borderWidth: 1,
+                        titleColor: '#f0f0f5',
+                        bodyColor: '#a0a0b8',
+                        titleFont: { family: 'IBM Plex Mono', weight: '600' },
+                        bodyFont: { family: 'IBM Plex Mono' },
+                        padding: 12,
+                        cornerRadius: 8,
+                        callbacks: {
+                            label: function(context) {
+                                const label = context.dataset.label || '';
+                                const value = context.parsed.y;
+                                if (value === 0) return `${label}: ELIMINATED`;
+                                return `${label}: ${value.toLocaleString()} chips`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        title: { 
+                            display: true, 
+                            text: 'Hand Number', 
+                            color: '#606078',
+                            font: { size: 12, family: 'Outfit', weight: '600' }
+                        },
+                        grid: { color: 'rgba(42, 43, 61, 0.5)', drawBorder: false },
+                        ticks: { color: '#a0a0b8', font: { family: 'IBM Plex Mono', size: 10 } }
+                    },
+                    y: {
+                        title: { 
+                            display: true, 
+                            text: 'Chips', 
+                            color: '#606078',
+                            font: { size: 12, family: 'Outfit', weight: '600' }
+                        },
+                        grid: { color: 'rgba(42, 43, 61, 0.5)', drawBorder: false },
+                        ticks: { 
+                            color: '#a0a0b8', 
+                            font: { family: 'IBM Plex Mono', size: 10 },
+                            callback: function(value) {
+                                return value.toLocaleString();
+                            }
+                        },
+                        min: 0,
+                        suggestedMax: 15000
+                    }
+                },
+                animation: {
+                    duration: 0  // Disable animations for performance with live data
+                }
+            }
+        });
+        
+        // State
+        let eventSource = null;
+        let performanceData = {};
+        let leaderboard = [];
+        let totalHandsPlayed = 0;
+        let tournamentCheckpoints = 0;
+        let tournamentTotalHands = 0;
+        let handsHistory = [];  // Store full hand details for replay
+        
+        // Chip tracking state
+        let chipHistory = {};  // iter -> [{hand, chips}]
+        let activeIterations = new Set();
+        let eliminatedIterations = new Set();
+        const STARTING_CHIPS = 10000;
+        
+        // Color palette for iterations
+        const iterationColors = [
+            '#00d4ff', '#00ff9d', '#a855f7', '#ffb800', '#ff4d6d',
+            '#06b6d4', '#10b981', '#8b5cf6', '#f59e0b', '#ef4444',
+            '#14b8a6', '#22c55e', '#6366f1', '#eab308', '#f43f5e',
+            '#0ea5e9', '#84cc16', '#7c3aed', '#f97316', '#e11d48'
+        ];
+
+        // DOM elements
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const statusState = document.getElementById('statusState');
+        const statusMatch = document.getElementById('statusMatch');
+        const statusProgress = document.getElementById('statusProgress');
+        const progressBar = document.getElementById('progressBar');
+        const connectionDot = document.getElementById('connectionDot');
+        const connectionText = document.getElementById('connectionText');
+        const handsFeed = document.getElementById('handsFeed');
+        const leaderboardBody = document.getElementById('leaderboardBody');
+
+        function updateConnectionStatus(connected) {
+            connectionDot.classList.toggle('connected', connected);
+            connectionText.textContent = connected ? 'Connected' : 'Reconnecting...';
+        }
+
+        function updateStatus(status, match, progress) {
+            statusState.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+            statusState.className = 'status-value ' + status;
+            statusMatch.textContent = match || '—';
+            statusProgress.textContent = Math.round(progress) + '%';
+            progressBar.style.width = progress + '%';
+            
+            const isRunning = status === 'running';
+            startBtn.disabled = isRunning;
+            stopBtn.disabled = !isRunning;
+        }
+
+        function addHandToFeed(hand) {
+            const emptyState = handsFeed.querySelector('.empty-state');
+            if (emptyState) emptyState.remove();
+            
+            totalHandsPlayed++;
+            document.getElementById('statHandsPlayed').textContent = totalHandsPlayed.toLocaleString();
+            document.getElementById('handFeedCount').textContent = `${totalHandsPlayed} hands`;
+            
+            // Store hand data for replay
+            const handIndex = handsHistory.length;
+            handsHistory.push(hand);
+            
+            // Keep only last 100 hands in storage
+            if (handsHistory.length > 100) {
+                handsHistory.shift();
+            }
+            
+            const item = document.createElement('div');
+            item.className = 'hand-item';
+            item.dataset.handIndex = handIndex;
+            item.onclick = () => openHandModal(hand);
+            
+            // Show chip changes instead of BB
+            const chipChangeA = hand.chip_change_a || Math.round(hand.reward_a * 20);
+            const chipChangeB = hand.chip_change_b || Math.round(hand.reward_b * 20);
+            
+            // Determine who won and show their gain
+            let resultText, resultClass;
+            if (chipChangeA > 0) {
+                resultText = `${hand.agent_a}: +${chipChangeA}`;
+                resultClass = 'positive';
+            } else if (chipChangeB > 0) {
+                resultText = `${hand.agent_b}: +${chipChangeB}`;
+                resultClass = 'positive';
+            } else {
+                resultText = 'Tie';
+                resultClass = 'neutral';
+            }
+            
+            // Check for eliminations
+            let eliminationBadge = '';
+            if (hand.eliminated && hand.eliminated.length > 0) {
+                eliminationBadge = `<span style="color: var(--accent-rose); font-size: 0.7rem; margin-left: 0.5rem;">☠️ ${hand.eliminated.map(i => 'Iter_' + i).join(', ')}</span>`;
+            }
+            
+            item.innerHTML = `
+                <span class="hand-num">#${hand.hand_num}</span>
+                <span class="hand-matchup">${hand.agent_a || '?'} vs ${hand.agent_b || '?'}${eliminationBadge}</span>
+                <span class="hand-result ${resultClass}">${resultText}<span class="view-hint"> • click</span></span>
+            `;
+            
+            handsFeed.insertBefore(item, handsFeed.firstChild);
+            
+            // Keep only last 100 hands in DOM
+            while (handsFeed.children.length > 100) {
+                handsFeed.removeChild(handsFeed.lastChild);
+            }
+        }
+        
+        // Card rendering utilities
+        function parseCard(cardStr) {
+            if (!cardStr || cardStr.length < 2) return { rank: '?', suit: '?' };
+            const rank = cardStr.slice(0, -1);
+            const suitChar = cardStr.slice(-1).toLowerCase();
+            const suitMap = { 'h': 'hearts', 'd': 'diamonds', 'c': 'clubs', 's': 'spades' };
+            const suitSymbols = { 'h': '♥', 'd': '♦', 'c': '♣', 's': '♠' };
+            return {
+                rank: rank.toUpperCase(),
+                suit: suitMap[suitChar] || 'spades',
+                suitSymbol: suitSymbols[suitChar] || '♠'
+            };
+        }
+        
+        function renderCard(cardStr) {
+            const { rank, suit, suitSymbol } = parseCard(cardStr);
+            return `
+                <div class="playing-card ${suit}">
+                    <span class="card-rank">${rank}</span>
+                    <span class="card-suit">${suitSymbol}</span>
+                </div>
+            `;
+        }
+        
+        function renderCards(cards) {
+            if (!cards || cards.length === 0) return '<span style="color: var(--text-muted);">No cards</span>';
+            return cards.map(c => renderCard(c)).join('');
+        }
+        
+        // Modal functions
+        function openHandModal(hand) {
+            const modal = document.getElementById('handModal');
+            const modalTitle = document.getElementById('modalTitle');
+            const modalBody = document.getElementById('modalBody');
+            
+            modalTitle.textContent = `Hand #${hand.hand_num} — ${hand.agent_a} vs ${hand.agent_b}`;
+            
+            const details = hand.details;
+            if (!details) {
+                modalBody.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">📊</div>
+                        <p>Detailed hand history not available for this hand.</p>
+                    </div>
+                `;
+            } else {
+                // Determine winner
+                const winnerAgent = hand.reward_a > 0 ? 'a' : (hand.reward_b > 0 ? 'b' : null);
+                
+                // Build players section
+                const playersHtml = details.players ? details.players.map(p => {
+                    const isWinner = p.agent === winnerAgent;
+                    const isLoser = !isWinner && winnerAgent !== null;
+                    const resultClass = p.profit_bb > 0 ? 'positive' : (p.profit_bb < 0 ? 'negative' : '');
+                    const boxClass = isWinner ? 'winner' : (isLoser ? 'loser' : '');
+                    const profitText = p.profit_bb >= 0 ? `+${p.profit_bb.toFixed(1)}` : p.profit_bb.toFixed(1);
+                    
+                    return `
+                        <div class="player-card-box ${boxClass}">
+                            <div class="player-name">${p.name} ${isWinner ? '👑' : ''}</div>
+                            <div class="player-cards">
+                                ${renderCards(p.hole_cards || details.hole_cards[p.agent])}
+                            </div>
+                            <div class="player-result ${resultClass}">${profitText} BB</div>
+                        </div>
+                    `;
+                }).join('') : '';
+                
+                // Build community cards section
+                const communityHtml = details.community_cards && details.community_cards.length > 0 
+                    ? renderCards(details.community_cards)
+                    : '<span style="color: var(--text-muted);">Hand ended preflop</span>';
+                
+                // Build action timeline
+                const actionsHtml = details.actions ? details.actions.map(a => {
+                    const actionText = a.action.charAt(0).toUpperCase() + a.action.slice(1);
+                    const amountText = a.amount > 0 ? `${a.amount}` : '—';
+                    return `
+                        <div class="action-item">
+                            <span class="action-stage">${a.stage || 'Preflop'}</span>
+                            <span class="action-desc"><span class="agent-name">${a.agent_name}</span> ${actionText}</span>
+                            <span class="action-amount">${amountText}</span>
+                        </div>
+                    `;
+                }).join('') : '<div class="empty-state" style="padding: 1rem;"><p>No actions recorded</p></div>';
+                
+                modalBody.innerHTML = `
+                    <div class="hand-section">
+                        <div class="hand-section-title">Players & Hole Cards</div>
+                        <div class="players-cards">
+                            ${playersHtml}
+                        </div>
+                    </div>
+                    
+                    <div class="hand-section">
+                        <div class="hand-section-title">Community Cards</div>
+                        <div class="community-cards">
+                            ${communityHtml}
+                        </div>
+                    </div>
+                    
+                    <div class="hand-section">
+                        <div class="hand-section-title">Action Timeline</div>
+                        <div class="action-timeline">
+                            ${actionsHtml}
+                        </div>
+                    </div>
+                    
+                    <div class="hand-section">
+                        <div class="final-pot">
+                            <span class="pot-label">Final Pot:</span>
+                            <span class="pot-value">${details.final_pot || 0} chips</span>
+                        </div>
+                    </div>
+                `;
+            }
+            
+            modal.classList.add('active');
+            document.body.style.overflow = 'hidden';
+        }
+        
+        function closeHandModal() {
+            const modal = document.getElementById('handModal');
+            modal.classList.remove('active');
+            document.body.style.overflow = '';
+        }
+        
+        // Close modal on overlay click
+        document.getElementById('handModal').addEventListener('click', (e) => {
+            if (e.target.classList.contains('modal-overlay')) {
+                closeHandModal();
+            }
+        });
+        
+        // Close modal on Escape key
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                closeHandModal();
+            }
+        });
+
+        function updateLeaderboard() {
+            // Sort by chips (active first, then by chip count)
+            const sorted = Object.values(performanceData)
+                .sort((a, b) => {
+                    // Active iterations come first
+                    if (!a.eliminated && b.eliminated) return -1;
+                    if (a.eliminated && !b.eliminated) return 1;
+                    // Then sort by chips
+                    return (b.chips || 0) - (a.chips || 0);
+                });
+            
+            leaderboardBody.innerHTML = '';
+            
+            const activeCount = sorted.filter(d => !d.eliminated).length;
+            const eliminatedCount = sorted.filter(d => d.eliminated).length;
+            
+            document.getElementById('leaderboardCount').textContent = `${activeCount} active / ${eliminatedCount} eliminated`;
+            document.getElementById('statActive').textContent = activeCount;
+            document.getElementById('statEliminated').textContent = eliminatedCount;
+            
+            sorted.forEach((row, idx) => {
+                const rank = idx + 1;
+                const rankClass = row.eliminated ? 'rank-other' : 
+                    (rank === 1 ? 'rank-1' : (rank === 2 ? 'rank-2' : (rank === 3 ? 'rank-3' : 'rank-other')));
+                const chips = row.chips || 0;
+                const winRate = (row.win_rate || 0) * 100;
+                const isEliminated = row.eliminated;
+                
+                const statusHtml = isEliminated 
+                    ? `<span class="badge badge-negative">☠️ Out @ #${row.eliminated_at_hand || '?'}</span>`
+                    : `<span class="badge badge-positive">🏃 Active</span>`;
+                
+                const tr = document.createElement('tr');
+                tr.style.opacity = isEliminated ? '0.6' : '1';
+                tr.innerHTML = `
+                    <td><span class="rank-badge ${rankClass}">${rank}</span></td>
+                    <td>Iter ${row.iteration}</td>
+                    <td><span style="color: ${isEliminated ? 'var(--accent-rose)' : 'var(--accent-amber)'}; font-weight: 600;">${chips.toLocaleString()}</span></td>
+                    <td>${statusHtml}</td>
+                    <td>${winRate.toFixed(1)}%</td>
+                `;
+                leaderboardBody.appendChild(tr);
+            });
+        }
+        
+        function updateChipChart() {
+            // Get all iterations sorted by their number
+            const iterations = Object.keys(chipHistory).map(Number).sort((a, b) => a - b);
+            
+            if (iterations.length === 0) return;
+            
+            // Find max hand number across all histories
+            let maxHand = 0;
+            iterations.forEach(iter => {
+                const history = chipHistory[iter] || [];
+                history.forEach(([hand, chips]) => {
+                    if (hand > maxHand) maxHand = hand;
+                });
+            });
+            
+            // Create labels for x-axis (sample to avoid too many points)
+            const sampleRate = Math.max(1, Math.floor(maxHand / 100));
+            const labels = [];
+            for (let h = 0; h <= maxHand; h += sampleRate) {
+                labels.push(h);
+            }
+            if (labels[labels.length - 1] < maxHand) {
+                labels.push(maxHand);
+            }
+            
+            // Create datasets for each iteration
+            const datasets = iterations.map((iter, idx) => {
+                const color = iterationColors[idx % iterationColors.length];
+                const history = chipHistory[iter] || [];
+                const isEliminated = eliminatedIterations.has(iter);
+                
+                // Convert history to a map for easy lookup
+                const historyMap = new Map(history);
+                
+                // Get data points for each label
+                const data = labels.map(hand => {
+                    // Find the closest recorded hand <= this hand
+                    let closest = 0;
+                    for (const [h, c] of history) {
+                        if (h <= hand) closest = c;
+                        else break;
+                    }
+                    return closest;
+                });
+                
+                return {
+                    label: `Iter ${iter}`,
+                    data: data,
+                    borderColor: color,
+                    backgroundColor: 'transparent',
+                    borderWidth: isEliminated ? 1 : 2,
+                    borderDash: isEliminated ? [5, 5] : [],
+                    tension: 0.1,
+                    pointRadius: 0,
+                    pointHoverRadius: 4,
+                    pointBackgroundColor: color
+                };
+            });
+            
+            chipChart.data.labels = labels;
+            chipChart.data.datasets = datasets;
+            chipChart.update('none');
+            
+            // Update legend
+            updateChipLegend(iterations);
+        }
+        
+        function updateChipLegend(iterations) {
+            const legend = document.getElementById('chipLegend');
+            legend.innerHTML = '';
+            
+            iterations.forEach((iter, idx) => {
+                const color = iterationColors[idx % iterationColors.length];
+                const isEliminated = eliminatedIterations.has(iter);
+                const stats = performanceData[iter] || {};
+                const chips = stats.chips || 0;
+                
+                const item = document.createElement('div');
+                item.className = `chip-legend-item ${isEliminated ? 'eliminated' : ''}`;
+                item.innerHTML = `
+                    <span class="color-dot" style="background: ${color}"></span>
+                    <span>Iter ${iter}</span>
+                    <span class="chips">${isEliminated ? '☠️ 0' : chips.toLocaleString()}</span>
+                `;
+                legend.appendChild(item);
+            });
+        }
+
+        function updateCharts() {
+            const sortedData = Object.values(performanceData)
+                .filter(d => d.total_hands > 0)
+                .sort((a, b) => a.iteration - b.iteration);
+            
+            if (sortedData.length === 0) return;
+            
+            const labels = sortedData.map(r => r.iteration);
+            
+            // Performance chart - just overall BB/100 now
+            performanceChart.data.labels = labels;
+            performanceChart.data.datasets[0].data = sortedData.map(r => r.bb_100 || 0);
+            performanceChart.update('none');
+            
+            // Win rate chart
+            winRateChart.data.labels = labels;
+            winRateChart.data.datasets[0].data = sortedData.map(r => (r.win_rate || 0) * 100);
+            winRateChart.update('none');
+        }
+
+        function clearResults() {
+            performanceData = {};
+            leaderboard = [];
+            totalHandsPlayed = 0;
+            tournamentTotalHands = 0;
+            handsHistory = [];
+            
+            // Clear chip tracking state
+            chipHistory = {};
+            activeIterations = new Set();
+            eliminatedIterations = new Set();
+            
+            handsFeed.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-state-icon">🃏</div>
+                    <p>Hands will stream here in real-time</p>
+                </div>
+            `;
+            
+            leaderboardBody.innerHTML = '';
+            document.getElementById('chipLegend').innerHTML = '';
+            
+            document.getElementById('statCheckpoints').textContent = '0';
+            document.getElementById('statActive').textContent = '0';
+            document.getElementById('statEliminated').textContent = '0';
+            document.getElementById('statHandsPlayed').textContent = '0';
+            document.getElementById('leaderboardCount').textContent = '0 checkpoints';
+            document.getElementById('handFeedCount').textContent = '0 hands';
+            document.getElementById('tournamentInfo').style.display = 'none';
+            document.getElementById('tournamentEmpty').style.display = 'block';
+            
+            performanceChart.data.labels = [];
+            performanceChart.data.datasets.forEach(ds => ds.data = []);
+            performanceChart.update('none');
+            
+            winRateChart.data.labels = [];
+            winRateChart.data.datasets.forEach(ds => ds.data = []);
+            winRateChart.update('none');
+            
+            chipChart.data.labels = [];
+            chipChart.data.datasets = [];
+            chipChart.update('none');
+        }
+
+        function connectSSE() {
+            if (eventSource) eventSource.close();
+            
+            eventSource = new EventSource('/api/stream');
+            
+            eventSource.onopen = () => updateConnectionStatus(true);
+            
+            eventSource.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    handleEvent(data);
+                } catch (e) {
+                    console.error('Error parsing event:', e);
+                }
+            };
+            
+            eventSource.onerror = () => {
+                updateConnectionStatus(false);
+                setTimeout(connectSSE, 2000);
+            };
+        }
+
+        function handleEvent(data) {
+            switch (data.type) {
+                case 'status':
+                    updateStatus(data.status, data.current_match, data.progress || 0);
+                    break;
+                    
+                case 'job_started':
+                    clearResults();
+                    tournamentTotalHands = data.total_hands || 0;
+                    updateStatus('running', 'Initializing...', 0);
+                    break;
+                    
+                case 'job_stopped':
+                case 'job_completed':
+                    updateStatus(data.type === 'job_completed' ? 'completed' : 'stopped', 'Done', 100);
+                    break;
+                    
+                case 'tournament_started':
+                    tournamentCheckpoints = data.checkpoints || 0;
+                    tournamentTotalHands = data.total_hands || 0;
+                    
+                    document.getElementById('statCheckpoints').textContent = tournamentCheckpoints;
+                    document.getElementById('statActive').textContent = tournamentCheckpoints;
+                    document.getElementById('statEliminated').textContent = '0';
+                    document.getElementById('tournamentInfo').style.display = 'flex';
+                    document.getElementById('tournamentEmpty').style.display = 'none';
+                    document.getElementById('infoCheckpoints').textContent = tournamentCheckpoints;
+                    document.getElementById('infoTotalHands').textContent = tournamentTotalHands;
+                    
+                    // Initialize chip history for all iterations
+                    if (data.initial_chip_history) {
+                        Object.entries(data.initial_chip_history).forEach(([iter, chips]) => {
+                            const iterNum = parseInt(iter);
+                            chipHistory[iterNum] = [[0, chips]];
+                            activeIterations.add(iterNum);
+                            performanceData[iterNum] = {
+                                iteration: iterNum,
+                                chips: chips,
+                                eliminated: false,
+                                total_hands: 0,
+                                win_rate: 0
+                            };
+                        });
+                        updateChipChart();
+                    }
+                    
+                    updateStatus('running', `Bankroll Survival: ${tournamentCheckpoints} checkpoints`, 0);
+                    break;
+                    
+                case 'hand':
+                    addHandToFeed(data);
+                    // Update progress based on hands played
+                    const progress = (data.hand_num / data.total_hands) * 100;
+                    const activeText = `${data.active_count || '?'} active`;
+                    updateStatus('running', `Hand ${data.hand_num}/${data.total_hands} (${activeText}): ${data.agent_a} vs ${data.agent_b}`, progress);
+                    
+                    // Update performance data and chip history from hand stats
+                    if (data.stats_a) {
+                        performanceData[data.iter_a] = {
+                            iteration: data.iter_a,
+                            total_hands: data.stats_a.total_hands,
+                            win_rate: data.stats_a.win_rate,
+                            bb_100: data.stats_a.bb_100,
+                            chips: data.stats_a.chips,
+                            eliminated: data.stats_a.eliminated
+                        };
+                        
+                        // Update chip history
+                        if (!chipHistory[data.iter_a]) chipHistory[data.iter_a] = [];
+                        chipHistory[data.iter_a].push([data.hand_num, data.stats_a.chips]);
+                        
+                        if (data.stats_a.eliminated) {
+                            eliminatedIterations.add(data.iter_a);
+                            activeIterations.delete(data.iter_a);
+                        }
+                    }
+                    if (data.stats_b) {
+                        performanceData[data.iter_b] = {
+                            iteration: data.iter_b,
+                            total_hands: data.stats_b.total_hands,
+                            win_rate: data.stats_b.win_rate,
+                            bb_100: data.stats_b.bb_100,
+                            chips: data.stats_b.chips,
+                            eliminated: data.stats_b.eliminated
+                        };
+                        
+                        // Update chip history
+                        if (!chipHistory[data.iter_b]) chipHistory[data.iter_b] = [];
+                        chipHistory[data.iter_b].push([data.hand_num, data.stats_b.chips]);
+                        
+                        if (data.stats_b.eliminated) {
+                            eliminatedIterations.add(data.iter_b);
+                            activeIterations.delete(data.iter_b);
+                        }
+                    }
+                    
+                    // Handle eliminations
+                    if (data.eliminated && data.eliminated.length > 0) {
+                        data.eliminated.forEach(iter => {
+                            eliminatedIterations.add(iter);
+                            activeIterations.delete(iter);
+                        });
+                    }
+                    
+                    // Update active/eliminated counts
+                    document.getElementById('statActive').textContent = activeIterations.size;
+                    document.getElementById('statEliminated').textContent = eliminatedIterations.size;
+                    
+                    // Update chip chart every 5 hands for performance
+                    if (data.hand_num % 5 === 0) {
+                        updateChipChart();
+                    }
+                    break;
+                    
+                case 'chip_update':
+                    // Full chip update from server
+                    if (data.chip_data) {
+                        Object.entries(data.chip_data).forEach(([iter, info]) => {
+                            const iterNum = parseInt(iter);
+                            if (info.history) {
+                                chipHistory[iterNum] = info.history;
+                            }
+                            if (info.eliminated) {
+                                eliminatedIterations.add(iterNum);
+                                activeIterations.delete(iterNum);
+                            }
+                        });
+                        updateChipChart();
+                    }
+                    break;
+                    
+                case 'tournament_winner':
+                    // A single iteration has won (all others eliminated)
+                    updateStatus('completed', `🏆 Winner: Iter ${data.winner_iteration} with ${data.final_chips.toLocaleString()} chips!`, 100);
+                    updateChipChart();
+                    updateLeaderboard();
+                    break;
+                    
+                case 'leaderboard_update':
+                case 'tournament_performance':
+                    if (data.leaderboard) {
+                        data.leaderboard.forEach(row => {
+                            performanceData[row.iteration] = row;
+                            if (row.eliminated) {
+                                eliminatedIterations.add(row.iteration);
+                                activeIterations.delete(row.iteration);
+                            }
+                        });
+                        updateLeaderboard();
+                        updateCharts();
+                        updateChipChart();
+                    }
+                    break;
+                    
+                case 'error':
+                    updateStatus('error', data.message, 0);
+                    console.error('Tournament error:', data.message);
+                    break;
+                    
+                case 'keepalive':
+                    break;
+            }
+        }
+
+        // Fetch server config
+        async function fetchConfig() {
+            try {
+                const response = await fetch('/api/config');
+                const config = await response.json();
+                document.getElementById('deviceDisplay').textContent = config.device.toUpperCase();
+            } catch (e) {
+                console.error('Failed to fetch config:', e);
+            }
+        }
+
+        // Form submission
+        document.getElementById('configForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const hands = document.getElementById('hands').value;
+            clearResults();
+            
+            try {
+                const response = await fetch('/api/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ hands: parseInt(hands) })
+                });
+                
+                const result = await response.json();
+                if (!result.success) {
+                    alert(result.message);
+                }
+            } catch (e) {
+                console.error('Failed to start job:', e);
+            }
+        });
+
+        // Stop button
+        stopBtn.addEventListener('click', async () => {
+            try {
+                await fetch('/api/stop', { method: 'POST' });
+            } catch (e) {
+                console.error('Failed to stop job:', e);
+            }
+        });
+
+        // Initialize
+        fetchConfig();
+        connectSSE();
+    </script>
+</body>
+</html>

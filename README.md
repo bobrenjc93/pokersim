@@ -91,7 +91,8 @@ pokersim/
     ├── rl_state_encoder.py # State encoding
     └── start_rl_training_optimized.sh # Training script
 └── arena/                 # AI vs AI Evaluation Arena
-    ├── arena.py           # Arena script
+    ├── engine.py          # Core arena logic
+    └── server.py          # Web server with real-time UI
 ```
 
 ## Features
@@ -137,40 +138,22 @@ uv run python eval.py --model /path/to/model.pt --num-hands 100
 
 ### Advanced Evaluation (Arena)
 
-For more comprehensive evaluation, including head-to-head matches and tournaments:
+The Arena provides a real-time web interface for evaluating model checkpoints:
 
 ```bash
 cd arena
-uv run python arena.py --help
+uv run python server.py
 ```
 
-#### Arena Usage
+Open `http://localhost:5000` in your browser to access the evaluation UI.
 
-**1. Evaluate a model vs Random**
+#### Features
 
-```bash
-python arena.py --models-dir /path/to/checkpoints --mode vs-random --hands 100
-```
-
-**2. Evaluate progression (Ladder)**
-
-Plays each checkpoint against the previous one to track improvement.
-
-```bash
-python arena.py --models-dir /path/to/checkpoints --mode ladder
-```
-
-**Output**
-
-Results are saved to `arena_results/` as CSV files and plots.
-
-**Arguments**
-
-- `--models-dir`: Directory containing `.pt` checkpoint files.
-- `--output-dir`: Directory to save results (default: `arena_results`).
-- `--hands`: Number of hands to play per match (default: 1000).
-- `--device`: Device to use (cpu, cuda, mps).
-- `--mode`: `ladder` or `vs-random`.
+- **Real-time hand streaming** - Watch each hand play out live
+- **Live statistics** - Win rate, BB/100, and hand count update in real-time
+- **Round-robin tournaments** - All checkpoints play against each other
+- **Baseline comparisons** - Compare against Random and Heuristic agents
+- **Interactive charts** - Visualize performance progression over training
 
 ### Convergence Notes
 - **Short-term (<500 iters)**: Win rate fluctuates but avoids 0%.

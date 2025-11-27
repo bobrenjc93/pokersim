@@ -753,8 +753,8 @@ def main() -> int:
     # Training parameters - optimized for convergence
     parser.add_argument('--iterations', type=int, default=5000,
                        help='Number of training iterations (default: 5000)')
-    parser.add_argument('--episodes-per-iter', type=int, default=1000,
-                       help='Episodes per iteration (default: 1000, increased for stability)')
+    parser.add_argument('--episodes-per-iter', type=int, default=100,
+                       help='Episodes per iteration (default: 100)')
     parser.add_argument('--ppo-epochs', type=int, default=15,
                        help='PPO epochs per update (default: 15)')
     parser.add_argument('--mini-batch-size', type=int, default=128,

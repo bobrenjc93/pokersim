@@ -114,6 +114,20 @@ class PokerActorCritic(nn.Module):
             nn.Linear(hidden_dim // 2, num_actions)
         )
         
+        # Action space prior adjustment to balance probability mass
+        # fold(1), check(1), call(1), bet(9), raise(9), all_in(1)
+        # To get uniform "action type" probabilities, we need to adjust for slot counts
+        # Single-slot actions need +log(9) ≈ 2.2 boost relative to multi-slot actions
+        # This is a learnable parameter initialized to the theoretical balance
+        action_prior = torch.zeros(num_actions)
+        # Boost single-slot actions (fold=0, check=1, call=2, all_in=21)
+        single_slot_indices = [0, 1, 2, 21]
+        log_9 = 2.197  # log(9) 
+        for idx in single_slot_indices:
+            if idx < num_actions:
+                action_prior[idx] = log_9
+        self.register_buffer('action_prior', action_prior)
+        
         # Value head (critic) - outputs expected value
         self.value_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim // 2),
@@ -241,6 +255,10 @@ class PokerActorCritic(nn.Module):
         
         # Policy head - compute action logits
         action_logits = self.policy_head(pooled)  # (batch_size, num_actions)
+        
+        # Apply action prior to balance probability mass across action types
+        # This compensates for bet/raise having 9 slots vs fold/check/call having 1 slot
+        action_logits = action_logits + self.action_prior
         
         # Apply legal action mask if provided
         if legal_actions_mask is not None:
