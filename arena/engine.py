@@ -39,9 +39,9 @@ class Arena:
         # Game config (standard heads-up)
         self.game_config = {
             'num_players': 2,
-            'smallBlind': 10,
-            'bigBlind': 20,
-            'startingChips': 1000,
+            'smallBlind': 20,
+            'bigBlind': 40,
+            'startingChips': 4000,
             'minPlayers': 2,
             'maxPlayers': 2
         }

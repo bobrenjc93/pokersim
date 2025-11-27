@@ -329,8 +329,8 @@ class JobManager:
         """
         import random as rand
         
-        STARTING_CHIPS = 10000
-        BIG_BLIND = 20  # BB used for chip calculations
+        STARTING_CHIPS = 250000
+        BIG_BLIND = 40  # BB used for chip calculations
         
         total_checkpoints = len(sorted_cps)
         

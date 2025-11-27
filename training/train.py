@@ -111,11 +111,15 @@ class RLTrainingSession:
         
         # Opponent pool for self-play (stores past model versions)
         self.opponent_pool: List[Path] = []
-        self.max_opponent_pool_size = 10  # Increased from 5 for more diversity
+        self.max_opponent_pool_size = 30  # Increased for better diversity and plateau prevention
         
         # Cache for loaded opponent models to avoid reloading
         self._opponent_model_cache: Dict[str, PokerActorCritic] = {}
-        self._max_opponent_cache_size = 5  # Keep at most 5 models in memory
+        self._max_opponent_cache_size = 10  # Keep more models in memory for faster sampling
+        
+        # Track win rates against each opponent for prioritized sampling
+        self.opponent_win_rates: Dict[str, float] = {}  # checkpoint_path -> win_rate
+        self._opponent_game_counts: Dict[str, int] = {}  # checkpoint_path -> num_games
         
         # TensorBoard writer
         self.writer = None
@@ -137,6 +141,11 @@ class RLTrainingSession:
             'avg_value_estimate': deque(maxlen=100),
             'explained_variance_history': deque(maxlen=100)
         }
+        
+        # Plateau detection tracking
+        self._plateau_counter = 0  # How many iterations we've been in plateau
+        self._last_plateau_response_iter = 0  # Last iteration we responded to plateau
+        self._initial_entropy_coef = None  # Will be set from ppo_trainer
     
     def collect_episode(
         self,
@@ -174,42 +183,43 @@ class RLTrainingSession:
         for i in range(1, num_players):
             player_id = f'p{i}'
             
-            # Opponent selection probabilities:
-            # - Past checkpoint: 30% (when pool available) - diverse self-play
-            # - Heuristic: 20% - strategic baseline  
-            # - Current model: 15% - immediate self-play
-            # - Random: 35% - exploration baseline
+            # Opponent selection probabilities (optimized for self-play strength):
+            # - Past checkpoint: 50% (when pool available) - diverse self-play against history
+            # - Current model: 25% - immediate self-play for Nash equilibrium
+            # - Heuristic: 15% - strategic baseline  
+            # - Random: 10% - minimal exploration baseline
             roll = random.random()
             
-            if use_opponent_pool and self.opponent_pool and roll < 0.30:
-                # Use past checkpoint (30% of time when pool available)
-                checkpoint_path = random.choice(self.opponent_pool)
+            if use_opponent_pool and self.opponent_pool and roll < 0.50:
+                # Use past checkpoint (50% of time when pool available)
+                checkpoint_path = self._sample_opponent_checkpoint()
                 opponent_model = self._load_opponent_model(checkpoint_path)
                 if opponent_model is not None:
                     agents.append({
                         'id': player_id,
                         'type': 'past_model',
                         'model': opponent_model,
-                        'encoder': RLStateEncoder()
+                        'encoder': RLStateEncoder(),
+                        'checkpoint_path': str(checkpoint_path)  # Store for win rate tracking
                     })
                 else:
                     # Fallback to random if loading failed
                     agents.append({'id': player_id, 'type': 'random'})
-            elif use_opponent_pool and roll < 0.50:
-                # Use heuristic agent (20% of time)
-                agents.append({
-                    'id': player_id,
-                    'type': 'heuristic'
-                })
-            elif use_opponent_pool and roll < 0.65:
-                # Use current model as opponent (15% of time)
+            elif use_opponent_pool and roll < 0.75:
+                # Use current model as opponent (25% of time)
                 agents.append({
                     'id': player_id,
                     'type': 'model',
                     'encoder': RLStateEncoder()
                 })
+            elif use_opponent_pool and roll < 0.90:
+                # Use heuristic agent (15% of time)
+                agents.append({
+                    'id': player_id,
+                    'type': 'heuristic'
+                })
             else:
-                # Use random agent (35% of time, or 100% if not using pool)
+                # Use random agent (10% of time, or 100% if not using pool)
                 agents.append({
                     'id': player_id,
                     'type': 'random'
@@ -231,6 +241,21 @@ class RLTrainingSession:
         
         game_state = response['gameState']
         
+        # Determine position (out of position = acting first post-flop)
+        # In heads-up, the dealer (button) acts last post-flop
+        is_out_of_position = not game_state.get('players', [{}])[0].get('isDealer', False)
+        
+        # Track which opponent type and checkpoint we're facing for win rate tracking
+        opponent_type_faced = None
+        opponent_checkpoint_faced = None
+        for agent in agents:
+            if agent['id'] != main_player_id:
+                opponent_type_faced = agent.get('type')
+                if opponent_type_faced == 'past_model':
+                    # Store checkpoint path for prioritized sampling updates
+                    opponent_checkpoint_faced = agent.get('checkpoint_path', '')
+                break
+        
         # Track episode data
         episode = {
             'states': [],
@@ -240,8 +265,18 @@ class RLTrainingSession:
             'rewards': {},
             'legal_actions_masks': [],
             'dones': [],
-            'success': True
+            'success': True,
+            # Reward shaping tracking
+            'action_types': [],  # Track action types taken by main player
+            'folded_to_aggression': False,  # Did main player fold to bet/raise?
+            'won_uncontested': False,  # Did main player win without showdown?
+            'is_out_of_position': is_out_of_position,
+            'opponent_type': opponent_type_faced,
+            'opponent_checkpoint': opponent_checkpoint_faced,
         }
+        
+        # Track opponent aggression (bets/raises by opponents)
+        last_action_was_opponent_aggression = False
         
         # Main game loop
         max_steps = 1000
@@ -306,6 +341,13 @@ class RLTrainingSession:
                 action_label = self._idx_to_action_label(action_idx)
                 action_type, amount = self._convert_action(action_label, state_dict)
                 
+                # Track action types for reward shaping
+                episode['action_types'].append(action_type)
+                
+                # Check if main player folded to opponent aggression
+                if action_type == 'fold' and last_action_was_opponent_aggression:
+                    episode['folded_to_aggression'] = True
+                
             elif current_agent['type'] == 'heuristic':
                 # Use HeuristicAgent for action selection
                 heuristic = HeuristicAgent(current_player_id, "Heuristic")
@@ -344,6 +386,12 @@ class RLTrainingSession:
                 # Random agent (default)
                 action_type, amount, action_label = self._random_action(legal_actions, state_dict)
             
+            # Track opponent aggression for fold-to-aggression detection
+            if current_player_id != main_player_id:
+                last_action_was_opponent_aggression = action_type in ('bet', 'raise', 'all_in')
+            else:
+                last_action_was_opponent_aggression = False
+            
             # Observe action for all agents' encoders
             stage = state_dict.get('stage', 'Preflop')
             pot = state_dict.get('pot', 0)
@@ -375,6 +423,13 @@ class RLTrainingSession:
             player_id = player_data['id']
             final_chips[player_id] = player_data['chips']
             episode['rewards'][player_id] = final_chips[player_id] - initial_chips
+        
+        # Detect if pot was won uncontested (no showdown, opponent folded)
+        final_stage = game_state.get('stage', '').lower()
+        main_profit = episode['rewards'].get(main_player_id, 0)
+        if main_profit > 0 and final_stage == 'complete':
+            # Won without showdown - opponent folded
+            episode['won_uncontested'] = True
         
         # Mark last state as done
         if episode['dones']:
@@ -815,6 +870,22 @@ class RLTrainingSession:
                     self.stats['avg_episode_length'].append(len(episode['states']))
                     self.stats['win_rate'].append(1.0 if episode['main_reward'] > 0 else 0.0)
                     
+                    # Update opponent win rate tracking for prioritized sampling
+                    opponent_checkpoint = episode.get('opponent_checkpoint')
+                    if opponent_checkpoint and episode.get('opponent_type') == 'past_model':
+                        won = 1.0 if episode['main_reward'] > 0 else 0.0
+                        if opponent_checkpoint not in self._opponent_game_counts:
+                            self._opponent_game_counts[opponent_checkpoint] = 0
+                            self.opponent_win_rates[opponent_checkpoint] = 0.5  # Initial estimate
+                        
+                        # Update running average
+                        count = self._opponent_game_counts[opponent_checkpoint]
+                        old_win_rate = self.opponent_win_rates[opponent_checkpoint]
+                        # Exponential moving average with decay
+                        alpha = 0.1  # Learning rate for win rate estimate
+                        self.opponent_win_rates[opponent_checkpoint] = (1 - alpha) * old_win_rate + alpha * won
+                        self._opponent_game_counts[opponent_checkpoint] = count + 1
+                    
                     # Update action counts
                     for act_idx in episode['actions']:
                         action_counts[ACTION_NAMES[act_idx.item()]] += 1
@@ -837,12 +908,24 @@ class RLTrainingSession:
                     # Relax clipping to allow for > 1.0 wins in deep stack scenarios, but cap extreme values
                     normalized_reward = max(-2.0, min(5.0, normalized_reward))
                     
-                    # Add intermediate shaping rewards for better learning signal
-                    # Small reward for staying in the hand (engagement)
-                    # REMOVED: step_rewards[step_idx] = 0.01 - we want to encourage folding bad hands
-                    if num_steps > 1:
-                        for step_idx in range(num_steps - 1):
-                             step_rewards[step_idx] = 0.0
+                    # === REWARD SHAPING for better learning signal ===
+                    shaping_bonus = 0.0
+                    
+                    # 1. Bonus for winning pots uncontested (good bluffs/value bets that make opponent fold)
+                    if episode.get('won_uncontested', False) and normalized_reward > 0:
+                        shaping_bonus += 0.1  # Reward successful aggression
+                    
+                    # 2. Penalty for folding to aggression (being too passive/exploitable)
+                    if episode.get('folded_to_aggression', False):
+                        shaping_bonus -= 0.05  # Small penalty for being pushed around
+                    
+                    # 3. Position-aware adjustment (playing OOP is harder, slightly reduce penalty for losses)
+                    if episode.get('is_out_of_position', False) and normalized_reward < 0:
+                        # Reduce the penalty slightly for OOP losses
+                        normalized_reward *= 0.9
+                    
+                    # Apply shaping bonus to final reward
+                    normalized_reward += shaping_bonus
                     
                     # Main reward at the end
                     step_rewards[-1] = normalized_reward
@@ -923,11 +1006,20 @@ class RLTrainingSession:
             verbose=(self.log_level >= 2)
         )
         
-        # Anneal entropy coefficient (slower decay to 0.005 minimum for better exploration)
-        # Changed from 0.999 decay to 0.9995 and minimum from 0.001 to 0.005
-        self.ppo_trainer.entropy_coef = max(0.005, self.ppo_trainer.entropy_coef * 0.9995)
+        # Anneal entropy coefficient (very slow decay to maintain exploration and prevent plateaus)
+        # Decay rate 0.9999 and minimum 0.01 keeps exploration high throughout training
+        self.ppo_trainer.entropy_coef = max(0.01, self.ppo_trainer.entropy_coef * 0.9999)
         if self.writer:
              self.writer.add_scalar('PPO/EntropyCoef', self.ppo_trainer.entropy_coef, self.stats['iteration'])
+        
+        # Plateau detection and response
+        if self.detect_plateau():
+            self._plateau_counter += 1
+            if self._plateau_counter >= 50:  # Respond after 50 consecutive plateau iterations
+                self.respond_to_plateau()
+                self._plateau_counter = 0
+        else:
+            self._plateau_counter = 0
         
         # Track explained variance for convergence monitoring
         if 'explained_variance' in ppo_stats:
@@ -1042,6 +1134,102 @@ class RLTrainingSession:
                 print(f"⚠️  Failed to load opponent model {checkpoint_path}: {e}")
             return None
     
+    def _sample_opponent_checkpoint(self) -> Path:
+        """
+        Sample an opponent checkpoint from the pool.
+        
+        Uses prioritized sampling based on win rates when available,
+        otherwise falls back to uniform random sampling.
+        """
+        if not self.opponent_pool:
+            return None
+        
+        # If we have win rate data, use prioritized sampling
+        if hasattr(self, 'opponent_win_rates') and self.opponent_win_rates:
+            # Prioritize opponents we struggle against (lower win rate = higher priority)
+            # But also occasionally sample easy opponents to prevent forgetting
+            weights = []
+            for checkpoint in self.opponent_pool:
+                path_str = str(checkpoint)
+                if path_str in self.opponent_win_rates:
+                    win_rate = self.opponent_win_rates[path_str]
+                    # Inverse win rate: harder opponents get higher weight
+                    # Add small constant to avoid zero weights
+                    weight = 1.0 - win_rate + 0.1
+                else:
+                    # Unknown opponents get medium weight
+                    weight = 0.6
+                weights.append(weight)
+            
+            # Normalize weights
+            total_weight = sum(weights)
+            if total_weight > 0:
+                weights = [w / total_weight for w in weights]
+                # Sample based on weights
+                idx = random.choices(range(len(self.opponent_pool)), weights=weights, k=1)[0]
+                return self.opponent_pool[idx]
+        
+        # Fallback to uniform random sampling
+        return random.choice(self.opponent_pool)
+    
+    def detect_plateau(self) -> bool:
+        """
+        Detect if training has plateaued based on win rate variance.
+        
+        Returns True if win rate has low variance over recent iterations,
+        indicating the model is stuck at a local optimum.
+        """
+        if len(self.stats['win_rate']) < 100:
+            return False
+        
+        import numpy as np
+        recent = list(self.stats['win_rate'])[-100:]
+        variance = np.var(recent)
+        mean_win_rate = np.mean(recent)
+        
+        # Plateau detected if:
+        # 1. Win rate variance is very low (not improving or declining)
+        # 2. Win rate is in a "stuck" range (not dominating, not losing badly)
+        is_low_variance = variance < 0.001
+        is_stuck_range = 0.3 < mean_win_rate < 0.7
+        
+        return is_low_variance and is_stuck_range
+    
+    def respond_to_plateau(self):
+        """
+        Respond to detected plateau by resetting exploration parameters.
+        
+        Actions taken:
+        1. Reset entropy coefficient to encourage more exploration
+        2. Clear opponent win rates to re-evaluate all opponents
+        3. Log the plateau response
+        """
+        # Don't respond too frequently
+        min_iterations_between_responses = 100
+        if self.stats['iteration'] - self._last_plateau_response_iter < min_iterations_between_responses:
+            return
+        
+        self._last_plateau_response_iter = self.stats['iteration']
+        
+        # 1. Reset entropy coefficient to initial value for more exploration
+        if self._initial_entropy_coef is not None:
+            self.ppo_trainer.entropy_coef = self._initial_entropy_coef
+            if self.log_level >= 1:
+                print(f"🔄 Plateau detected! Reset entropy to {self._initial_entropy_coef}")
+        
+        # 2. Clear opponent win rates to re-evaluate fresh
+        self.opponent_win_rates.clear()
+        self._opponent_game_counts.clear()
+        
+        # 3. Log to TensorBoard
+        if self.writer:
+            self.writer.add_scalar('Plateau/ResponseTriggered', 1.0, self.stats['iteration'])
+        
+        if self.log_level >= 1:
+            print(f"🔄 Plateau response at iteration {self.stats['iteration']}")
+            print(f"   - Entropy coefficient reset")
+            print(f"   - Opponent win rates cleared")
+    
     def _call_api(self, history: List[Dict]) -> Dict:
         """Call poker API server"""
         payload = {
@@ -1120,6 +1308,8 @@ def main() -> int:
                        help='PPO epochs per update (default: 15)')
     parser.add_argument('--mini-batch-size', type=int, default=128,
                        help='Mini-batch size for PPO (default: 128)')
+    parser.add_argument('--gradient-accumulation-steps', type=int, default=4,
+                       help='Gradient accumulation steps for larger effective batch (default: 4)')
     
     # Game configuration
     parser.add_argument('--num-players', type=int, default=2,
@@ -1236,6 +1426,7 @@ def main() -> int:
         value_loss_coef=args.value_loss_coef,
         ppo_epochs=args.ppo_epochs,
         mini_batch_size=args.mini_batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
         lr_schedule_steps=args.iterations,  # Align LR schedule with total training iterations
         device=device,
         accelerator=accelerator
@@ -1284,6 +1475,9 @@ def main() -> int:
         tensorboard_dir=tensorboard_dir,
         log_level=LOG_LEVEL
     )
+    
+    # Store initial entropy coefficient for plateau response
+    session._initial_entropy_coef = args.entropy_coef
     
     # Test API connection before starting
     if LOG_LEVEL >= 1:

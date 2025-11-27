@@ -632,7 +632,7 @@
         @keyframes slideIn {
             from {
                 opacity: 0;
-                transform: translateY(-5px);
+                transform: translateY(5px);
             }
             to {
                 opacity: 1;
@@ -1059,7 +1059,7 @@
                     <div class="card-body">
                         <form id="configForm">
                             <p style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 1rem;">
-                                Plays until one checkpoint wins all chips. Each checkpoint starts with 10,000 chips.
+                                Plays until one checkpoint wins all chips. Each checkpoint starts with 250,000 chips.
                             </p>
                             <div class="btn-group">
                                 <button type="submit" class="btn btn-primary" id="startBtn">Start Tournament</button>
@@ -1141,7 +1141,7 @@
                             <span style="font-size: 1.2rem;">💰</span>
                             Bankroll Survival — Chip Count Over Time
                         </span>
-                        <span class="card-header-badge" id="chipChartBadge">Starting: 10,000 chips</span>
+                        <span class="card-header-badge" id="chipChartBadge">Starting: 250,000 chips</span>
                     </div>
                     <div class="card-body">
                         <div class="chip-chart-container">
@@ -1446,6 +1446,10 @@
         let tournamentCheckpoints = 0;
         let handsHistory = [];  // Store full hand details for replay
         
+        // Sampling configuration for live hand feed
+        const HAND_FEED_SAMPLE_RATE = 10;  // Show every Nth hand
+        let handsInFeed = 0;
+        
         // Chip tracking state
         let chipHistory = {};  // iter -> [{hand, chips}]
         let activeIterations = new Set();
@@ -1490,15 +1494,10 @@
         }
 
         function addHandToFeed(hand) {
-            const emptyState = handsFeed.querySelector('.empty-state');
-            if (emptyState) emptyState.remove();
-            
             totalHandsPlayed++;
             document.getElementById('statHandsPlayed').textContent = totalHandsPlayed.toLocaleString();
-            document.getElementById('handFeedCount').textContent = `${totalHandsPlayed} hands`;
             
             // Store hand data for replay
-            const handIndex = handsHistory.length;
             handsHistory.push(hand);
             
             // Keep only last 100 hands in storage
@@ -1506,9 +1505,23 @@
                 handsHistory.shift();
             }
             
+            // Sample hands: only show every Nth hand OR hands with eliminations
+            const hasElimination = hand.eliminated && hand.eliminated.length > 0;
+            const shouldShow = hasElimination || (hand.hand_num % HAND_FEED_SAMPLE_RATE === 0);
+            
+            if (!shouldShow) {
+                document.getElementById('handFeedCount').textContent = `${handsInFeed} shown / ${totalHandsPlayed} total`;
+                return;
+            }
+            
+            const emptyState = handsFeed.querySelector('.empty-state');
+            if (emptyState) emptyState.remove();
+            
+            handsInFeed++;
+            document.getElementById('handFeedCount').textContent = `${handsInFeed} shown / ${totalHandsPlayed} total`;
+            
             const item = document.createElement('div');
             item.className = 'hand-item';
-            item.dataset.handIndex = handIndex;
             item.onclick = () => openHandModal(hand);
             
             // Show chip changes instead of BB
@@ -1530,7 +1543,7 @@
             
             // Check for eliminations
             let eliminationBadge = '';
-            if (hand.eliminated && hand.eliminated.length > 0) {
+            if (hasElimination) {
                 eliminationBadge = `<span style="color: var(--accent-rose); font-size: 0.7rem; margin-left: 0.5rem;">☠️ ${hand.eliminated.map(i => 'Iter_' + i).join(', ')}</span>`;
             }
             
@@ -1540,11 +1553,12 @@
                 <span class="hand-result ${resultClass}">${resultText}<span class="view-hint"> • click</span></span>
             `;
             
-            handsFeed.insertBefore(item, handsFeed.firstChild);
+            // Append at the bottom
+            handsFeed.appendChild(item);
             
             // Keep only last 100 hands in DOM
             while (handsFeed.children.length > 100) {
-                handsFeed.removeChild(handsFeed.lastChild);
+                handsFeed.removeChild(handsFeed.firstChild);
             }
         }
         
@@ -1847,6 +1861,7 @@
             leaderboard = [];
             totalHandsPlayed = 0;
             handsHistory = [];
+            handsInFeed = 0;
             
             // Clear chip tracking state
             chipHistory = {};
@@ -1868,7 +1883,7 @@
             document.getElementById('statEliminated').textContent = '0';
             document.getElementById('statHandsPlayed').textContent = '0';
             document.getElementById('leaderboardCount').textContent = '0 checkpoints';
-            document.getElementById('handFeedCount').textContent = '0 hands';
+            document.getElementById('handFeedCount').textContent = '0 shown / 0 total';
             document.getElementById('tournamentInfo').style.display = 'none';
             document.getElementById('tournamentEmpty').style.display = 'block';
             document.getElementById('infoHandsPlayed').textContent = '0';

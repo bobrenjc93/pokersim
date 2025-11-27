@@ -41,6 +41,7 @@ class PPOTrainer:
         max_grad_norm: float = 1.0,  # Gradient clipping (relaxed from 0.5)
         ppo_epochs: int = 4,  # Number of PPO epochs per update
         mini_batch_size: int = 64,  # Mini-batch size for PPO
+        gradient_accumulation_steps: int = 4,  # Accumulate gradients for larger effective batch
         target_kl: Optional[float] = 0.02,  # Early stopping KL threshold (relaxed for poker)
         lr_schedule_steps: int = 5000,  # Total steps for LR scheduling (should match training iterations)
         device: torch.device = torch.device('cpu'),
@@ -71,6 +72,7 @@ class PPOTrainer:
         self.max_grad_norm = max_grad_norm
         self.ppo_epochs = ppo_epochs
         self.mini_batch_size = mini_batch_size
+        self.gradient_accumulation_steps = gradient_accumulation_steps
         self.target_kl = target_kl
         self.device = device
         self.accelerator = accelerator
@@ -193,10 +195,14 @@ class PPOTrainer:
             'clip_fraction': []
         }
         
-        # PPO epochs
+        # PPO epochs with gradient accumulation
         for epoch in range(self.ppo_epochs):
             # Generate random indices (on CPU to match input tensors)
             indices = torch.randperm(num_samples)
+            
+            # Track accumulation steps
+            accumulation_step = 0
+            self.optimizer.zero_grad()
             
             for start in range(0, num_samples, self.mini_batch_size):
                 end = start + self.mini_batch_size
@@ -250,25 +256,32 @@ class PPOTrainer:
                 # Entropy bonus (encourages exploration)
                 entropy_loss = -entropy.mean()
                 
-                # Total loss
+                # Total loss - scale by accumulation steps for proper gradient averaging
                 loss = (
                     policy_loss +
                     self.value_loss_coef * value_loss +
                     self.entropy_coef * entropy_loss
-                )
+                ) / self.gradient_accumulation_steps
                 
-                # Optimize
-                self.optimizer.zero_grad()
+                # Backward pass (accumulate gradients)
                 if self.accelerator is not None:
                     self.accelerator.backward(loss)
                 else:
                     loss.backward()
                 
-                # Gradient clipping and tracking
-                grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
-                self.optimizer.step()
+                accumulation_step += 1
                 
-                # Track statistics
+                # Step optimizer after accumulating enough gradients
+                if accumulation_step >= self.gradient_accumulation_steps:
+                    # Gradient clipping and tracking
+                    grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+                    self.optimizer.step()
+                    self.optimizer.zero_grad()
+                    accumulation_step = 0
+                else:
+                    grad_norm = 0.0  # Will be updated on actual step
+                
+                # Track statistics (use unscaled loss values for accurate reporting)
                 with torch.no_grad():
                     # KL divergence (approximate)
                     kl_div = (mb_old_log_probs - new_log_probs).mean()
@@ -277,14 +290,23 @@ class PPOTrainer:
                     clip_fraction = ((ratio < 1.0 - self.clip_epsilon) | 
                                    (ratio > 1.0 + self.clip_epsilon)).float().mean()
                     
+                    # Store unscaled loss values (loss was scaled for gradient accumulation)
+                    unscaled_loss = loss.item() * self.gradient_accumulation_steps
+                    
                     epoch_stats['policy_loss'].append(policy_loss.item())
                     epoch_stats['value_loss'].append(value_loss.item())
                     epoch_stats['entropy'].append(-entropy_loss.item())
-                    epoch_stats['total_loss'].append(loss.item())
+                    epoch_stats['total_loss'].append(unscaled_loss)
                     epoch_stats['kl_divergence'].append(kl_div.item())
                     epoch_stats['clip_fraction'].append(clip_fraction.item())
                     if 'grad_norm' not in epoch_stats: epoch_stats['grad_norm'] = []
                     epoch_stats['grad_norm'].append(grad_norm.item() if hasattr(grad_norm, 'item') else grad_norm)
+            
+            # Handle any remaining accumulated gradients at end of epoch
+            if accumulation_step > 0:
+                grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+                self.optimizer.step()
+                self.optimizer.zero_grad()
             
             # Early stopping based on KL divergence
             if self.target_kl is not None:
