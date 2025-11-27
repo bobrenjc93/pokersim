@@ -63,6 +63,14 @@ from rl_state_encoder import estimate_hand_strength
 # Import model version and log level from config
 from config import MODEL_VERSION, LOG_LEVEL, DEFAULT_MODELS_DIR
 
+# Import Monte Carlo simulation for multi-runout regret calculation
+from monte_carlo import (
+    simulate_runouts,
+    calculate_action_regrets,
+    compute_regret_weighted_reward,
+    MultiRunoutEvaluator
+)
+
 # Import poker_api_binding for direct C++ calls
 try:
     import poker_api_binding
@@ -95,7 +103,9 @@ class RLTrainingSession:
         device: torch.device,
         output_dir: Path,
         tensorboard_dir: Optional[Path] = None,
-        log_level: int = 0
+        log_level: int = 0,
+        num_runouts: int = 0,
+        regret_weight: float = 0.5
     ):
         """
         Args:
@@ -106,6 +116,8 @@ class RLTrainingSession:
             output_dir: Directory for model checkpoints
             tensorboard_dir: Directory for TensorBoard logs
             log_level: Logging verbosity (0=minimal, 1=normal, 2=verbose)
+            num_runouts: Number of runouts for Monte Carlo regret calculation (0 = disabled)
+            regret_weight: Weight for regret-based reward adjustment (0-1)
         """
         self.model = model
         self.ppo_trainer = ppo_trainer
@@ -114,6 +126,10 @@ class RLTrainingSession:
         self.output_dir = output_dir
         self.tensorboard_dir = tensorboard_dir
         self.log_level = log_level
+        
+        # Multi-runout regret calculation settings
+        self.num_runouts = num_runouts  # 0 = disabled, 50 = default when enabled
+        self.regret_weight = regret_weight
         
         # Opponent pool for self-play (stores past model versions)
         self.opponent_pool: List[Path] = []
@@ -312,8 +328,10 @@ class RLTrainingSession:
             'success': True,
             # Reward shaping tracking
             'action_types': [],  # Track action types taken by main player
+            'action_labels': [],  # Track action labels for regret calculation
             'hand_strengths': [],  # Track hand strength at each decision
             'step_rewards': [],  # Per-step reward shaping
+            'regrets': [],  # Per-step regrets from Monte Carlo simulation
             'folded_to_aggression': False,  # Did main player fold to bet/raise?
             'won_uncontested': False,  # Did main player win without showdown?
             'is_out_of_position': is_out_of_position,
@@ -394,7 +412,23 @@ class RLTrainingSession:
                 
                 # Track action types and hand strength for reward shaping
                 episode['action_types'].append(action_type)
+                episode['action_labels'].append(action_label)
                 episode['hand_strengths'].append(hand_strength)
+                
+                # Calculate regrets using Monte Carlo simulation if enabled
+                if self.num_runouts > 0:
+                    regrets = calculate_action_regrets(
+                        self.game_config,
+                        history,
+                        main_player_id,
+                        self.model,
+                        encoder,
+                        self.device,
+                        num_runouts=self.num_runouts
+                    )
+                    episode['regrets'].append(regrets)
+                else:
+                    episode['regrets'].append({})
                 
                 # Compute per-step reward shaping based on action appropriateness
                 step_reward = self._compute_action_shaping_reward(
@@ -521,6 +555,16 @@ class RLTrainingSession:
         
         # Normalize rewards (divide by starting chips for scale)
         main_reward = episode['rewards'].get(main_player_id, 0) / initial_chips
+        
+        # Apply regret-weighted reward adjustment if regrets were calculated
+        if self.num_runouts > 0 and episode['regrets'] and episode['action_labels']:
+            main_reward = compute_regret_weighted_reward(
+                main_reward,
+                episode['regrets'],
+                episode['action_labels'],
+                regret_weight=self.regret_weight
+            )
+        
         episode['main_reward'] = main_reward
         
         # Convert episode data to tensors
@@ -1833,6 +1877,12 @@ def main() -> int:
     parser.add_argument('--eval-episodes', type=int, default=50,
                        help='Number of episodes for evaluation (default: 50)')
     
+    # Monte Carlo multi-runout settings
+    parser.add_argument('--num-runouts', type=int, default=0,
+                       help='Number of Monte Carlo runouts per decision for regret calculation (0=disabled, 50=recommended)')
+    parser.add_argument('--regret-weight', type=float, default=0.5,
+                       help='Weight for regret-based reward adjustment (default: 0.5)')
+    
     # Other
     parser.add_argument('--verbose', action='store_true',
                        help='Verbose output')
@@ -1932,6 +1982,9 @@ def main() -> int:
         print(f"  Total iterations: {args.iterations}")
         print(f"  Episodes per iteration: {args.episodes_per_iter}")
         print(f"  Estimated total episodes: {args.iterations * args.episodes_per_iter:,}")
+        if args.num_runouts > 0:
+            print(f"  Monte Carlo runouts per decision: {args.num_runouts}")
+            print(f"  Regret weight: {args.regret_weight}")
     
     session = RLTrainingSession(
         model=model,
@@ -1940,7 +1993,9 @@ def main() -> int:
         device=device,
         output_dir=output_dir,
         tensorboard_dir=tensorboard_dir,
-        log_level=LOG_LEVEL
+        log_level=LOG_LEVEL,
+        num_runouts=args.num_runouts,
+        regret_weight=args.regret_weight
     )
     
     # Store initial entropy coefficient for plateau response

@@ -16,7 +16,7 @@ Or customize game configs:
 # =============================================================================
 
 # Model version for RL training
-MODEL_VERSION = 28  # Current RL model version (v28: anti-fold guardrails)
+MODEL_VERSION = 29  # Current RL model version (v28: anti-fold guardrails)
 
 # Default directory for saving/loading models
 DEFAULT_MODELS_DIR = f"/tmp/pokersim/rl_models_v{MODEL_VERSION}"
@@ -76,6 +76,21 @@ TOURNAMENT_CONFIG = {
     'maxPlayers': 9,
 }
 
+
+# =============================================================================
+# Monte Carlo Multi-Runout Configuration
+# =============================================================================
+
+# Default number of Monte Carlo runouts for regret calculation and equity splitting
+# 0 = disabled (use single outcome)
+# 50 = recommended for accurate estimation (trades off accuracy vs speed)
+DEFAULT_NUM_RUNOUTS = 50
+
+# Weight for regret-based reward adjustment (0-1)
+# 0 = use raw rewards only
+# 1 = use regret-adjusted rewards only
+# 0.5 = blend equally (recommended)
+DEFAULT_REGRET_WEIGHT = 0.5
 
 # =============================================================================
 # Agent Configuration

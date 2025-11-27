@@ -170,6 +170,12 @@ def extract_state(game_state: Dict, player_id: str) -> Dict[str, Any]:
     config = game_state.get('config', {})
     action_constraints = game_state.get('actionConstraints', {})
     
+    # Compute max stack across all players for relative normalization
+    max_stack = max(p.get('chips', 0) for p in game_state['players'])
+    # Use at least starting_chips to avoid division by zero and handle edge cases
+    starting_chips = config.get('startingChips', 1000)
+    max_stack = max(max_stack, starting_chips)
+    
     return {
         'player_id': player_id,
         'hole_cards': player.get('holeCards', []),
@@ -188,7 +194,8 @@ def extract_state(game_state: Dict, player_id: str) -> Dict[str, Any]:
         'is_big_blind': player.get('isBigBlind', False),
         'big_blind': config.get('bigBlind', 20),
         'small_blind': config.get('smallBlind', 10),
-        'starting_chips': config.get('startingChips', 1000),
+        'starting_chips': starting_chips,
+        'max_stack': max_stack,  # Maximum stack across all players for relative normalization
         'to_call': action_constraints.get('toCall', 0),
         'min_bet': action_constraints.get('minBet', 20),
         'min_raise_total': action_constraints.get('minRaiseTotal', 20),
@@ -331,17 +338,20 @@ class ModelAgent:
     def select_action(
         self,
         state: Dict[str, Any],
-        legal_actions: List[str]
-    ) -> Tuple[str, int, str]:
+        legal_actions: List[str],
+        return_probs: bool = False
+    ) -> Tuple[str, int, str, ...]:
         """
         Select an action using the trained model.
         
         Args:
             state: Game state dictionary
             legal_actions: List of legal action strings
+            return_probs: If True, also return the full probability distribution
         
         Returns:
-            Tuple of (action_type, amount, action_label)
+            Tuple of (action_type, amount, action_label) or
+            Tuple of (action_type, amount, action_label, action_probs) if return_probs=True
         """
         # Encode state
         state_tensor = self.encoder.encode_state(state).unsqueeze(0).to(self.device)
@@ -369,7 +379,51 @@ class ModelAgent:
         # Convert to game-compatible format
         action_type, amount = self._convert_action(action_label, state)
         
+        if return_probs:
+            # Return probabilities as a dict mapping action names to probabilities
+            probs_dict = {
+                ACTION_NAMES[i]: action_probs[0, i].item() 
+                for i in range(len(ACTION_NAMES))
+            }
+            return action_type, amount, action_label, probs_dict
+        
         return action_type, amount, action_label
+    
+    def get_action_distribution(
+        self,
+        state: Dict[str, Any],
+        legal_actions: List[str]
+    ) -> Dict[str, float]:
+        """
+        Get the full probability distribution over actions without selecting one.
+        
+        Args:
+            state: Game state dictionary
+            legal_actions: List of legal action strings
+        
+        Returns:
+            Dict mapping action names to probabilities
+        """
+        # Encode state
+        state_tensor = self.encoder.encode_state(state).unsqueeze(0).to(self.device)
+        
+        # Create legal actions mask
+        legal_actions_mask = self._create_legal_actions_mask(legal_actions)
+        
+        # Get action probabilities from model
+        with torch.no_grad():
+            action_probs, value = self.model.get_action_probs(
+                state_tensor,
+                legal_actions_mask,
+                temperature=self.temperature
+            )
+        
+        # Return probabilities as a dict mapping action names to probabilities
+        probs_dict = {
+            ACTION_NAMES[i]: action_probs[0, i].item() 
+            for i in range(len(ACTION_NAMES))
+        }
+        return probs_dict
     
     def _create_legal_actions_mask(self, legal_actions: List[str]) -> torch.Tensor:
         """Wrapper for standalone function"""

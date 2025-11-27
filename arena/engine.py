@@ -24,6 +24,7 @@ from model_agent import (
     HeuristicAgent,
     load_model_agent
 )
+from monte_carlo import MultiRunoutEvaluator, simulate_runouts
 import poker_api_binding
 from config import DEFAULT_MODELS_DIR
 
@@ -31,7 +32,17 @@ if TYPE_CHECKING:
     from rl_model import PokerActorCritic
 
 class Arena:
-    def __init__(self, device: str = "cpu", output_dir: str = "arena_results"):
+    def __init__(self, device: str = "cpu", output_dir: str = "arena_results", num_runouts: int = 0):
+        """
+        Initialize the Arena.
+        
+        Args:
+            device: Torch device for model inference
+            output_dir: Directory for saving results
+            num_runouts: Number of Monte Carlo runouts for equity calculation (0=disabled, 50=recommended)
+                        When enabled, pots are split based on average equity across multiple simulations
+                        ("run it N times" feature)
+        """
         self.device = torch.device(device)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True, parents=True)
@@ -45,6 +56,13 @@ class Arena:
             'minPlayers': 2,
             'maxPlayers': 2
         }
+        
+        # Monte Carlo runout settings
+        self.num_runouts = num_runouts  # 0 = disabled, 50 = default when enabled
+        if num_runouts > 0:
+            self.runout_evaluator = MultiRunoutEvaluator(self.game_config, num_runouts)
+        else:
+            self.runout_evaluator = None
         
         # Cache for loaded models to avoid reloading
         self.model_cache = {}
@@ -103,8 +121,9 @@ class Arena:
                 if model is None and 'path' in config:
                     model = self.load_model(Path(config['path']))
                 
+                # Default to stochastic sampling (deterministic=False) to sample from probability distribution
                 return load_model_agent(player_id, name, model=model, 
-                                      device=self.device, deterministic=config.get('deterministic', True))
+                                      device=self.device, deterministic=config.get('deterministic', False))
             elif config['type'] == 'heuristic':
                 return HeuristicAgent(player_id, name)
             else:
@@ -266,10 +285,52 @@ class Arena:
         initial_chips = self.game_config['startingChips']
         big_blind = self.game_config['bigBlind']
         
-        for p in game_state['players']:
-            # Return result in Big Blinds
-            profit = p['chips'] - initial_chips
-            rewards[p['id']] = profit / big_blind
+        # Use multi-runout equity calculation if enabled
+        if self.num_runouts > 0 and self.runout_evaluator:
+            # Calculate equity for each player by running multiple simulations
+            # This implements "run it N times" - splitting the pot based on 
+            # average equity across multiple board runouts
+            equities = self.runout_evaluator.calculate_equity(history)
+            
+            if equities:
+                # Calculate total pot from player contributions
+                total_pot = sum(initial_chips - p['chips'] + p['chips'] 
+                               for p in game_state['players'])
+                # Actually: pot is money in the middle. Start with what we put in.
+                total_pot = game_state.get('pot', 0)
+                
+                # If pot is 0 (e.g., someone folded preflop), calculate from chip changes
+                if total_pot == 0:
+                    total_in_pot = sum(initial_chips - p['chips'] for p in game_state['players'] if p['chips'] < initial_chips)
+                    total_pot = abs(total_in_pot)
+                
+                # Split pot based on equity
+                pot_shares = self.runout_evaluator.split_pot(history, total_pot)
+                
+                for p in game_state['players']:
+                    pid = p['id']
+                    # Calculate profit: equity share of pot - amount put in
+                    player_contribution = initial_chips - p['chips'] + (p['chips'] - initial_chips if p['chips'] > initial_chips else 0)
+                    # Simpler: just use equity to determine winnings
+                    if pid in pot_shares:
+                        # Equity share minus what we would have had if we just kept our chips
+                        equity_winnings = pot_shares[pid] - (total_pot * 0.5)  # vs expected break-even share
+                        rewards[pid] = equity_winnings / big_blind
+                    else:
+                        # Fallback to actual result
+                        profit = p['chips'] - initial_chips
+                        rewards[pid] = profit / big_blind
+            else:
+                # Fallback to actual results if equity calculation failed
+                for p in game_state['players']:
+                    profit = p['chips'] - initial_chips
+                    rewards[p['id']] = profit / big_blind
+        else:
+            # Standard single-outcome calculation
+            for p in game_state['players']:
+                # Return result in Big Blinds
+                profit = p['chips'] - initial_chips
+                rewards[p['id']] = profit / big_blind
         
         # Capture final state
         if capture_details:
@@ -285,6 +346,11 @@ class Arena:
                     'profit_bb': rewards.get(p['id'], 0)
                 } for p in game_state.get('players', [])]
             }
+            # Add equity information if calculated
+            if self.num_runouts > 0 and self.runout_evaluator:
+                equities = self.runout_evaluator.calculate_equity(history)
+                hand_details['final_state']['equities'] = equities
+                hand_details['final_state']['num_runouts'] = self.num_runouts
             rewards['details'] = hand_details
             
         return rewards

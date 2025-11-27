@@ -461,13 +461,17 @@ class RLStateEncoder:
             else:
                 features.extend([0] * 17)
         
-        # 3. Pot and betting information (normalized)
-        starting_chips = state.get('starting_chips', 1000.0)
-        pot = state.get('pot', 0) / starting_chips
-        current_bet = state.get('current_bet', 0) / starting_chips
-        player_chips = state.get('player_chips', 0) / starting_chips
-        player_bet = state.get('player_bet', 0) / starting_chips
-        player_total_bet = state.get('player_total_bet', 0) / starting_chips
+        # 3. Pot and betting information (normalized relative to max stack)
+        # Use max_stack for relative normalization (1 = max stack, everything else is a fraction)
+        max_stack = state.get('max_stack', state.get('starting_chips', 1000.0))
+        if max_stack <= 0:
+            max_stack = state.get('starting_chips', 1000.0)
+        
+        pot = state.get('pot', 0) / max_stack
+        current_bet = state.get('current_bet', 0) / max_stack
+        player_chips = state.get('player_chips', 0) / max_stack
+        player_bet = state.get('player_bet', 0) / max_stack
+        player_total_bet = state.get('player_total_bet', 0) / max_stack
         
         features.extend([pot, current_bet, player_chips, player_bet, player_total_bet])
         

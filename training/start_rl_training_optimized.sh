@@ -45,6 +45,12 @@ BIG_BLIND=20
 STARTING_CHIPS=1000
 SAVE_INTERVAL=1
 
+# Monte Carlo multi-runout settings
+# These enable "run it N times" style training where each hand is simulated
+# multiple times with different action sampling to calculate regret
+NUM_RUNOUTS=50           # Number of Monte Carlo runouts per decision (0=disabled, 50=recommended)
+REGRET_WEIGHT=0.5        # Weight for regret-based reward adjustment (0-1)
+
 # Model version from config
 if [ -z "${MODEL_VERSION:-}" ]; then
     # Extract from config.py
@@ -81,6 +87,14 @@ while [[ $# -gt 0 ]]; do
             LEARNING_RATE="$2"
             shift 2
             ;;
+        --num-runouts)
+            NUM_RUNOUTS="$2"
+            shift 2
+            ;;
+        --regret-weight)
+            REGRET_WEIGHT="$2"
+            shift 2
+            ;;
         --help)
             echo "Usage: $0 [OPTIONS]"
             echo ""
@@ -89,6 +103,8 @@ while [[ $# -gt 0 ]]; do
             echo "  -c, --checkpoint PATH      Resume from checkpoint"
             echo "  --iterations N             Number of training iterations (default: $ITERATIONS)"
             echo "  --learning-rate LR         Learning rate (default: $LEARNING_RATE)"
+            echo "  --num-runouts N            Monte Carlo runouts per decision (default: $NUM_RUNOUTS, 0=disabled)"
+            echo "  --regret-weight W          Weight for regret-based reward (default: $REGRET_WEIGHT)"
             echo "  --help                     Show this help message"
             echo ""
             echo "Optimized settings:"
@@ -97,6 +113,7 @@ while [[ $# -gt 0 ]]; do
             echo "  - Learning rate: 3e-4 (standard for PPO)"
             echo "  - Entropy coefficient: 0.02 with slow decay to 0.005"
             echo "  - Episodes per iteration: 500 (variance reduction)"
+            echo "  - Monte Carlo multi-runout: Run each hand $NUM_RUNOUTS times for regret calculation"
             echo "  - Reward normalization enabled"
             echo "  - Learning rate scheduling aligned with total iterations"
             echo "  - Evaluation against both Random and Heuristic"
@@ -157,6 +174,10 @@ echo "   ✓ CallingStation opponents - calls all-ins to show trash hands lose"
 echo "   ✓ Learning rate scheduling - aligned with ${ITERATIONS} iterations"
 echo "   ✓ ${EPISODES_PER_ITER} episodes/iteration - variance reduction"
 echo "   ✓ Evaluation vs both Random and Heuristic baselines"
+if [ "$NUM_RUNOUTS" -gt 0 ]; then
+echo "   ✓ Monte Carlo multi-runout: ${NUM_RUNOUTS} runouts per decision for regret"
+echo "   ✓ Regret weight: ${REGRET_WEIGHT} - blends outcome with regret-based reward"
+fi
 
 echo ""
 echo -e "${BLUE}📊 TensorBoard Monitoring:${NC}"
@@ -202,6 +223,8 @@ uv run python train.py \
     --save-interval "$SAVE_INTERVAL" \
     --output-dir "$OUTPUT_DIR" \
     --tensorboard-dir "$TENSORBOARD_DIR" \
+    --num-runouts "$NUM_RUNOUTS" \
+    --regret-weight "$REGRET_WEIGHT" \
     $CHECKPOINT \
     $VERBOSE \
     $CUSTOM_ARGS
