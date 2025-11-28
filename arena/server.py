@@ -326,6 +326,7 @@ class JobManager:
         """
         Run bankroll survival tournament - each iteration starts with 10k chips.
         Plays until one player wins all chips (all others eliminated).
+        Includes heuristic bots alongside model checkpoints.
         """
         import random as rand
         
@@ -334,10 +335,21 @@ class JobManager:
         
         total_checkpoints = len(sorted_cps)
         
-        if total_checkpoints < 2:
+        # Define heuristic bots to include in the tournament
+        HEURISTIC_BOTS = [
+            ('heuristic', 'Heuristic'),
+            ('tight', 'Tight'),
+            ('loose_passive', 'LoosePassive'),
+            ('aggressive', 'Aggressive'),
+            ('calling_station', 'CallingStation'),
+            ('hero_caller', 'HeroCaller'),
+            ('random', 'Random'),
+        ]
+        
+        if total_checkpoints < 1 and len(HEURISTIC_BOTS) < 2:
             self.broadcast({
                 'type': 'error',
-                'message': 'Need at least 2 checkpoints for tournament'
+                'message': 'Need at least 2 participants for tournament'
             })
             return
         
@@ -346,6 +358,7 @@ class JobManager:
         chip_history = {}  # iter -> list of (hand_num, chips)
         action_counts = {}  # iter -> {fold: N, call: N, check: N, raise: N, all_in: N}
         
+        # Add model checkpoints
         for iter_num, path in sorted_cps:
             results[iter_num] = {
                 'iteration': iter_num,
@@ -356,9 +369,30 @@ class JobManager:
                 'total_bb': 0.0,
                 'eliminated': False,
                 'eliminated_at_hand': None,
+                'is_bot': False,
             }
             chip_history[iter_num] = [(0, STARTING_CHIPS)]  # Initial chips at hand 0
             action_counts[iter_num] = {'fold': 0, 'call': 0, 'check': 0, 'raise': 0, 'bet': 0, 'all_in': 0}
+        
+        # Add heuristic bots (use negative IDs to distinguish from model iterations)
+        # Negative IDs: -1 = heuristic, -2 = tight, etc.
+        for bot_idx, (bot_type, bot_name) in enumerate(HEURISTIC_BOTS):
+            bot_id = -(bot_idx + 1)  # -1, -2, -3, ...
+            results[bot_id] = {
+                'iteration': bot_id,
+                'path': None,
+                'bot_type': bot_type,
+                'bot_name': bot_name,
+                'chips': STARTING_CHIPS,
+                'total_hands': 0,
+                'total_wins': 0,
+                'total_bb': 0.0,
+                'eliminated': False,
+                'eliminated_at_hand': None,
+                'is_bot': True,
+            }
+            chip_history[bot_id] = [(0, STARTING_CHIPS)]
+            action_counts[bot_id] = {'fold': 0, 'call': 0, 'check': 0, 'raise': 0, 'bet': 0, 'all_in': 0}
         
         # Pre-load all models to avoid reloading during tournament
         print(f"Pre-loading {total_checkpoints} checkpoints...")
@@ -376,23 +410,45 @@ class JobManager:
                 print(f"Error loading checkpoint {iter_num}: {e}")
                 continue
         
+        # Add heuristic bot configs
+        for bot_idx, (bot_type, bot_name) in enumerate(HEURISTIC_BOTS):
+            bot_id = -(bot_idx + 1)
+            checkpoint_configs[bot_id] = {
+                'type': bot_type,
+                'name': bot_name
+            }
+        
         available_iters = list(checkpoint_configs.keys())
         active_iters = set(available_iters)  # Track which iterations are still alive
         
         if len(available_iters) < 2:
             self.broadcast({
                 'type': 'error',
-                'message': 'Need at least 2 successfully loaded checkpoints'
+                'message': 'Need at least 2 successfully loaded participants'
             })
             return
+        
+        # Build participant info for UI
+        participants_info = {}
+        for iter_num in available_iters:
+            config = checkpoint_configs[iter_num]
+            participants_info[iter_num] = {
+                'name': config['name'],
+                'is_bot': results[iter_num].get('is_bot', False),
+                'bot_type': results[iter_num].get('bot_type'),
+                'chips': STARTING_CHIPS
+            }
         
         # Broadcast tournament start with chip info
         self.broadcast({
             'type': 'tournament_started',
             'mode': 'play-until-winner',
-            'checkpoints': len(available_iters),
+            'checkpoints': len([i for i in available_iters if i >= 0]),  # Model checkpoints only
+            'bots': len([i for i in available_iters if i < 0]),  # Heuristic bots
+            'total_participants': len(available_iters),
             'starting_chips': STARTING_CHIPS,
-            'initial_chip_history': {iter_num: STARTING_CHIPS for iter_num in available_iters}
+            'initial_chip_history': {iter_num: STARTING_CHIPS for iter_num in available_iters},
+            'participants': participants_info
         })
         
         # Play hands until only one player remains
@@ -559,7 +615,7 @@ class JobManager:
                 if hand_num % 10 == 0:
                     self._broadcast_chip_update(results, chip_history, active_iters)
                     self._broadcast_leaderboard(results)
-                    self._broadcast_action_frequencies(action_counts)
+                    self._broadcast_action_frequencies(action_counts, results)
                 
             except Exception as e:
                 print(f"Error in hand {hand_num}: {e}")
@@ -568,14 +624,17 @@ class JobManager:
         # Tournament ended - broadcast winner if there is one
         if len(active_iters) == 1:
             winner_iter = list(active_iters)[0]
+            winner_name = checkpoint_configs[winner_iter]['name']
+            winner_is_bot = results[winner_iter].get('is_bot', False)
             self.broadcast({
                 'type': 'tournament_winner',
                 'winner_iteration': winner_iter,
-                'winner_name': f'Iter_{winner_iter}',
+                'winner_name': winner_name,
+                'winner_is_bot': winner_is_bot,
                 'final_chips': results[winner_iter]['chips'],
                 'hands_played': hand_num
             })
-            print(f"Tournament winner: Iter_{winner_iter} with {results[winner_iter]['chips']} chips after {hand_num} hands")
+            print(f"Tournament winner: {winner_name} with {results[winner_iter]['chips']} chips after {hand_num} hands")
         elif len(active_iters) == 0:
             # Edge case: both eliminated simultaneously
             self.broadcast({
@@ -587,14 +646,24 @@ class JobManager:
         # Final broadcasts
         self._broadcast_chip_update(results, chip_history, active_iters, final=True)
         self._broadcast_leaderboard(results, final=True)
-        self._broadcast_action_frequencies(action_counts, final=True)
+        self._broadcast_action_frequencies(action_counts, results, final=True)
     
     def _broadcast_chip_update(self, results, chip_history, active_iters, final=False):
         """Broadcast chip counts for all iterations."""
         chip_data = {}
         for iter_num in results:
             stats = results[iter_num]
+            
+            # Determine display name
+            if stats.get('is_bot', False):
+                name = stats.get('bot_name', f'Bot_{iter_num}')
+            else:
+                name = f'Iter_{iter_num}'
+            
             chip_data[iter_num] = {
+                'name': name,
+                'is_bot': stats.get('is_bot', False),
+                'bot_type': stats.get('bot_type'),
                 'chips': stats['chips'],
                 'eliminated': stats['eliminated'],
                 'eliminated_at_hand': stats['eliminated_at_hand'],
@@ -614,8 +683,18 @@ class JobManager:
         for iter_num in sorted(results.keys()):
             stats = results[iter_num]
             total_hands = stats['total_hands']
+            
+            # Determine display name
+            if stats.get('is_bot', False):
+                name = stats.get('bot_name', f'Bot_{iter_num}')
+            else:
+                name = f'Iter_{iter_num}'
+            
             row = {
                 'iteration': iter_num,
+                'name': name,
+                'is_bot': stats.get('is_bot', False),
+                'bot_type': stats.get('bot_type'),
                 'total_hands': total_hands,
                 'win_rate': stats['total_wins'] / total_hands if total_hands > 0 else 0,
                 'bb_100': (stats['total_bb'] / total_hands * 100) if total_hands > 0 else 0,
@@ -634,10 +713,18 @@ class JobManager:
             'leaderboard': leaderboard
         })
     
-    def _broadcast_action_frequencies(self, action_counts, final=False):
+    def _broadcast_action_frequencies(self, action_counts, results, final=False):
         """Broadcast action frequencies (fold/call/check/raise/bet/all_in) per iteration."""
         action_data = {}
         for iter_num, counts in action_counts.items():
+            stats = results.get(iter_num, {})
+            
+            # Determine display name
+            if stats.get('is_bot', False):
+                name = stats.get('bot_name', f'Bot_{iter_num}')
+            else:
+                name = f'Iter_{iter_num}'
+            
             total = sum(counts.values())
             if total > 0:
                 # Calculate frequencies as percentages
@@ -654,6 +741,8 @@ class JobManager:
                 frequencies['passive'] = 0
             
             action_data[iter_num] = {
+                'name': name,
+                'is_bot': stats.get('is_bot', False),
                 'counts': counts,
                 'frequencies': frequencies,
                 'total_actions': total

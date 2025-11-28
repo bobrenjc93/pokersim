@@ -1601,6 +1601,9 @@
         // Action frequency tracking
         let actionData = {};  // iter -> {counts, frequencies, total_actions}
         
+        // Participant name mapping (for bots vs model iterations)
+        let participantNames = {};  // iter -> name string
+        
         // Color palette for iterations
         const iterationColors = [
             '#00d4ff', '#00ff9d', '#a855f7', '#ffb800', '#ff4d6d',
@@ -1876,6 +1879,11 @@
                 const winRate = (row.win_rate || 0) * 100;
                 const isEliminated = row.eliminated;
                 
+                // Get display name - use row.name if available, else participantNames, else fallback
+                const displayName = row.name || participantNames[row.iteration] || `Iter ${row.iteration}`;
+                const isBot = row.is_bot || row.iteration < 0;
+                const nameStyle = isBot ? 'color: var(--accent-violet);' : '';
+                
                 const statusHtml = isEliminated 
                     ? `<span class="badge badge-negative">☠️ Out @ #${row.eliminated_at_hand || '?'}</span>`
                     : `<span class="badge badge-positive">🏃 Active</span>`;
@@ -1884,7 +1892,7 @@
                 tr.style.opacity = isEliminated ? '0.6' : '1';
                 tr.innerHTML = `
                     <td><span class="rank-badge ${rankClass}">${rank}</span></td>
-                    <td>Iter ${row.iteration}</td>
+                    <td style="${nameStyle}">${displayName}${isBot ? ' 🤖' : ''}</td>
                     <td><span style="color: ${isEliminated ? 'var(--accent-rose)' : 'var(--accent-amber)'}; font-weight: 600;">${chips.toLocaleString()}</span></td>
                     <td>${statusHtml}</td>
                     <td>${winRate.toFixed(1)}%</td>
@@ -1923,6 +1931,10 @@
                 const color = iterationColors[idx % iterationColors.length];
                 const history = chipHistory[iter] || [];
                 const isEliminated = eliminatedIterations.has(iter);
+                const stats = performanceData[iter] || {};
+                
+                // Get display name
+                const displayName = stats.name || participantNames[iter] || `Iter ${iter}`;
                 
                 // Convert history to a map for easy lookup
                 const historyMap = new Map(history);
@@ -1939,7 +1951,7 @@
                 });
                 
                 return {
-                    label: `Iter ${iter}`,
+                    label: displayName,
                     data: data,
                     borderColor: color,
                     backgroundColor: 'transparent',
@@ -1970,11 +1982,15 @@
                 const stats = performanceData[iter] || {};
                 const chips = stats.chips || 0;
                 
+                // Get display name
+                const displayName = stats.name || participantNames[iter] || `Iter ${iter}`;
+                const isBot = stats.is_bot || iter < 0;
+                
                 const item = document.createElement('div');
                 item.className = `chip-legend-item ${isEliminated ? 'eliminated' : ''}`;
                 item.innerHTML = `
                     <span class="color-dot" style="background: ${color}"></span>
-                    <span>Iter ${iter}</span>
+                    <span>${displayName}${isBot ? ' 🤖' : ''}</span>
                     <span class="chips">${isEliminated ? '☠️ 0' : chips.toLocaleString()}</span>
                 `;
                 legend.appendChild(item);
@@ -1987,8 +2003,11 @@
             
             if (iterations.length === 0) return;
             
-            // Create labels
-            const labels = iterations.map(iter => `Iter ${iter}`);
+            // Create labels using participant names
+            const labels = iterations.map(iter => {
+                const data = actionData[iter];
+                return data?.name || participantNames[iter] || `Iter ${iter}`;
+            });
             
             // Extract frequencies for each action type
             const actionTypes = ['fold', 'call', 'check', 'raise', 'bet', 'all_in'];
@@ -2047,7 +2066,8 @@
             
             if (sortedData.length === 0) return;
             
-            const labels = sortedData.map(r => r.iteration);
+            // Use participant names for labels
+            const labels = sortedData.map(r => r.name || participantNames[r.iteration] || `Iter ${r.iteration}`);
             
             // Performance chart - just overall BB/100 now
             performanceChart.data.labels = labels;
@@ -2074,6 +2094,9 @@
             
             // Clear action frequency state
             actionData = {};
+            
+            // Clear participant names
+            participantNames = {};
             
             handsFeed.innerHTML = `
                 <div class="empty-state">
@@ -2153,15 +2176,24 @@
                     break;
                     
                 case 'tournament_started':
-                    tournamentCheckpoints = data.checkpoints || 0;
+                    tournamentCheckpoints = data.total_participants || data.checkpoints || 0;
+                    const numModels = data.checkpoints || 0;
+                    const numBots = data.bots || 0;
                     
                     document.getElementById('statCheckpoints').textContent = tournamentCheckpoints;
                     document.getElementById('statActive').textContent = tournamentCheckpoints;
                     document.getElementById('statEliminated').textContent = '0';
                     document.getElementById('tournamentInfo').style.display = 'flex';
                     document.getElementById('tournamentEmpty').style.display = 'none';
-                    document.getElementById('infoCheckpoints').textContent = tournamentCheckpoints;
+                    document.getElementById('infoCheckpoints').textContent = `${numModels} models + ${numBots} bots`;
                     document.getElementById('infoHandsPlayed').textContent = '0';
+                    
+                    // Store participant names
+                    if (data.participants) {
+                        Object.entries(data.participants).forEach(([iter, info]) => {
+                            participantNames[parseInt(iter)] = info.name;
+                        });
+                    }
                     
                     // Initialize chip history for all iterations
                     if (data.initial_chip_history) {
@@ -2169,8 +2201,10 @@
                             const iterNum = parseInt(iter);
                             chipHistory[iterNum] = [[0, chips]];
                             activeIterations.add(iterNum);
+                            const name = participantNames[iterNum] || `Iter ${iterNum}`;
                             performanceData[iterNum] = {
                                 iteration: iterNum,
+                                name: name,
                                 chips: chips,
                                 eliminated: false,
                                 total_hands: 0,
@@ -2180,7 +2214,8 @@
                         updateChipChart();
                     }
                     
-                    updateStatus('running', `Playing until winner: ${tournamentCheckpoints} checkpoints`, 0);
+                    const participantText = numBots > 0 ? `${numModels} models + ${numBots} bots` : `${tournamentCheckpoints} checkpoints`;
+                    updateStatus('running', `Playing until winner: ${participantText}`, 0);
                     break;
                     
                 case 'hand':
@@ -2260,6 +2295,10 @@
                             if (info.history) {
                                 chipHistory[iterNum] = info.history;
                             }
+                            // Store name if provided
+                            if (info.name) {
+                                participantNames[iterNum] = info.name;
+                            }
                             if (info.eliminated) {
                                 eliminatedIterations.add(iterNum);
                                 activeIterations.delete(iterNum);
@@ -2273,7 +2312,12 @@
                     // Action frequency update from server
                     if (data.action_data) {
                         Object.entries(data.action_data).forEach(([iter, info]) => {
-                            actionData[parseInt(iter)] = info;
+                            const iterNum = parseInt(iter);
+                            actionData[iterNum] = info;
+                            // Store name if provided
+                            if (info.name) {
+                                participantNames[iterNum] = info.name;
+                            }
                         });
                         updateActionFreqChart();
                     }
@@ -2281,7 +2325,9 @@
                     
                 case 'tournament_winner':
                     // A single iteration has won (all others eliminated)
-                    updateStatus('completed', `🏆 Winner: Iter ${data.winner_iteration} with ${data.final_chips.toLocaleString()} chips!`, 100);
+                    const winnerName = data.winner_name || participantNames[data.winner_iteration] || `Iter ${data.winner_iteration}`;
+                    const winnerIcon = data.winner_is_bot ? '🤖' : '🧠';
+                    updateStatus('completed', `🏆 Winner: ${winnerIcon} ${winnerName} with ${data.final_chips.toLocaleString()} chips!`, 100);
                     updateChipChart();
                     updateLeaderboard();
                     break;
@@ -2291,6 +2337,10 @@
                     if (data.leaderboard) {
                         data.leaderboard.forEach(row => {
                             performanceData[row.iteration] = row;
+                            // Store name in participant names map
+                            if (row.name) {
+                                participantNames[row.iteration] = row.name;
+                            }
                             if (row.eliminated) {
                                 eliminatedIterations.add(row.iteration);
                                 activeIterations.delete(row.iteration);
