@@ -51,6 +51,9 @@ from model_agent import (
     AggressiveAgent,
     CallingStationAgent,
     HeroCallerAgent,
+    AlwaysRaiseAgent,
+    AlwaysCallAgent,
+    AlwaysFoldAgent,
     ACTION_MAP, 
     ACTION_NAMES, 
     BET_SIZE_MAP,
@@ -58,8 +61,6 @@ from model_agent import (
     create_legal_actions_mask,
     extract_state
 )
-from rl_state_encoder import estimate_hand_strength
-
 # Import model version and log level from config
 from config import MODEL_VERSION, LOG_LEVEL, DEFAULT_MODELS_DIR
 
@@ -208,32 +209,35 @@ class RLTrainingSession:
             player_id = f'p{i}'
             
             # Opponent selection probabilities (REBALANCED TO PUNISH BAD ALL-INS):
-            # - CallingStation: 25% - CRITICAL: Calls all-ins, shows model trash loses at showdown
-            # - HeroCaller: 15% - Calls down with medium hands when opponent is aggressive
+            # - CallingStation: 23% - CRITICAL: Calls all-ins, shows model trash loses at showdown
+            # - HeroCaller: 13% - Calls down with medium hands when opponent is aggressive
             # - Past checkpoint: 15% (when pool available) - diverse self-play
             # - Current model: 10% - immediate self-play for Nash equilibrium
-            # - TightAgent: 15% - Punishes by only playing premium hands
-            # - Heuristic: 10% - Strategic baseline
-            # - AggressiveAgent: 5% - Teaches calling down bluffs
+            # - TightAgent: 13% - Punishes by only playing premium hands
+            # - Heuristic: 8% - Strategic baseline
+            # - AggressiveAgent: 4% - Teaches calling down bluffs
             # - LoosePassive: 3% - Rewards value betting
-            # - Random: 2% - Minimal exploration
+            # - AlwaysCall: 3% - Tests value betting (calls everything)
+            # - AlwaysRaise: 2% - Tests handling hyper-aggression
+            # - AlwaysFold: 2% - Tests blind stealing and pressure
+            # - Random: 4% - Exploration
             roll = random.random()
             
-            if roll < 0.25:
-                # CallingStationAgent (25% of time) - CRITICAL FOR FIXING ALL-IN PROBLEM
+            if roll < 0.23:
+                # CallingStationAgent (23% of time) - CRITICAL FOR FIXING ALL-IN PROBLEM
                 # This agent CALLS all-ins with any decent hand, showing the model
                 # that trash hands lose at showdown
                 agents.append({
                     'id': player_id,
                     'type': 'calling_station'
                 })
-            elif roll < 0.40:
-                # HeroCallerAgent (15% of time) - Calls down suspected bluffs
+            elif roll < 0.36:
+                # HeroCallerAgent (13% of time) - Calls down suspected bluffs
                 agents.append({
                     'id': player_id,
                     'type': 'hero_caller'
                 })
-            elif use_opponent_pool and self.opponent_pool and roll < 0.55:
+            elif use_opponent_pool and self.opponent_pool and roll < 0.51:
                 # Use past checkpoint (15% of time when pool available)
                 checkpoint_path = self._sample_opponent_checkpoint()
                 opponent_model = self._load_opponent_model(checkpoint_path)
@@ -247,39 +251,60 @@ class RLTrainingSession:
                     })
                 else:
                     agents.append({'id': player_id, 'type': 'calling_station'})
-            elif use_opponent_pool and roll < 0.65:
+            elif use_opponent_pool and roll < 0.61:
                 # Use current model as opponent (10% of time)
                 agents.append({
                     'id': player_id,
                     'type': 'model',
                     'encoder': RLStateEncoder()
                 })
-            elif roll < 0.80:
-                # Use TightAgent (15% of time) - Only plays premium hands
+            elif roll < 0.74:
+                # Use TightAgent (13% of time) - Only plays premium hands
                 agents.append({
                     'id': player_id,
                     'type': 'tight'
                 })
-            elif roll < 0.90:
-                # Use heuristic agent (10% of time)
+            elif roll < 0.82:
+                # Use heuristic agent (8% of time)
                 agents.append({
                     'id': player_id,
                     'type': 'heuristic'
                 })
-            elif roll < 0.95:
-                # Use AggressiveAgent (5% of time) - teaches model to call down
+            elif roll < 0.86:
+                # Use AggressiveAgent (4% of time) - teaches model to call down
                 agents.append({
                     'id': player_id,
                     'type': 'aggressive'
                 })
-            elif roll < 0.98:
+            elif roll < 0.89:
                 # Use LoosePassive agent (3% of time) - rewards value betting
                 agents.append({
                     'id': player_id,
                     'type': 'loose_passive'
                 })
+            elif roll < 0.92:
+                # AlwaysCallAgent (3% of time) - tests value betting
+                # This opponent calls everything, teaching model thin value bets
+                agents.append({
+                    'id': player_id,
+                    'type': 'always_call'
+                })
+            elif roll < 0.94:
+                # AlwaysRaiseAgent (2% of time) - tests handling hyper-aggression
+                # This opponent raises everything, teaching model to call with decent hands
+                agents.append({
+                    'id': player_id,
+                    'type': 'always_raise'
+                })
+            elif roll < 0.96:
+                # AlwaysFoldAgent (2% of time) - tests blind stealing
+                # This opponent folds to any bet, teaching model to apply pressure
+                agents.append({
+                    'id': player_id,
+                    'type': 'always_fold'
+                })
             else:
-                # Use random agent (2% of time)
+                # Use random agent (4% of time)
                 agents.append({
                     'id': player_id,
                     'type': 'random'
@@ -473,6 +498,21 @@ class RLTrainingSession:
                 # Use HeroCallerAgent - calls down suspected bluffs with medium hands
                 hero_caller = HeroCallerAgent(current_player_id, "HeroCaller")
                 action_type, amount, action_label = hero_caller.select_action(state_dict, legal_actions)
+            
+            elif current_agent['type'] == 'always_raise':
+                # AlwaysRaiseAgent - always raises/bets when possible
+                always_raise = AlwaysRaiseAgent(current_player_id, "AlwaysRaise")
+                action_type, amount, action_label = always_raise.select_action(state_dict, legal_actions)
+            
+            elif current_agent['type'] == 'always_call':
+                # AlwaysCallAgent - always checks or calls, never bets/raises
+                always_call = AlwaysCallAgent(current_player_id, "AlwaysCall")
+                action_type, amount, action_label = always_call.select_action(state_dict, legal_actions)
+            
+            elif current_agent['type'] == 'always_fold':
+                # AlwaysFoldAgent - always folds unless it's free to check
+                always_fold = AlwaysFoldAgent(current_player_id, "AlwaysFold")
+                action_type, amount, action_label = always_fold.select_action(state_dict, legal_actions)
                 
             elif current_agent['type'] == 'past_model':
                 # Use past checkpoint model for action selection

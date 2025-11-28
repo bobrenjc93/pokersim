@@ -155,6 +155,25 @@ Open `http://localhost:5000` in your browser to access the evaluation UI.
 - **Baseline comparisons** - Compare against Random and Heuristic agents
 - **Interactive charts** - Visualize performance progression over training
 
+### Training Opponent Pool
+
+The RL model trains against a diverse pool of opponents to learn robust strategies:
+
+| Agent Type | Strategy | Purpose |
+|------------|----------|---------|
+| `CallingStation` | Calls most bets, especially all-ins | Punishes weak all-in plays |
+| `HeroCaller` | Calls down suspected bluffs | Teaches that bluffing has limits |
+| `TightAgent` | Only plays premium hands | Punishes over-aggression |
+| `HeuristicAgent` | Rule-based strategic play | Provides a baseline opponent |
+| `AggressiveAgent` | Frequent bets and raises | Teaches calling down bluffs |
+| `LoosePassive` | Calls too much, rarely raises | Rewards value betting |
+| `AlwaysCall` | Always checks or calls | Tests thin value bets |
+| `AlwaysRaise` | Always bets/raises max | Tests handling hyper-aggression |
+| `AlwaysFold` | Folds to any bet | Tests blind stealing |
+| `RandomAgent` | Random valid actions | Baseline exploration |
+
+Self-play against past model checkpoints (15%) and the current model (10%) is also used.
+
 ### Convergence Notes
 - **Short-term (<500 iters)**: Win rate fluctuates but avoids 0%.
 - **Medium-term (500-2000 iters)**: Win rate stabilizes around 45-55%.

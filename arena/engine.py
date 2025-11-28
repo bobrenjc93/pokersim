@@ -22,6 +22,14 @@ from model_agent import (
     extract_state,
     RandomAgent,
     HeuristicAgent,
+    TightAgent,
+    LoosePassiveAgent,
+    AggressiveAgent,
+    CallingStationAgent,
+    HeroCallerAgent,
+    AlwaysRaiseAgent,
+    AlwaysCallAgent,
+    AlwaysFoldAgent,
     load_model_agent
 )
 from monte_carlo import MultiRunoutEvaluator, simulate_runouts
@@ -126,6 +134,22 @@ class Arena:
                                       device=self.device, deterministic=config.get('deterministic', False))
             elif config['type'] == 'heuristic':
                 return HeuristicAgent(player_id, name)
+            elif config['type'] == 'tight':
+                return TightAgent(player_id, name)
+            elif config['type'] == 'loose_passive':
+                return LoosePassiveAgent(player_id, name)
+            elif config['type'] == 'aggressive':
+                return AggressiveAgent(player_id, name)
+            elif config['type'] == 'calling_station':
+                return CallingStationAgent(player_id, name)
+            elif config['type'] == 'hero_caller':
+                return HeroCallerAgent(player_id, name)
+            elif config['type'] == 'always_raise':
+                return AlwaysRaiseAgent(player_id, name)
+            elif config['type'] == 'always_call':
+                return AlwaysCallAgent(player_id, name)
+            elif config['type'] == 'always_fold':
+                return AlwaysFoldAgent(player_id, name)
             else:
                 return RandomAgent(player_id, name)
 

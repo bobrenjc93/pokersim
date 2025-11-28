@@ -1134,3 +1134,74 @@ class HeroCallerAgent:
         
         action_type, amount = convert_action_label(action_label, state)
         return action_type, amount, action_label
+
+
+class SimpleAgent:
+    """
+    Base class for simple stateless heuristic agents.
+    
+    Provides common __init__, reset_hand, and observe_action methods.
+    Subclasses only need to implement _choose_action_label().
+    """
+    def __init__(self, player_id: str, name: str):
+        self.player_id = player_id
+        self.name = name
+        
+    def reset_hand(self):
+        pass
+        
+    def observe_action(self, player_id: str, action_type: str, amount: int, pot: int, stage: str):
+        pass
+
+    def _choose_action_label(self, state: Dict[str, Any], legal_actions: List[str]) -> str:
+        """Override in subclasses to return the chosen action label."""
+        raise NotImplementedError
+    
+    def select_action(self, state: Dict[str, Any], legal_actions: List[str]) -> Tuple[str, int, str]:
+        """Select action using subclass's _choose_action_label."""
+        action_label = self._choose_action_label(state, legal_actions)
+        action_type, amount = convert_action_label(action_label, state)
+        return action_type, amount, action_label
+
+
+class AlwaysRaiseAgent(SimpleAgent):
+    """
+    Always raises/bets when possible, otherwise call/check.
+    Useful for testing model robustness against hyper-aggressive opponents.
+    """
+    def _choose_action_label(self, state: Dict[str, Any], legal_actions: List[str]) -> str:
+        if 'raise' in legal_actions:
+            return 'raise_100%'
+        if 'bet' in legal_actions:
+            return 'bet_100%'
+        if 'all_in' in legal_actions:
+            return 'all_in'
+        if 'call' in legal_actions:
+            return 'call'
+        if 'check' in legal_actions:
+            return 'check'
+        return 'fold'
+
+
+class AlwaysCallAgent(SimpleAgent):
+    """
+    Always checks or calls, never bets/raises.
+    Useful for testing value betting - this agent will call you down.
+    """
+    def _choose_action_label(self, state: Dict[str, Any], legal_actions: List[str]) -> str:
+        if 'check' in legal_actions:
+            return 'check'
+        if 'call' in legal_actions:
+            return 'call'
+        return 'fold'
+
+
+class AlwaysFoldAgent(SimpleAgent):
+    """
+    Always folds when facing a bet, checks if free.
+    Useful for testing if the model learns to steal blinds and apply pressure.
+    """
+    def _choose_action_label(self, state: Dict[str, Any], legal_actions: List[str]) -> str:
+        if 'check' in legal_actions:
+            return 'check'
+        return 'fold'

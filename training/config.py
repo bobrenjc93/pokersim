@@ -1,14 +1,7 @@
 """
 Configuration for RL training.
 
-Import and use presets:
-    from config import get_preset
-    config = get_preset('heads_up')
-    
-Or customize game configs:
-    from config import DEFAULT_GAME_CONFIG
-    my_config = DEFAULT_GAME_CONFIG.copy()
-    my_config['startingChips'] = 2000
+Only constants that are actively imported elsewhere are defined here.
 """
 
 # =============================================================================
@@ -16,7 +9,7 @@ Or customize game configs:
 # =============================================================================
 
 # Model version for RL training
-MODEL_VERSION = 30  # Current RL model version (v30: PPO enhancements - PopArt, adaptive entropy, warmup LR)
+MODEL_VERSION = 31  # Current RL model version (v31: diverse opponent pool - AlwaysRaise, AlwaysCall, AlwaysFold agents)
 
 # Default directory for saving/loading models
 DEFAULT_MODELS_DIR = f"/tmp/pokersim/rl_models_v{MODEL_VERSION}"
@@ -27,83 +20,3 @@ DEFAULT_MODELS_DIR = f"/tmp/pokersim/rl_models_v{MODEL_VERSION}"
 
 # Log levels: 0=minimal, 1=normal, 2=verbose
 LOG_LEVEL = 1  # Default to normal logging (shows errors and progress)
-
-# =============================================================================
-# Game Configuration
-# =============================================================================
-
-DEFAULT_GAME_CONFIG = {
-    'smallBlind': 10,
-    'bigBlind': 20,
-    'startingChips': 1000,
-    'minPlayers': 2,
-    'maxPlayers': 10,
-}
-
-# High stakes game
-HIGH_STAKES_CONFIG = {
-    'smallBlind': 50,
-    'bigBlind': 100,
-    'startingChips': 5000,
-    'minPlayers': 2,
-    'maxPlayers': 10,
-}
-
-# Short stack game
-SHORT_STACK_CONFIG = {
-    'smallBlind': 10,
-    'bigBlind': 20,
-    'startingChips': 200,  # Only 10 big blinds
-    'minPlayers': 2,
-    'maxPlayers': 10,
-}
-
-# Deep stack game
-DEEP_STACK_CONFIG = {
-    'smallBlind': 5,
-    'bigBlind': 10,
-    'startingChips': 5000,  # 500 big blinds
-    'minPlayers': 2,
-    'maxPlayers': 10,
-}
-
-# Tournament settings (increasing blinds could be added)
-TOURNAMENT_CONFIG = {
-    'smallBlind': 25,
-    'bigBlind': 50,
-    'startingChips': 1500,
-    'minPlayers': 6,
-    'maxPlayers': 9,
-}
-
-
-# =============================================================================
-# Monte Carlo Multi-Runout Configuration
-# =============================================================================
-
-# Default number of Monte Carlo runouts for regret calculation and equity splitting
-# 0 = disabled (use single outcome)
-# 50 = recommended for accurate estimation (trades off accuracy vs speed)
-DEFAULT_NUM_RUNOUTS = 50
-
-# Weight for regret-based reward adjustment (0-1)
-# 0 = use raw rewards only
-# 1 = use regret-adjusted rewards only
-# 0.5 = blend equally (recommended)
-DEFAULT_REGRET_WEIGHT = 0.5
-
-# =============================================================================
-# Agent Configuration
-# =============================================================================
-
-# Available agent types for training data generation
-# (Kept for reference or future use)
-# AGENT_TYPES = [
-#     'random',      # Uniformly random actions
-#     'call',        # Always call/check
-#     'tight',       # Play only premium hands
-#     'aggressive',  # Bet/raise frequently
-#     'mixed',       # Random mix of agent types
-# ]
-
-
