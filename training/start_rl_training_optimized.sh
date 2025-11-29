@@ -31,7 +31,7 @@ API_DIR="$(dirname "$SCRIPT_DIR")/api"
 
 # Training parameters (optimized for convergence and proper hand selection)
 ITERATIONS=5000
-EPISODES_PER_ITER=500    # Balanced for variance reduction vs speed
+EPISODES_PER_ITER=1000    # Balanced for variance reduction vs speed
 PPO_EPOCHS=20            # Increased to extract more from data
 MINI_BATCH_SIZE=512      # Standard batch size
 LEARNING_RATE=0.0002     # Slightly increased with larger batch size

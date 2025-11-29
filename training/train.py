@@ -1474,6 +1474,67 @@ class RLTrainingSession:
             self.opponent_pool.pop(0)
         
         self.opponent_pool.append(checkpoint_path)
+        
+        # Cleanup old checkpoints - keep only last 50 iteration checkpoints
+        self._cleanup_old_checkpoints(max_checkpoints=50)
+    
+    def _cleanup_old_checkpoints(self, max_checkpoints: int = 50):
+        """
+        Remove old iteration checkpoints, keeping only the most recent ones.
+        
+        Preserves special checkpoints: latest, final, baseline.
+        Only removes iteration checkpoints (poker_rl_iter_*.pt).
+        
+        Args:
+            max_checkpoints: Maximum number of iteration checkpoints to keep
+        """
+        import re
+        
+        # Pattern to match iteration checkpoints: poker_rl_iter_123.pt
+        iter_pattern = re.compile(r'^poker_rl_iter_(\d+)\.pt$')
+        
+        # Find all iteration checkpoints
+        iter_checkpoints = []
+        for f in self.output_dir.iterdir():
+            if f.is_file():
+                match = iter_pattern.match(f.name)
+                if match:
+                    iter_num = int(match.group(1))
+                    iter_checkpoints.append((iter_num, f))
+        
+        # Sort by iteration number (ascending)
+        iter_checkpoints.sort(key=lambda x: x[0])
+        
+        # If we have more than max_checkpoints, remove the oldest
+        if len(iter_checkpoints) > max_checkpoints:
+            checkpoints_to_remove = iter_checkpoints[:-max_checkpoints]
+            
+            for iter_num, checkpoint_file in checkpoints_to_remove:
+                try:
+                    # Remove from opponent pool if present
+                    if checkpoint_file in self.opponent_pool:
+                        self.opponent_pool.remove(checkpoint_file)
+                    
+                    # Remove from opponent model cache if present
+                    path_str = str(checkpoint_file)
+                    if path_str in self._opponent_model_cache:
+                        del self._opponent_model_cache[path_str]
+                    
+                    # Remove win rate tracking
+                    if path_str in self.opponent_win_rates:
+                        del self.opponent_win_rates[path_str]
+                    if path_str in self._opponent_game_counts:
+                        del self._opponent_game_counts[path_str]
+                    
+                    # Delete the file
+                    checkpoint_file.unlink()
+                    
+                    if self.log_level >= 2:
+                        print(f"  🗑️ Removed old checkpoint: {checkpoint_file.name}")
+                        
+                except Exception as e:
+                    if self.log_level >= 1:
+                        print(f"⚠️  Failed to remove checkpoint {checkpoint_file}: {e}")
     
     def _load_opponent_model(self, checkpoint_path: Path) -> PokerActorCritic:
         """
