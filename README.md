@@ -8,6 +8,8 @@ This monorepo contains:
 - **Website**: Python Flask web server with modern UI for poker simulations
 - **API**: Pure C++ API server for fast, stateless game simulations
 - **Training**: Reinforcement learning system (PPO) for training poker AI agents
+- **Playground**: Interactive web UI to play poker against trained AI models
+- **Arena**: Evaluation system for comparing model checkpoints
 
 ## Architecture
 
@@ -83,13 +85,18 @@ pokersim/
 │   ├── CMakeLists.txt     # CMake configuration
 │   ├── Makefile           # Make configuration
 │   └── README.md          # API & engine reference
-└── training/              # RL training system
-    ├── train.py           # RL training script (PPO)
-    ├── eval.py            # Model evaluation script
-    ├── ppo.py             # PPO algorithm
-    ├── rl_model.py        # Neural network model
-    ├── rl_state_encoder.py # State encoding
-    └── start_rl_training_optimized.sh # Training script
+├── training/              # RL training system
+│   ├── train.py           # RL training script (PPO)
+│   ├── eval.py            # Model evaluation script
+│   ├── ppo.py             # PPO algorithm
+│   ├── rl_model.py        # Neural network model
+│   ├── rl_state_encoder.py # State encoding
+│   └── start_rl_training_optimized.sh # Training script
+├── playground/            # Interactive poker playground
+│   ├── app.py             # Flask application
+│   ├── start.sh           # Quick start script
+│   └── templates/
+│       └── index.html     # Poker table UI
 └── arena/                 # AI vs AI Evaluation Arena
     ├── engine.py          # Core arena logic
     └── server.py          # Web server with real-time UI
@@ -154,6 +161,17 @@ Open `http://localhost:5000` in your browser to access the evaluation UI.
 - **Round-robin tournaments** - All checkpoints play against each other
 - **Baseline comparisons** - Compare against Random and Heuristic agents
 - **Interactive charts** - Visualize performance progression over training
+
+### Playground (Play Against AI)
+
+The Playground provides an interactive web interface to play poker against trained AI models:
+
+```bash
+cd playground
+./start.sh
+```
+
+Open `http://localhost:5001` in your browser to play heads-up poker against any trained checkpoint.
 
 ### Training Opponent Pool
 

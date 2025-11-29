@@ -61,8 +61,8 @@ def convert_action_label(
     """
     player_chips = state.get('player_chips', 0)
     
-    # Simple actions
-    if action_label in ['fold', 'check', 'call', 'all_in']:
+    # Simple actions (including bare 'bet' and 'raise' which get their amounts from caller)
+    if action_label in ['fold', 'check', 'call', 'all_in', 'bet', 'raise']:
         return action_label, 0
     
     # Bet actions
