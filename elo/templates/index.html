@@ -1,0 +1,1359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Poker ELO Ratings (Go/Chess Scale)</title>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Sora:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --bg-deep: #050508;
+            --bg-primary: #0a0a0f;
+            --bg-secondary: #0f1018;
+            --bg-card: #111119;
+            --bg-elevated: #161621;
+            --bg-hover: #1a1a26;
+            --border-subtle: #1f1f2e;
+            --border-default: #2a2a3d;
+            --border-highlight: #3d3d56;
+            --text-primary: #f5f5fa;
+            --text-secondary: #9898b0;
+            --text-muted: #5a5a72;
+            --elo-gold: #ffd700;
+            --elo-gold-glow: rgba(255, 215, 0, 0.3);
+            --elo-silver: #c0c0c0;
+            --elo-bronze: #cd7f32;
+            --accent-up: #22c55e;
+            --accent-up-glow: rgba(34, 197, 94, 0.25);
+            --accent-down: #ef4444;
+            --accent-down-glow: rgba(239, 68, 68, 0.25);
+            --accent-draw: #6366f1;
+            --gradient-gold: linear-gradient(135deg, #ffd700 0%, #ffb800 50%, #f59e0b 100%);
+            --gradient-rank: linear-gradient(180deg, rgba(255, 215, 0, 0.1) 0%, transparent 100%);
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Sora', sans-serif;
+            background: var(--bg-deep);
+            color: var(--text-primary);
+            min-height: 100vh;
+            background-image: 
+                radial-gradient(ellipse at 20% 0%, rgba(255, 215, 0, 0.04) 0%, transparent 50%),
+                radial-gradient(ellipse at 80% 100%, rgba(99, 102, 241, 0.04) 0%, transparent 50%),
+                linear-gradient(180deg, var(--bg-deep) 0%, var(--bg-primary) 100%);
+        }
+        
+        .container {
+            max-width: 1500px;
+            margin: 0 auto;
+            padding: 1.5rem 2rem;
+        }
+        
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+            padding-bottom: 1.25rem;
+            border-bottom: 1px solid var(--border-subtle);
+        }
+        
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+        
+        .logo-icon {
+            width: 44px;
+            height: 44px;
+            background: var(--gradient-gold);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+            box-shadow: 0 4px 20px var(--elo-gold-glow);
+        }
+        
+        h1 {
+            font-size: 1.75rem;
+            font-weight: 800;
+            letter-spacing: -0.03em;
+            background: var(--gradient-gold);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .header-status {
+            display: flex;
+            align-items: center;
+            gap: 1.5rem;
+        }
+        
+        .device-badge {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            background: var(--bg-elevated);
+            border: 1px solid var(--border-default);
+            border-radius: 8px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+        }
+        
+        .device-badge .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--accent-up);
+            box-shadow: 0 0 8px var(--accent-up-glow);
+        }
+        
+        .connection-status {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+        
+        .connection-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--text-muted);
+            transition: all 0.3s;
+        }
+        
+        .connection-dot.connected {
+            background: var(--accent-up);
+            box-shadow: 0 0 8px var(--accent-up-glow);
+        }
+        
+        .main-layout {
+            display: grid;
+            grid-template-columns: 320px 1fr;
+            gap: 1.5rem;
+        }
+        
+        .sidebar {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+        
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: 14px;
+            overflow: hidden;
+        }
+        
+        .card-header {
+            padding: 1rem 1.25rem;
+            border-bottom: 1px solid var(--border-subtle);
+            font-weight: 600;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            color: var(--text-secondary);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        
+        .card-header-badge {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.65rem;
+            padding: 0.25rem 0.5rem;
+            background: var(--bg-elevated);
+            border-radius: 4px;
+            color: var(--elo-gold);
+            border: 1px solid rgba(255, 215, 0, 0.2);
+        }
+        
+        .card-body {
+            padding: 1.25rem;
+        }
+        
+        .form-group {
+            margin-bottom: 1rem;
+        }
+        
+        .form-label {
+            display: block;
+            font-size: 0.7rem;
+            font-weight: 500;
+            color: var(--text-muted);
+            margin-bottom: 0.5rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        
+        .form-control {
+            width: 100%;
+            padding: 0.75rem 1rem;
+            background: var(--bg-elevated);
+            border: 1px solid var(--border-default);
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+        
+        .form-control:focus {
+            outline: none;
+            border-color: var(--elo-gold);
+            box-shadow: 0 0 0 3px var(--elo-gold-glow);
+        }
+        
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0.75rem;
+        }
+        
+        .btn-group {
+            display: flex;
+            gap: 0.75rem;
+            margin-top: 1.25rem;
+        }
+        
+        .btn {
+            flex: 1;
+            padding: 0.875rem 1rem;
+            border: none;
+            border-radius: 8px;
+            font-family: 'Sora', sans-serif;
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .btn-primary {
+            background: var(--gradient-gold);
+            color: #0a0a0f;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .btn-primary::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+            transition: left 0.5s;
+        }
+        
+        .btn-primary:hover:not(:disabled)::before {
+            left: 100%;
+        }
+        
+        .btn-primary:hover:not(:disabled) {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 20px var(--elo-gold-glow);
+        }
+        
+        .btn-danger {
+            background: transparent;
+            border: 1px solid var(--accent-down);
+            color: var(--accent-down);
+        }
+        
+        .btn-danger:hover:not(:disabled) {
+            background: var(--accent-down-glow);
+        }
+        
+        .btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+        
+        .status-grid {
+            display: grid;
+            gap: 0.75rem;
+        }
+        
+        .status-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.5rem 0;
+        }
+        
+        .status-row:not(:last-child) {
+            border-bottom: 1px solid var(--border-subtle);
+        }
+        
+        .status-label {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        
+        .status-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 600;
+            font-size: 0.8rem;
+        }
+        
+        .status-value.running {
+            color: var(--elo-gold);
+        }
+        
+        .status-value.idle {
+            color: var(--text-muted);
+        }
+        
+        .status-value.completed {
+            color: var(--accent-up);
+        }
+        
+        .status-value.error {
+            color: var(--accent-down);
+        }
+        
+        .progress-container {
+            margin-top: 1rem;
+        }
+        
+        .progress-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 0.5rem;
+            font-size: 0.7rem;
+        }
+        
+        .progress-bar-wrapper {
+            background: var(--bg-elevated);
+            border-radius: 6px;
+            height: 8px;
+            overflow: hidden;
+        }
+        
+        .progress-bar {
+            height: 100%;
+            background: var(--gradient-gold);
+            border-radius: 6px;
+            transition: width 0.3s ease;
+        }
+        
+        .main-content {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+        
+        .stats-row {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 1rem;
+        }
+        
+        .stat-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: 14px;
+            padding: 1.25rem;
+            text-align: center;
+            transition: border-color 0.2s;
+        }
+        
+        .stat-card:hover {
+            border-color: var(--border-default);
+        }
+        
+        .stat-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1.75rem;
+            font-weight: 700;
+            margin-bottom: 0.25rem;
+        }
+        
+        .stat-value.gold {
+            background: var(--gradient-gold);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .stat-label {
+            font-size: 0.65rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+        }
+        
+        /* ELO Chart Card */
+        .elo-chart-card {
+            background: linear-gradient(135deg, var(--bg-card) 0%, rgba(255, 215, 0, 0.03) 100%);
+            border: 2px solid rgba(255, 215, 0, 0.3);
+            box-shadow: 0 0 40px rgba(255, 215, 0, 0.1);
+        }
+        
+        .elo-chart-card .card-header {
+            background: linear-gradient(90deg, rgba(255, 215, 0, 0.08) 0%, transparent 100%);
+        }
+        
+        .elo-chart-container {
+            height: 380px;
+        }
+        
+        .elo-legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+            margin-top: 1rem;
+            padding-top: 1rem;
+            border-top: 1px solid var(--border-subtle);
+        }
+        
+        .elo-legend-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.7rem;
+            padding: 0.4rem 0.6rem;
+            background: var(--bg-elevated);
+            border-radius: 4px;
+        }
+        
+        .elo-legend-item .color-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+        
+        .elo-legend-item .rating {
+            font-weight: 600;
+        }
+        
+        .charts-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+        }
+        
+        .chart-container {
+            height: 260px;
+        }
+        
+        /* Leaderboard Styles */
+        .leaderboard-card {
+            grid-column: span 2;
+        }
+        
+        .leaderboard-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.8rem;
+        }
+        
+        .leaderboard-table th {
+            text-align: left;
+            padding: 0.75rem 1rem;
+            background: var(--bg-elevated);
+            color: var(--text-muted);
+            font-weight: 600;
+            font-size: 0.65rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            position: sticky;
+            top: 0;
+        }
+        
+        .leaderboard-table th:first-child {
+            border-radius: 8px 0 0 0;
+        }
+        
+        .leaderboard-table th:last-child {
+            border-radius: 0 8px 0 0;
+        }
+        
+        .leaderboard-table td {
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--border-subtle);
+            font-family: 'JetBrains Mono', monospace;
+        }
+        
+        .leaderboard-table tr:hover td {
+            background: var(--bg-hover);
+        }
+        
+        .rank-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            font-weight: 700;
+            font-size: 0.9rem;
+        }
+        
+        .rank-1 {
+            background: var(--gradient-gold);
+            color: #0a0a0f;
+            box-shadow: 0 2px 12px var(--elo-gold-glow);
+        }
+        
+        .rank-2 {
+            background: linear-gradient(135deg, #e8e8e8, #c0c0c0);
+            color: #1a1a1a;
+        }
+        
+        .rank-3 {
+            background: linear-gradient(135deg, #e8a860, #cd7f32);
+            color: white;
+        }
+        
+        .rank-other {
+            background: var(--bg-elevated);
+            color: var(--text-muted);
+        }
+        
+        .rating-display {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .rating-value {
+            font-weight: 700;
+            font-size: 1rem;
+        }
+        
+        .rating-change {
+            font-size: 0.7rem;
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+        }
+        
+        .rating-change.positive {
+            background: var(--accent-up-glow);
+            color: var(--accent-up);
+        }
+        
+        .rating-change.negative {
+            background: var(--accent-down-glow);
+            color: var(--accent-down);
+        }
+        
+        .table-container {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        
+        .table-container::-webkit-scrollbar {
+            width: 6px;
+        }
+        
+        .table-container::-webkit-scrollbar-track {
+            background: var(--bg-elevated);
+            border-radius: 3px;
+        }
+        
+        .table-container::-webkit-scrollbar-thumb {
+            background: var(--border-default);
+            border-radius: 3px;
+        }
+        
+        /* Match Feed */
+        .match-feed {
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        
+        .match-feed::-webkit-scrollbar {
+            width: 6px;
+        }
+        
+        .match-feed::-webkit-scrollbar-track {
+            background: var(--bg-elevated);
+            border-radius: 3px;
+        }
+        
+        .match-feed::-webkit-scrollbar-thumb {
+            background: var(--border-default);
+            border-radius: 3px;
+        }
+        
+        .match-item {
+            display: grid;
+            grid-template-columns: 50px 1fr 100px;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.6rem 0.8rem;
+            background: var(--bg-elevated);
+            border-radius: 8px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.75rem;
+            animation: slideIn 0.15s ease;
+        }
+        
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(5px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        .match-num {
+            color: var(--text-muted);
+            font-size: 0.7rem;
+        }
+        
+        .match-players {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.75rem;
+        }
+        
+        .match-vs {
+            color: var(--text-muted);
+            font-size: 0.65rem;
+        }
+        
+        .match-result {
+            text-align: right;
+            display: flex;
+            flex-direction: column;
+            gap: 0.15rem;
+        }
+        
+        .match-winner {
+            font-weight: 600;
+            font-size: 0.7rem;
+        }
+        
+        .match-winner.a-wins {
+            color: var(--accent-up);
+        }
+        
+        .match-winner.b-wins {
+            color: var(--accent-up);
+        }
+        
+        .match-winner.draw {
+            color: var(--accent-draw);
+        }
+        
+        .match-elo-change {
+            font-size: 0.65rem;
+            color: var(--text-muted);
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 3rem;
+            color: var(--text-muted);
+        }
+        
+        .empty-state-icon {
+            font-size: 2.5rem;
+            margin-bottom: 0.75rem;
+            opacity: 0.5;
+        }
+        
+        .empty-state p {
+            font-size: 0.85rem;
+        }
+        
+        .bottom-row {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 1rem;
+        }
+        
+        @media (max-width: 1200px) {
+            .main-layout {
+                grid-template-columns: 1fr;
+            }
+            
+            .stats-row {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            
+            .charts-row {
+                grid-template-columns: 1fr;
+            }
+            
+            .bottom-row {
+                grid-template-columns: 1fr;
+            }
+            
+            .leaderboard-card {
+                grid-column: span 1;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="logo">
+                <div class="logo-icon">📊</div>
+                <h1>Poker ELO Ratings</h1>
+            </div>
+            <div class="header-status">
+                <div class="device-badge">
+                    <span class="dot"></span>
+                    <span id="deviceDisplay">Detecting...</span>
+                </div>
+                <div class="connection-status">
+                    <span class="connection-dot" id="connectionDot"></span>
+                    <span id="connectionText">Connecting...</span>
+                </div>
+            </div>
+        </header>
+        
+        <div class="main-layout">
+            <aside class="sidebar">
+                <div class="card">
+                    <div class="card-header">
+                        Simulation Config
+                        <span class="card-header-badge">Go/Chess Scale</span>
+                    </div>
+                    <div class="card-body">
+                        <form id="configForm">
+                            <div class="form-group">
+                                <label class="form-label">K-Factor</label>
+                                <input type="number" class="form-control" id="kFactor" value="40" min="1" max="80" step="1">
+                            </div>
+                            <div style="font-size: 0.7rem; color: var(--text-muted); margin-top: 0.5rem;">
+                                Best-of-51 freezeout rounds per match<br>
+                                1000 chips (25 BB) per round<br>
+                                Runs continuously until stopped
+                            </div>
+                            <div class="btn-group">
+                                <button type="submit" class="btn btn-primary" id="startBtn">Start Simulation</button>
+                                <button type="button" class="btn btn-danger" id="stopBtn" disabled>Stop</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <div class="card-header">Status</div>
+                    <div class="card-body">
+                        <div class="status-grid">
+                            <div class="status-row">
+                                <span class="status-label">State</span>
+                                <span class="status-value idle" id="statusState">Idle</span>
+                            </div>
+                            <div class="status-row">
+                                <span class="status-label">Current Match</span>
+                                <span class="status-value" id="statusMatch" style="font-size: 0.7rem;">—</span>
+                            </div>
+                            <div class="status-row">
+                                <span class="status-label">Round</span>
+                                <span class="status-value" id="statusRound">0</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <div class="card-header">ELO Formula (Go/Chess)</div>
+                    <div class="card-body" style="font-size: 0.75rem; color: var(--text-secondary);">
+                        <p style="margin-bottom: 0.75rem;">
+                            <strong style="color: var(--elo-gold);">Expected Score:</strong><br>
+                            <code style="font-family: 'JetBrains Mono', monospace; font-size: 0.7rem;">
+                                E = 1 / (1 + 10^((Rb - Ra) / 400))
+                            </code>
+                        </p>
+                        <p>
+                            <strong style="color: var(--elo-gold);">New Rating:</strong><br>
+                            <code style="font-family: 'JetBrains Mono', monospace; font-size: 0.7rem;">
+                                Ra' = Ra + K × (S - E)
+                            </code>
+                        </p>
+                        <p style="margin-top: 0.75rem; color: var(--text-muted); font-size: 0.65rem;">
+                            S = 1 (win), 0.5 (draw), 0 (loss)<br>
+                            Initial: 2500 • Top target: 4000-5000
+                        </p>
+                    </div>
+                </div>
+            </aside>
+            
+            <main class="main-content">
+                <div class="stats-row">
+                    <div class="stat-card">
+                        <div class="stat-value gold" id="statTopRating">2500</div>
+                        <div class="stat-label">Highest ELO</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="statParticipants" style="color: var(--accent-draw)">0</div>
+                        <div class="stat-label">Participants</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="statMatchesPlayed" style="color: var(--text-secondary)">0</div>
+                        <div class="stat-label">Matches Played</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="statAvgRating" style="color: var(--text-secondary)">2500</div>
+                        <div class="stat-label">Average ELO</div>
+                    </div>
+                </div>
+                
+                <!-- ELO Rating Over Time Chart -->
+                <div class="card elo-chart-card">
+                    <div class="card-header">
+                        <span style="display: flex; align-items: center; gap: 0.5rem;">
+                            <span style="font-size: 1.2rem;">📈</span>
+                            ELO Ratings Over Time
+                        </span>
+                        <span class="card-header-badge">Initial: 2500 • Top: 4-5k</span>
+                    </div>
+                    <div class="card-body">
+                        <div class="elo-chart-container">
+                            <canvas id="eloChart"></canvas>
+                        </div>
+                        <div class="elo-legend" id="eloLegend"></div>
+                    </div>
+                </div>
+                
+                <div class="bottom-row">
+                    <div class="card leaderboard-card">
+                        <div class="card-header">
+                            ELO Leaderboard
+                            <span class="card-header-badge" id="leaderboardCount">0 players</span>
+                        </div>
+                        <div class="card-body" style="padding: 0;">
+                            <div class="table-container">
+                                <table class="leaderboard-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Rank</th>
+                                            <th>Player</th>
+                                            <th>Rating</th>
+                                            <th>Games</th>
+                                            <th>W-L-D</th>
+                                            <th>Win %</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="leaderboardBody">
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="card">
+                        <div class="card-header">
+                            Match Feed
+                            <span class="card-header-badge" id="matchFeedCount">0 matches</span>
+                        </div>
+                        <div class="card-body">
+                            <div class="match-feed" id="matchFeed">
+                                <div class="empty-state">
+                                    <div class="empty-state-icon">🎯</div>
+                                    <p>Matches will appear here</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <script>
+        // Chart colors
+        const playerColors = [
+            '#ffd700', '#22c55e', '#6366f1', '#ef4444', '#f59e0b',
+            '#14b8a6', '#ec4899', '#8b5cf6', '#06b6d4', '#84cc16',
+            '#f97316', '#0ea5e9', '#a855f7', '#10b981', '#e11d48'
+        ];
+        
+        // ELO Chart
+        const eloCtx = document.getElementById('eloChart').getContext('2d');
+        const eloChart = new Chart(eloCtx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: []
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: {
+                    intersect: false,
+                    mode: 'index'
+                },
+                plugins: {
+                    legend: {
+                        display: false
+                    },
+                    tooltip: {
+                        backgroundColor: '#111119',
+                        borderColor: '#2a2a3d',
+                        borderWidth: 1,
+                        titleColor: '#f5f5fa',
+                        bodyColor: '#9898b0',
+                        titleFont: { family: 'JetBrains Mono', weight: '600' },
+                        bodyFont: { family: 'JetBrains Mono' },
+                        padding: 12,
+                        cornerRadius: 8,
+                        callbacks: {
+                            label: function(context) {
+                                return `${context.dataset.label}: ${Math.round(context.parsed.y)} ELO`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        title: { 
+                            display: true, 
+                            text: 'Match #', 
+                            color: '#5a5a72',
+                            font: { size: 11, family: 'Sora', weight: '600' }
+                        },
+                        grid: { color: 'rgba(42, 42, 61, 0.5)', drawBorder: false },
+                        ticks: { color: '#9898b0', font: { family: 'JetBrains Mono', size: 10 } }
+                    },
+                    y: {
+                        title: { 
+                            display: true, 
+                            text: 'ELO Rating', 
+                            color: '#5a5a72',
+                            font: { size: 11, family: 'Sora', weight: '600' }
+                        },
+                        grid: { color: 'rgba(42, 42, 61, 0.5)', drawBorder: false },
+                        ticks: { color: '#9898b0', font: { family: 'JetBrains Mono', size: 10 } }
+                    }
+                },
+                animation: {
+                    duration: 0
+                }
+            }
+        });
+        
+        // State
+        let eventSource = null;
+        let participants = {};
+        let ratingHistories = {};
+        let matchCount = 0;
+        let currentRound = 0;
+        
+        // DOM elements
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const statusState = document.getElementById('statusState');
+        const statusMatch = document.getElementById('statusMatch');
+        const statusRound = document.getElementById('statusRound');
+        const connectionDot = document.getElementById('connectionDot');
+        const connectionText = document.getElementById('connectionText');
+        const matchFeed = document.getElementById('matchFeed');
+        const leaderboardBody = document.getElementById('leaderboardBody');
+        
+        function updateConnectionStatus(connected) {
+            connectionDot.classList.toggle('connected', connected);
+            connectionText.textContent = connected ? 'Connected' : 'Reconnecting...';
+        }
+        
+        function updateStatus(status, match) {
+            statusState.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+            statusState.className = 'status-value ' + status;
+            statusMatch.textContent = match || '—';
+            statusRound.textContent = currentRound;
+            
+            const isRunning = status === 'running';
+            startBtn.disabled = isRunning;
+            stopBtn.disabled = !isRunning;
+        }
+        
+        function addMatchToFeed(match) {
+            matchCount++;
+            document.getElementById('statMatchesPlayed').textContent = matchCount;
+            document.getElementById('matchFeedCount').textContent = `${matchCount} matches`;
+            
+            const emptyState = matchFeed.querySelector('.empty-state');
+            if (emptyState) emptyState.remove();
+            
+            const item = document.createElement('div');
+            item.className = 'match-item';
+            
+            let winnerText, winnerClass;
+            if (match.winner === 'a') {
+                winnerText = `${match.name_a} wins`;
+                winnerClass = 'a-wins';
+            } else if (match.winner === 'b') {
+                winnerText = `${match.name_b} wins`;
+                winnerClass = 'b-wins';
+            } else {
+                winnerText = 'Draw';
+                winnerClass = 'draw';
+            }
+            
+            const changeA = match.rating_change_a;
+            const changeAStr = changeA >= 0 ? `+${changeA.toFixed(0)}` : changeA.toFixed(0);
+            
+            // Show round wins (best-of-9)
+            const roundScore = `${match.round_wins_a || 0}-${match.round_wins_b || 0}`;
+            
+            item.innerHTML = `
+                <span class="match-num">#${match.match_num}</span>
+                <div class="match-players">
+                    <span>${match.name_a}</span>
+                    <span class="match-vs">vs</span>
+                    <span>${match.name_b}</span>
+                </div>
+                <div class="match-result">
+                    <span class="match-winner ${winnerClass}">${winnerText}</span>
+                    <span class="match-elo-change">${roundScore} rounds • ${changeAStr} ELO</span>
+                </div>
+            `;
+            
+            matchFeed.insertBefore(item, matchFeed.firstChild);
+            
+            // Keep only last 50 matches in DOM
+            while (matchFeed.children.length > 50) {
+                matchFeed.removeChild(matchFeed.lastChild);
+            }
+        }
+        
+        function updateLeaderboard(leaderboard) {
+            leaderboardBody.innerHTML = '';
+            document.getElementById('leaderboardCount').textContent = `${leaderboard.length} players`;
+            document.getElementById('statParticipants').textContent = leaderboard.length;
+            
+            if (leaderboard.length > 0) {
+                document.getElementById('statTopRating').textContent = Math.round(leaderboard[0].rating);
+                
+                const avgRating = leaderboard.reduce((sum, p) => sum + p.rating, 0) / leaderboard.length;
+                document.getElementById('statAvgRating').textContent = Math.round(avgRating);
+            }
+            
+            leaderboard.forEach((row, idx) => {
+                const rank = idx + 1;
+                const rankClass = rank === 1 ? 'rank-1' : (rank === 2 ? 'rank-2' : (rank === 3 ? 'rank-3' : 'rank-other'));
+                const winRate = (row.win_rate * 100).toFixed(1);
+                
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td><span class="rank-badge ${rankClass}">${rank}</span></td>
+                    <td>${row.name}</td>
+                    <td>
+                        <div class="rating-display">
+                            <span class="rating-value">${Math.round(row.rating)}</span>
+                        </div>
+                    </td>
+                    <td>${row.games_played}</td>
+                    <td>${row.wins}-${row.losses}-${row.draws}</td>
+                    <td>${winRate}%</td>
+                `;
+                leaderboardBody.appendChild(tr);
+            });
+        }
+        
+        function updateEloChart(histories) {
+            if (!histories || Object.keys(histories).length === 0) return;
+            
+            // Find max match number
+            let maxMatch = 0;
+            Object.values(histories).forEach(history => {
+                history.forEach(([matchNum, rating]) => {
+                    if (matchNum > maxMatch) maxMatch = matchNum;
+                });
+            });
+            
+            // Create labels
+            const sampleRate = Math.max(1, Math.floor(maxMatch / 100));
+            const labels = [];
+            for (let m = 0; m <= maxMatch; m += sampleRate) {
+                labels.push(m);
+            }
+            if (labels[labels.length - 1] < maxMatch) {
+                labels.push(maxMatch);
+            }
+            
+            // Create datasets
+            const playerIds = Object.keys(histories);
+            const datasets = playerIds.map((playerId, idx) => {
+                const color = playerColors[idx % playerColors.length];
+                const history = histories[playerId];
+                const participant = participants[playerId] || {};
+                const name = participant.name || playerId;
+                
+                // Convert history to map
+                const historyMap = new Map(history);
+                
+                // Get data points
+                const data = labels.map(matchNum => {
+                    let closest = 2500;  // Go/Chess-like initial rating
+                    for (const [m, r] of history) {
+                        if (m <= matchNum) closest = r;
+                        else break;
+                    }
+                    return closest;
+                });
+                
+                return {
+                    label: name,
+                    data: data,
+                    borderColor: color,
+                    backgroundColor: 'transparent',
+                    borderWidth: 2,
+                    tension: 0.2,
+                    pointRadius: 0,
+                    pointHoverRadius: 4,
+                    pointBackgroundColor: color
+                };
+            });
+            
+            eloChart.data.labels = labels;
+            eloChart.data.datasets = datasets;
+            eloChart.update('none');
+            
+            // Update legend
+            updateEloLegend(playerIds, histories);
+        }
+        
+        function updateEloLegend(playerIds, histories) {
+            const legend = document.getElementById('eloLegend');
+            legend.innerHTML = '';
+            
+            // Sort by current rating
+            const sorted = playerIds.map(pid => {
+                const history = histories[pid];
+                const currentRating = history.length > 0 ? history[history.length - 1][1] : 2500;
+                const participant = participants[pid] || {};
+                return {
+                    playerId: pid,
+                    name: participant.name || pid,
+                    rating: currentRating
+                };
+            }).sort((a, b) => b.rating - a.rating);
+            
+            sorted.forEach((player, idx) => {
+                const originalIdx = playerIds.indexOf(player.playerId);
+                const color = playerColors[originalIdx % playerColors.length];
+                
+                const item = document.createElement('div');
+                item.className = 'elo-legend-item';
+                item.innerHTML = `
+                    <span class="color-dot" style="background: ${color}"></span>
+                    <span>${player.name}</span>
+                    <span class="rating" style="color: ${color}">${Math.round(player.rating)}</span>
+                `;
+                legend.appendChild(item);
+            });
+        }
+        
+        function clearResults() {
+            participants = {};
+            ratingHistories = {};
+            matchCount = 0;
+            currentRound = 0;
+            
+            matchFeed.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-state-icon">🎯</div>
+                    <p>Matches will appear here</p>
+                </div>
+            `;
+            
+            leaderboardBody.innerHTML = '';
+            document.getElementById('eloLegend').innerHTML = '';
+            
+            document.getElementById('statTopRating').textContent = '2500';
+            document.getElementById('statParticipants').textContent = '0';
+            document.getElementById('statMatchesPlayed').textContent = '0';
+            document.getElementById('statAvgRating').textContent = '2500';
+            document.getElementById('leaderboardCount').textContent = '0 players';
+            document.getElementById('matchFeedCount').textContent = '0 matches';
+            
+            eloChart.data.labels = [];
+            eloChart.data.datasets = [];
+            eloChart.update('none');
+        }
+        
+        function connectSSE() {
+            if (eventSource) eventSource.close();
+            
+            eventSource = new EventSource('/api/stream');
+            
+            eventSource.onopen = () => updateConnectionStatus(true);
+            
+            eventSource.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    handleEvent(data);
+                } catch (e) {
+                    console.error('Error parsing event:', e);
+                }
+            };
+            
+            eventSource.onerror = () => {
+                updateConnectionStatus(false);
+                setTimeout(connectSSE, 2000);
+            };
+        }
+        
+        function handleEvent(data) {
+            switch (data.type) {
+                case 'status':
+                    currentRound = data.current_round || 0;
+                    updateStatus(data.status, data.current_match);
+                    break;
+                    
+                case 'job_started':
+                    clearResults();
+                    updateStatus('running', 'Initializing...');
+                    break;
+                    
+                case 'job_stopped':
+                    if (data.leaderboard) {
+                        updateLeaderboard(data.leaderboard);
+                    }
+                    if (data.rating_histories) {
+                        ratingHistories = data.rating_histories;
+                        updateEloChart(ratingHistories);
+                    }
+                    updateStatus('stopped', `Stopped after ${data.total_rounds || currentRound} rounds`);
+                    break;
+                    
+                case 'simulation_started':
+                    currentRound = 0;
+                    
+                    // Store participants
+                    if (data.participants) {
+                        participants = data.participants;
+                        
+                        // Initialize leaderboard with all participants at initial rating
+                        const initialLeaderboard = Object.entries(participants).map(([pid, p]) => ({
+                            player_id: pid,
+                            name: p.name,
+                            rating: p.initial_rating,
+                            games_played: 0,
+                            wins: 0,
+                            losses: 0,
+                            draws: 0,
+                            win_rate: 0
+                        })).sort((a, b) => a.name.localeCompare(b.name));
+                        updateLeaderboard(initialLeaderboard);
+                        
+                        // Initialize rating histories with starting point
+                        ratingHistories = {};
+                        Object.entries(participants).forEach(([pid, p]) => {
+                            ratingHistories[pid] = [[0, p.initial_rating]];
+                        });
+                        updateEloChart(ratingHistories);
+                    }
+                    
+                    document.getElementById('statParticipants').textContent = data.total_participants || 0;
+                    updateStatus('running', `Starting: ${data.num_checkpoints} model checkpoints`);
+                    break;
+                    
+                case 'match_started':
+                    updateStatus('running', `${data.name_a} vs ${data.name_b}`);
+                    break;
+                    
+                case 'match_complete':
+                    addMatchToFeed(data);
+                    break;
+                    
+                case 'round_complete':
+                    currentRound = data.round;
+                    updateStatus('running', `Round ${data.round} complete`);
+                    
+                    if (data.leaderboard) {
+                        updateLeaderboard(data.leaderboard);
+                    }
+                    if (data.rating_histories) {
+                        ratingHistories = data.rating_histories;
+                        updateEloChart(ratingHistories);
+                    }
+                    break;
+                    
+                case 'error':
+                    updateStatus('error', data.message);
+                    console.error('Simulation error:', data.message);
+                    break;
+                    
+                case 'keepalive':
+                    break;
+            }
+        }
+        
+        // Fetch server config
+        async function fetchConfig() {
+            try {
+                const response = await fetch('/api/config');
+                const config = await response.json();
+                document.getElementById('deviceDisplay').textContent = config.device.toUpperCase();
+            } catch (e) {
+                console.error('Failed to fetch config:', e);
+            }
+        }
+        
+        // Form submission
+        document.getElementById('configForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            clearResults();
+            
+            const kFactor = parseFloat(document.getElementById('kFactor').value);
+            
+            try {
+                const response = await fetch('/api/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        k_factor: kFactor
+                    })
+                });
+                
+                const result = await response.json();
+                if (!result.success) {
+                    alert(result.message);
+                }
+            } catch (e) {
+                console.error('Failed to start simulation:', e);
+            }
+        });
+        
+        // Stop button
+        stopBtn.addEventListener('click', async () => {
+            try {
+                await fetch('/api/stop', { method: 'POST' });
+            } catch (e) {
+                console.error('Failed to stop simulation:', e);
+            }
+        });
+        
+        // Initialize
+        fetchConfig();
+        connectSSE();
+    </script>
+</body>
+</html>
+
