@@ -8,7 +8,7 @@ TEST_DIR = tests
 TARGET = $(BUILD_DIR)/poker_api
 
 # Source files
-POKER_SOURCES = $(SRC_DIR)/Card.cpp $(SRC_DIR)/Deck.cpp $(SRC_DIR)/Hand.cpp $(SRC_DIR)/Player.cpp $(SRC_DIR)/Pot.cpp $(SRC_DIR)/Game.cpp $(SRC_DIR)/JsonSerializer.cpp
+POKER_SOURCES = $(SRC_DIR)/Card.cpp $(SRC_DIR)/Deck.cpp $(SRC_DIR)/Hand.cpp $(SRC_DIR)/Player.cpp $(SRC_DIR)/Pot.cpp $(SRC_DIR)/Game.cpp $(SRC_DIR)/JsonSerializer.cpp $(SRC_DIR)/HandStrength.cpp
 CORE_API_SOURCES = $(SRC_DIR)/PokerEngineAPI.cpp
 HTTP_SOURCES = $(SRC_DIR)/HTTPServer.cpp
 

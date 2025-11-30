@@ -48,13 +48,24 @@ SAVE_INTERVAL=1
 # Monte Carlo multi-runout settings
 # These enable "run it N times" style training where each hand is simulated
 # multiple times with different action sampling to calculate regret
-NUM_RUNOUTS=50           # Number of Monte Carlo runouts per decision (0=disabled, 50=recommended)
+# WARNING: This is VERY expensive (50x more API calls per decision)
+# Only enable for fine-tuning, not regular training
+NUM_RUNOUTS=0            # Number of Monte Carlo runouts per decision (0=disabled, 50=expensive)
 REGRET_WEIGHT=0.5        # Weight for regret-based reward adjustment (0-1)
 
 # Multi-process rollout settings for faster episode collection
-# Setting to 0 uses threaded rollouts (original behavior)
-# Recommended: set to num_cpus - 1 for best performance
-NUM_WORKERS=0            # Number of parallel worker processes (0=use threads)
+# Setting to 0 uses optimized threaded rollouts with direct Game binding
+# For maximum parallelism on multi-core machines, set to num_cpus - 1
+# Auto-detect CPU count and use (cpus - 1) workers by default, minimum 4
+NUM_CPUS=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 8)
+NUM_WORKERS=$((NUM_CPUS > 4 ? NUM_CPUS - 1 : 4))  # Use multi-process by default
+
+# ELO-format evaluation settings
+# This evaluates using the ELO arena format: freezeout rounds until one player busts
+# The objective is to win >50% of rounds in a match
+ELO_EVAL_INTERVAL=50     # Run ELO evaluation every N iterations (0=disabled)
+ELO_EVAL_ROUNDS=50       # Number of freezeout rounds per evaluation
+ELO_EVAL_OPPONENT="heuristic"  # Opponent type for evaluation
 
 # Model version from config
 if [ -z "${MODEL_VERSION:-}" ]; then
@@ -104,6 +115,18 @@ while [[ $# -gt 0 ]]; do
             NUM_WORKERS="$2"
             shift 2
             ;;
+        --elo-eval-interval)
+            ELO_EVAL_INTERVAL="$2"
+            shift 2
+            ;;
+        --elo-eval-rounds)
+            ELO_EVAL_ROUNDS="$2"
+            shift 2
+            ;;
+        --elo-eval-opponent)
+            ELO_EVAL_OPPONENT="$2"
+            shift 2
+            ;;
         --help)
             echo "Usage: $0 [OPTIONS]"
             echo ""
@@ -114,7 +137,10 @@ while [[ $# -gt 0 ]]; do
             echo "  --learning-rate LR         Learning rate (default: $LEARNING_RATE)"
             echo "  --num-runouts N            Monte Carlo runouts per decision (default: $NUM_RUNOUTS, 0=disabled)"
             echo "  --regret-weight W          Weight for regret-based reward (default: $REGRET_WEIGHT)"
-            echo "  --num-workers N            Number of parallel worker processes (default: $NUM_WORKERS, 0=use threads)"
+            echo "  --num-workers N            Number of parallel worker processes (default: auto=${NUM_WORKERS}, 0=use optimized threads)"
+            echo "  --elo-eval-interval N      Run ELO-format evaluation every N iterations (default: ${ELO_EVAL_INTERVAL}, 0=disabled)"
+            echo "  --elo-eval-rounds N        Number of freezeout rounds per ELO evaluation (default: ${ELO_EVAL_ROUNDS})"
+            echo "  --elo-eval-opponent TYPE   Opponent for ELO eval: heuristic, random, tight, aggressive, calling_station (default: ${ELO_EVAL_OPPONENT})"
             echo "  --help                     Show this help message"
             echo ""
             echo "Optimized settings:"
@@ -189,9 +215,13 @@ echo "   ✓ Monte Carlo multi-runout: ${NUM_RUNOUTS} runouts per decision for r
 echo "   ✓ Regret weight: ${REGRET_WEIGHT} - blends outcome with regret-based reward"
 fi
 if [ "$NUM_WORKERS" -gt 0 ]; then
-echo "   ✓ Multi-process rollouts: ${NUM_WORKERS} parallel workers"
+echo "   ✓ Multi-process rollouts: ${NUM_WORKERS} parallel workers (true parallelism)"
 else
-echo "   • Threaded rollouts (set --num-workers to enable multi-process)"
+echo "   ✓ Optimized threaded rollouts (direct Game binding, no JSON overhead)"
+fi
+if [ "$ELO_EVAL_INTERVAL" -gt 0 ]; then
+echo "   ✓ ELO-format evaluation: ${ELO_EVAL_ROUNDS} freezeout rounds vs ${ELO_EVAL_OPPONENT} every ${ELO_EVAL_INTERVAL} iterations"
+echo "   ✓ ELO objective: WIN >50% of ${ELO_EVAL_ROUNDS} rounds in heads-up match"
 fi
 
 echo ""
@@ -241,6 +271,9 @@ uv run python train.py \
     --num-runouts "$NUM_RUNOUTS" \
     --regret-weight "$REGRET_WEIGHT" \
     --num-workers "$NUM_WORKERS" \
+    --elo-eval-interval "$ELO_EVAL_INTERVAL" \
+    --elo-eval-rounds "$ELO_EVAL_ROUNDS" \
+    --elo-eval-opponent "$ELO_EVAL_OPPONENT" \
     $CHECKPOINT \
     $VERBOSE \
     $CUSTOM_ARGS

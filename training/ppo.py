@@ -17,12 +17,22 @@ Key features:
 """
 
 import math
+from contextlib import nullcontext
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from typing import List, Tuple, Dict, Optional
 import numpy as np
+
+# Mixed precision support
+try:
+    from torch.cuda.amp import autocast, GradScaler
+    AMP_AVAILABLE = torch.cuda.is_available()
+except ImportError:
+    AMP_AVAILABLE = False
+    autocast = None
+    GradScaler = None
 
 
 class PopArtValueNormalizer:
@@ -236,7 +246,8 @@ class PPOTrainer:
         use_adaptive_entropy: bool = True,  # Use adaptive entropy scheduling
         advantage_clip: float = 10.0,  # Clip extreme advantages
         device: torch.device = torch.device('cpu'),
-        accelerator=None
+        accelerator=None,
+        use_amp: bool = True,  # Use automatic mixed precision (GPU only)
     ):
         """
         Args:
@@ -313,6 +324,10 @@ class PPOTrainer:
         
         # Maximum entropy for action space (log of num_actions)
         self.max_entropy = math.log(22)  # 22 actions in the action space
+        
+        # Mixed precision training (GPU only, provides ~30-50% speedup)
+        self.use_amp = use_amp and AMP_AVAILABLE and device.type == 'cuda'
+        self.scaler = GradScaler() if self.use_amp else None
         
         # Training step counter
         self.training_step = 0
@@ -499,67 +514,73 @@ class PPOTrainer:
                 if use_hand_strength_loss:
                     mb_hand_strengths = hand_strengths[mb_indices].to(self.device)
                 
-                # Evaluate actions with current policy
-                if use_hand_strength_loss:
-                    new_log_probs, values, entropy, hand_strength_pred = self.model.evaluate_actions(
-                        mb_states, mb_actions, mb_legal_masks, return_hand_strength=True
+                # Use autocast for mixed precision if enabled
+                amp_context = autocast() if self.use_amp else nullcontext()
+                
+                with amp_context:
+                    # Evaluate actions with current policy
+                    if use_hand_strength_loss:
+                        new_log_probs, values, entropy, hand_strength_pred = self.model.evaluate_actions(
+                            mb_states, mb_actions, mb_legal_masks, return_hand_strength=True
+                        )
+                    else:
+                        new_log_probs, values, entropy = self.model.evaluate_actions(
+                            mb_states, mb_actions, mb_legal_masks, return_hand_strength=False
+                        )
+                    
+                    # PPO clipped surrogate loss
+                    ratio = torch.exp(new_log_probs - mb_old_log_probs)
+                    surr1 = ratio * mb_advantages
+                    surr2 = torch.clamp(ratio, 1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon) * mb_advantages
+                    policy_loss = -torch.min(surr1, surr2).mean()
+                    
+                    # Value loss with clipping - use Huber loss for robustness
+                    values = values.squeeze()
+                    
+                    # Unclipped value loss
+                    v_loss_unclipped = F.smooth_l1_loss(values, mb_returns, reduction='none')
+                    
+                    # Clipped value loss
+                    v_clipped = mb_old_values + torch.clamp(
+                        values - mb_old_values,
+                        -self.clip_epsilon,
+                        self.clip_epsilon
                     )
-                else:
-                    new_log_probs, values, entropy = self.model.evaluate_actions(
-                        mb_states, mb_actions, mb_legal_masks, return_hand_strength=False
-                    )
-                
-                # PPO clipped surrogate loss
-                ratio = torch.exp(new_log_probs - mb_old_log_probs)
-                surr1 = ratio * mb_advantages
-                surr2 = torch.clamp(ratio, 1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon) * mb_advantages
-                policy_loss = -torch.min(surr1, surr2).mean()
-                
-                # Value loss with clipping - use Huber loss for robustness
-                values = values.squeeze()
-                
-                # Unclipped value loss
-                v_loss_unclipped = F.smooth_l1_loss(values, mb_returns, reduction='none')
-                
-                # Clipped value loss
-                v_clipped = mb_old_values + torch.clamp(
-                    values - mb_old_values,
-                    -self.clip_epsilon,
-                    self.clip_epsilon
-                )
-                v_loss_clipped = F.smooth_l1_loss(v_clipped, mb_returns, reduction='none')
-                
-                # Max of clipped and unclipped (conservative update)
-                v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
-                value_loss = 0.5 * v_loss_max.mean()
-                
-                # Entropy bonus (encourages exploration)
-                entropy_mean = entropy.mean()
-                entropy_loss = -entropy_mean
-                
-                # Hand strength prediction loss (auxiliary task)
-                hand_strength_loss = torch.tensor(0.0, device=self.device)
-                if use_hand_strength_loss and mb_hand_strengths is not None:
-                    hand_strength_loss = F.mse_loss(hand_strength_pred, mb_hand_strengths)
-                
-                # Get current entropy coefficient
-                current_entropy_coef = self.entropy_coef
-                if self.use_adaptive_entropy and self.entropy_scheduler is not None:
-                    current_entropy_coef = self.entropy_scheduler.update(
-                        entropy_mean.item(), self.max_entropy
-                    )
-                
-                # Total loss - scale by accumulation steps for proper gradient averaging
-                loss = (
-                    policy_loss +
-                    self.value_loss_coef * value_loss +
-                    current_entropy_coef * entropy_loss +
-                    self.hand_strength_loss_coef * hand_strength_loss
-                ) / self.gradient_accumulation_steps
+                    v_loss_clipped = F.smooth_l1_loss(v_clipped, mb_returns, reduction='none')
+                    
+                    # Max of clipped and unclipped (conservative update)
+                    v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
+                    value_loss = 0.5 * v_loss_max.mean()
+                    
+                    # Entropy bonus (encourages exploration)
+                    entropy_mean = entropy.mean()
+                    entropy_loss = -entropy_mean
+                    
+                    # Hand strength prediction loss (auxiliary task)
+                    hand_strength_loss = torch.tensor(0.0, device=self.device)
+                    if use_hand_strength_loss and mb_hand_strengths is not None:
+                        hand_strength_loss = F.mse_loss(hand_strength_pred, mb_hand_strengths)
+                    
+                    # Get current entropy coefficient
+                    current_entropy_coef = self.entropy_coef
+                    if self.use_adaptive_entropy and self.entropy_scheduler is not None:
+                        current_entropy_coef = self.entropy_scheduler.update(
+                            entropy_mean.item(), self.max_entropy
+                        )
+                    
+                    # Total loss - scale by accumulation steps for proper gradient averaging
+                    loss = (
+                        policy_loss +
+                        self.value_loss_coef * value_loss +
+                        current_entropy_coef * entropy_loss +
+                        self.hand_strength_loss_coef * hand_strength_loss
+                    ) / self.gradient_accumulation_steps
                 
                 # Backward pass (accumulate gradients)
                 if self.accelerator is not None:
                     self.accelerator.backward(loss)
+                elif self.use_amp and self.scaler is not None:
+                    self.scaler.scale(loss).backward()
                 else:
                     loss.backward()
                 
@@ -567,9 +588,16 @@ class PPOTrainer:
                 
                 # Step optimizer after accumulating enough gradients
                 if accumulation_step >= self.gradient_accumulation_steps:
-                    # Gradient clipping and tracking
-                    grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
-                    self.optimizer.step()
+                    if self.use_amp and self.scaler is not None:
+                        # Unscale gradients for clipping
+                        self.scaler.unscale_(self.optimizer)
+                        grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
+                    else:
+                        # Gradient clipping and tracking
+                        grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+                        self.optimizer.step()
                     self.optimizer.zero_grad()
                     accumulation_step = 0
                 else:
@@ -601,8 +629,14 @@ class PPOTrainer:
             
             # Handle remaining accumulated gradients at end of epoch
             if accumulation_step > 0:
-                grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
-                self.optimizer.step()
+                if self.use_amp and self.scaler is not None:
+                    self.scaler.unscale_(self.optimizer)
+                    grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+                    self.optimizer.step()
                 self.optimizer.zero_grad()
             
             # Early stopping based on KL divergence

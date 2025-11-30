@@ -23,6 +23,7 @@ set(POKER_SOURCES
     src/Player.cpp
     src/Pot.cpp
     src/Game.cpp
+    src/HandStrength.cpp
 )
 
 # API sources

@@ -581,7 +581,12 @@ class PokerEloArena:
 
 
 def parse_checkpoints(directory: Path) -> List[Tuple[int, Path]]:
-    """Find and sort checkpoints by iteration number."""
+    """Find and sort checkpoints by iteration number.
+    
+    Returns:
+        List of (iteration_number, path) tuples sorted by iteration.
+        Baseline model uses iteration -1 to distinguish from actual iterations.
+    """
     checkpoints = []
     pattern = re.compile(r"poker_rl_iter_(\d+)\.pt")
     
@@ -590,7 +595,8 @@ def parse_checkpoints(directory: Path) -> List[Tuple[int, Path]]:
         
     for f in directory.glob("*.pt"):
         if f.name == "poker_rl_baseline.pt":
-            checkpoints.append((0, f))
+            # Use -1 for baseline to distinguish from actual iteration 0
+            checkpoints.append((-1, f))
             continue
             
         match = pattern.match(f.name)

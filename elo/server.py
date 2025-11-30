@@ -168,11 +168,18 @@ class EloJobManager:
             
             # Add model checkpoints
             for iter_num, path in sorted_cps:
-                player_id = f"iter_{iter_num}"
+                # Use special naming for baseline model (iter_num == -1)
+                if iter_num == -1:
+                    player_id = "baseline"
+                    name = "Baseline"
+                else:
+                    player_id = f"iter_{iter_num}"
+                    name = f"Iter_{iter_num}"
+                
                 participants[player_id] = {
                     'type': 'model',
                     'path': str(path),
-                    'name': f'Iter_{iter_num}',
+                    'name': name,
                     'is_bot': False,
                     'iteration': iter_num
                 }

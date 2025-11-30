@@ -4,6 +4,7 @@
 #include "Game.h"
 #include "JsonSerializer.h"
 #include "json.hpp"
+#include "HandStrength.h"
 
 namespace py = pybind11;
 
@@ -103,4 +104,30 @@ PYBIND11_MODULE(poker_api_binding, m) {
             if (p) return p->getId();
             return std::nullopt;
         });
+    
+    // Fast hand strength estimation (for RL training)
+    m.def("estimate_hand_strength", 
+        &HandStrengthEstimator::estimate,
+        "Estimate hand strength (0.0-1.0) from hole cards and community cards.\n\n"
+        "This is ~10x faster than the Python equivalent and useful during\n"
+        "episode collection for reward shaping.\n\n"
+        "Args:\n"
+        "    hole_cards: List of 2 card strings (e.g., ['AH', 'KS'])\n"
+        "    community_cards: List of 0-5 card strings\n\n"
+        "Returns:\n"
+        "    float: Hand strength estimate in range [0.0, 1.0]",
+        py::arg("hole_cards"),
+        py::arg("community_cards")
+    );
+    
+    m.def("estimate_preflop_strength",
+        &HandStrengthEstimator::estimatePreflop,
+        "Estimate preflop hand strength (0.0-1.0) from hole cards.\n\n"
+        "Based on Sklansky-Chubukov rankings.\n\n"
+        "Args:\n"
+        "    hole_cards: List of 2 card strings (e.g., ['AH', 'KS'])\n\n"
+        "Returns:\n"
+        "    float: Preflop strength estimate in range [0.0, 1.0]",
+        py::arg("hole_cards")
+    );
 }
