@@ -51,6 +51,11 @@ SAVE_INTERVAL=1
 NUM_RUNOUTS=50           # Number of Monte Carlo runouts per decision (0=disabled, 50=recommended)
 REGRET_WEIGHT=0.5        # Weight for regret-based reward adjustment (0-1)
 
+# Multi-process rollout settings for faster episode collection
+# Setting to 0 uses threaded rollouts (original behavior)
+# Recommended: set to num_cpus - 1 for best performance
+NUM_WORKERS=0            # Number of parallel worker processes (0=use threads)
+
 # Model version from config
 if [ -z "${MODEL_VERSION:-}" ]; then
     # Extract from config.py
@@ -95,6 +100,10 @@ while [[ $# -gt 0 ]]; do
             REGRET_WEIGHT="$2"
             shift 2
             ;;
+        --num-workers)
+            NUM_WORKERS="$2"
+            shift 2
+            ;;
         --help)
             echo "Usage: $0 [OPTIONS]"
             echo ""
@@ -105,6 +114,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --learning-rate LR         Learning rate (default: $LEARNING_RATE)"
             echo "  --num-runouts N            Monte Carlo runouts per decision (default: $NUM_RUNOUTS, 0=disabled)"
             echo "  --regret-weight W          Weight for regret-based reward (default: $REGRET_WEIGHT)"
+            echo "  --num-workers N            Number of parallel worker processes (default: $NUM_WORKERS, 0=use threads)"
             echo "  --help                     Show this help message"
             echo ""
             echo "Optimized settings:"
@@ -178,6 +188,11 @@ if [ "$NUM_RUNOUTS" -gt 0 ]; then
 echo "   ✓ Monte Carlo multi-runout: ${NUM_RUNOUTS} runouts per decision for regret"
 echo "   ✓ Regret weight: ${REGRET_WEIGHT} - blends outcome with regret-based reward"
 fi
+if [ "$NUM_WORKERS" -gt 0 ]; then
+echo "   ✓ Multi-process rollouts: ${NUM_WORKERS} parallel workers"
+else
+echo "   • Threaded rollouts (set --num-workers to enable multi-process)"
+fi
 
 echo ""
 echo -e "${BLUE}📊 TensorBoard Monitoring:${NC}"
@@ -225,6 +240,7 @@ uv run python train.py \
     --tensorboard-dir "$TENSORBOARD_DIR" \
     --num-runouts "$NUM_RUNOUTS" \
     --regret-weight "$REGRET_WEIGHT" \
+    --num-workers "$NUM_WORKERS" \
     $CHECKPOINT \
     $VERBOSE \
     $CUSTOM_ARGS

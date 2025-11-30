@@ -72,6 +72,9 @@ from monte_carlo import (
     MultiRunoutEvaluator
 )
 
+# Import parallel rollout manager for multi-process episode collection
+from parallel_rollouts import ParallelRolloutManager
+
 # Import poker_api_binding for direct C++ calls
 try:
     import poker_api_binding
@@ -106,7 +109,9 @@ class RLTrainingSession:
         tensorboard_dir: Optional[Path] = None,
         log_level: int = 0,
         num_runouts: int = 0,
-        regret_weight: float = 0.5
+        regret_weight: float = 0.5,
+        num_workers: int = 0,
+        model_config: Optional[Dict[str, Any]] = None
     ):
         """
         Args:
@@ -119,6 +124,8 @@ class RLTrainingSession:
             log_level: Logging verbosity (0=minimal, 1=normal, 2=verbose)
             num_runouts: Number of runouts for Monte Carlo regret calculation (0 = disabled)
             regret_weight: Weight for regret-based reward adjustment (0-1)
+            num_workers: Number of parallel worker processes (0 = use threads)
+            model_config: Model configuration dict for worker processes
         """
         self.model = model
         self.ppo_trainer = ppo_trainer
@@ -131,6 +138,11 @@ class RLTrainingSession:
         # Multi-runout regret calculation settings
         self.num_runouts = num_runouts  # 0 = disabled, 50 = default when enabled
         self.regret_weight = regret_weight
+        
+        # Multi-process rollout settings
+        self.num_workers = num_workers
+        self.model_config = model_config or {}
+        self._rollout_manager: Optional[ParallelRolloutManager] = None
         
         # Opponent pool for self-play (stores past model versions)
         self.opponent_pool: List[Path] = []
@@ -169,6 +181,114 @@ class RLTrainingSession:
         self._plateau_counter = 0  # How many iterations we've been in plateau
         self._last_plateau_response_iter = 0  # Last iteration we responded to plateau
         self._initial_entropy_coef = None  # Will be set from ppo_trainer
+    
+    def _init_parallel_rollouts(self):
+        """Initialize multi-process rollout manager if configured."""
+        if self.num_workers > 0 and self._rollout_manager is None:
+            if self.log_level >= 1:
+                print(f"🚀 Initializing {self.num_workers} parallel rollout workers...")
+            
+            # Prepare game config for workers
+            worker_game_config = {
+                'num_players': self.game_config.get('num_players', 2),
+                'smallBlind': self.game_config.get('smallBlind', 10),
+                'bigBlind': self.game_config.get('bigBlind', 20),
+                'startingChips': self.game_config.get('startingChips', 1000),
+                'minPlayers': self.game_config.get('minPlayers', 2),
+                'maxPlayers': self.game_config.get('maxPlayers', 2),
+            }
+            
+            # Opponent pool as list of strings
+            opponent_pool_paths = [str(p) for p in self.opponent_pool]
+            
+            self._rollout_manager = ParallelRolloutManager(
+                num_workers=self.num_workers,
+                game_config=worker_game_config,
+                model_config=self.model_config,
+                model=self.model,
+                device='cpu',  # Workers use CPU for inference
+                opponent_pool=opponent_pool_paths,
+            )
+            self._rollout_manager.start()
+            
+            if self.log_level >= 1:
+                print(f"✓ Parallel rollout workers ready")
+    
+    def _shutdown_parallel_rollouts(self):
+        """Shutdown parallel rollout manager."""
+        if self._rollout_manager is not None:
+            self._rollout_manager.shutdown()
+            self._rollout_manager = None
+    
+    def _collect_episodes_parallel(
+        self, 
+        num_episodes: int, 
+        verbose: bool = False
+    ) -> List[Dict[str, Any]]:
+        """
+        Collect episodes using multi-process workers.
+        
+        Args:
+            num_episodes: Number of episodes to collect
+            verbose: Print progress
+            
+        Returns:
+            List of episode dictionaries
+        """
+        # Ensure manager is initialized
+        self._init_parallel_rollouts()
+        
+        # Update opponent pool in workers
+        opponent_pool_paths = [str(p) for p in self.opponent_pool]
+        self._rollout_manager.update_opponent_pool(opponent_pool_paths)
+        
+        # Collect episodes
+        episodes = self._rollout_manager.collect_episodes(
+            num_episodes=num_episodes,
+            use_opponent_pool=True,
+            deterministic=False,
+            verbose=verbose,
+        )
+        
+        return episodes
+    
+    def _collect_episodes_threaded(
+        self,
+        num_episodes: int,
+        verbose: bool = False
+    ) -> List[Dict[str, Any]]:
+        """
+        Collect episodes using thread pool (original behavior).
+        
+        Args:
+            num_episodes: Number of episodes to collect
+            verbose: Print progress
+            
+        Returns:
+            List of episode dictionaries
+        """
+        episodes = []
+        
+        # Use all available CPUs (leaving a few for system)
+        # Cap at 20 to avoid excessive overhead if CPU count is very high
+        num_workers = min(num_episodes, max(1, (os.cpu_count() or 4) - 1))
+        max_workers = min(num_workers, 20)
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(self.collect_episode, use_opponent_pool=True, verbose=verbose)
+                for _ in range(num_episodes)
+            ]
+            
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    episode = future.result()
+                    episodes.append(episode)
+                except Exception as e:
+                    print(f"⚠️  Error in threaded episode collection: {e}")
+                    traceback.print_exc()
+        
+        return episodes
     
     def collect_episode(
         self,
@@ -999,7 +1119,8 @@ class RLTrainingSession:
             print(f"\n{'='*70}")
             print(f"Training Iteration {self.stats['iteration'] + 1}")
             print(f"{'='*70}")
-            print(f"Collecting {num_episodes} episodes...")
+            collection_method = "multi-process" if self.num_workers > 0 else "threaded"
+            print(f"Collecting {num_episodes} episodes ({collection_method})...")
         
         all_states = []
         all_actions = []
@@ -1016,219 +1137,227 @@ class RLTrainingSession:
         # Track action counts
         action_counts = {name: 0 for name in ACTION_NAMES}
         
-        # Collect episodes in parallel
-        # Use all available CPUs (leaving a few for system)
-        # Cap at 20 to avoid excessive overhead if CPU count is very high
-        num_workers = min(num_episodes, max(1, (os.cpu_count() or 4) - 1))
-        max_workers = min(num_workers, 20)
+        # Choose collection method based on num_workers
+        if self.num_workers > 0:
+            # Use multi-process rollouts
+            self._init_parallel_rollouts()
+            episodes = self._collect_episodes_parallel(num_episodes, verbose=verbose)
+        else:
+            # Use threaded rollouts (original behavior)
+            episodes = self._collect_episodes_threaded(num_episodes, verbose=verbose)
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [
-                executor.submit(self.collect_episode, use_opponent_pool=True, verbose=verbose)
-                for _ in range(num_episodes)
-            ]
-            
-            for i, future in enumerate(concurrent.futures.as_completed(futures)):
-                try:
-                    episode = future.result()
+        # Process collected episodes
+        processed_count = 0
+        for episode in episodes:
+            try:
+                if not episode.get('success', False):
+                    continue
+                
+                states_data = episode.get('states')
+                if states_data is None:
+                    continue
+                if isinstance(states_data, torch.Tensor) and len(states_data) == 0:
+                    continue
+                if isinstance(states_data, list) and len(states_data) == 0:
+                    continue
+                
+                # Get number of steps
+                num_steps = len(states_data) if isinstance(states_data, torch.Tensor) else len(states_data)
+                
+                # Update statistics
+                self.stats['total_episodes'] += 1
+                self.stats['total_timesteps'] += num_steps
+                self.stats['avg_reward'].append(episode['main_reward'])
+                self.stats['avg_episode_length'].append(num_steps)
+                self.stats['win_rate'].append(1.0 if episode['main_reward'] > 0 else 0.0)
+                
+                # Update opponent win rate tracking for prioritized sampling
+                opponent_checkpoint = episode.get('opponent_checkpoint')
+                if opponent_checkpoint and episode.get('opponent_type') == 'past_model':
+                    won = 1.0 if episode['main_reward'] > 0 else 0.0
+                    if opponent_checkpoint not in self._opponent_game_counts:
+                        self._opponent_game_counts[opponent_checkpoint] = 0
+                        self.opponent_win_rates[opponent_checkpoint] = 0.5  # Initial estimate
                     
-                    if not episode['success'] or len(episode['states']) == 0:
-                        continue
-                    
-                    # Update statistics (moved from collect_episode)
-                    self.stats['total_episodes'] += 1
-                    self.stats['total_timesteps'] += len(episode['states'])
-                    self.stats['avg_reward'].append(episode['main_reward'])
-                    self.stats['avg_episode_length'].append(len(episode['states']))
-                    self.stats['win_rate'].append(1.0 if episode['main_reward'] > 0 else 0.0)
-                    
-                    # Update opponent win rate tracking for prioritized sampling
-                    opponent_checkpoint = episode.get('opponent_checkpoint')
-                    if opponent_checkpoint and episode.get('opponent_type') == 'past_model':
-                        won = 1.0 if episode['main_reward'] > 0 else 0.0
-                        if opponent_checkpoint not in self._opponent_game_counts:
-                            self._opponent_game_counts[opponent_checkpoint] = 0
-                            self.opponent_win_rates[opponent_checkpoint] = 0.5  # Initial estimate
-                        
-                        # Update running average
-                        count = self._opponent_game_counts[opponent_checkpoint]
-                        old_win_rate = self.opponent_win_rates[opponent_checkpoint]
-                        # Exponential moving average with decay
-                        alpha = 0.1  # Learning rate for win rate estimate
-                        self.opponent_win_rates[opponent_checkpoint] = (1 - alpha) * old_win_rate + alpha * won
-                        self._opponent_game_counts[opponent_checkpoint] = count + 1
-                    
-                    # Update action counts
-                    for act_idx in episode['actions']:
+                    # Update running average
+                    count = self._opponent_game_counts[opponent_checkpoint]
+                    old_win_rate = self.opponent_win_rates[opponent_checkpoint]
+                    # Exponential moving average with decay
+                    alpha = 0.1  # Learning rate for win rate estimate
+                    self.opponent_win_rates[opponent_checkpoint] = (1 - alpha) * old_win_rate + alpha * won
+                    self._opponent_game_counts[opponent_checkpoint] = count + 1
+                
+                # Update action counts
+                actions_data = episode.get('actions', [])
+                if isinstance(actions_data, torch.Tensor):
+                    for act_idx in actions_data:
                         action_counts[ACTION_NAMES[act_idx.item()]] += 1
+                
+                # Track average value estimate
+                values_data = episode.get('values', [])
+                if isinstance(values_data, torch.Tensor) and len(values_data) > 0:
+                    avg_value = values_data.float().mean().item()
+                    self.stats['avg_value_estimate'].append(avg_value)
+                
+                # Compute advantages and returns using GAE
+                step_rewards = torch.zeros(num_steps)
+                
+                # Normalize reward to be in range [-1, 1]
+                # episode['main_reward'] is already normalized by starting_chips in collect_episode
+                normalized_reward = episode['main_reward']
+                # Relax clipping to allow for > 1.0 wins in deep stack scenarios, but cap extreme values
+                normalized_reward = max(-2.0, min(5.0, normalized_reward))
+                
+                # === REWARD SHAPING for better learning signal ===
+                # Key principle: Shaping must be STRONG enough to overwhelm poker variance
+                
+                # 1. Per-step action appropriateness rewards (based on hand strength)
+                # These provide dense signal about whether actions matched hand quality
+                per_step_shaping = episode.get('step_rewards', [])
+                if per_step_shaping:
+                    for idx, shaping_reward in enumerate(per_step_shaping):
+                        if idx < num_steps:
+                            step_rewards[idx] += shaping_reward
+                
+                # 2. Episode-level shaping (STRONGLY ENHANCED)
+                episode_shaping = 0.0
+                
+                hand_strengths = episode.get('hand_strengths', [])
+                action_types = episode.get('action_types', [])
+                
+                # Detect problematic all-in behavior with detailed tracking
+                all_in_with_weak = False
+                all_in_with_trash = False
+                all_in_count = 0
+                fold_count = 0
+                
+                if hand_strengths and action_types:
+                    for hs, act in zip(hand_strengths, action_types):
+                        if act == 'all_in':
+                            all_in_count += 1
+                            if hs < 0.45:  # Weak threshold raised
+                                all_in_with_weak = True
+                            if hs < 0.30:  # Trash threshold raised
+                                all_in_with_trash = True
+                        if act == 'fold':
+                            fold_count += 1
+                
+                # === KEY ANTI-ALL-IN PENALTIES ===
+                # These MUST be strong enough that the model learns:
+                # "All-in with weak hands is ALWAYS bad, even if I got lucky this time"
+                
+                if all_in_with_trash:
+                    if normalized_reward > 0:
+                        # WON by luck with trash all-in
+                        # CRITICAL: Must HEAVILY penalize even winning to prevent exploitation learning
+                        episode_shaping -= 0.40  # "Lucky win" - still terrible play
+                    else:
+                        # LOST with trash all-in
+                        # Expected result, but reinforce that this was bad
+                        episode_shaping -= 0.30  # Strong additional penalty
+                elif all_in_with_weak:
+                    if normalized_reward > 0:
+                        # Won with weak all-in - reduce reward significantly
+                        episode_shaping -= 0.25  # Penalize lucky wins
+                    else:
+                        # Lost with weak all-in - expected, but reinforce
+                        episode_shaping -= 0.15
+                
+                # === FOLD PENALTY TO DISCOURAGE OVER-FOLDING ===
+                # Penalize folding to encourage playing and learning from outcomes
+                if fold_count > 0 and hand_strengths:
+                    first_hand_strength = hand_strengths[0]
+                    if first_hand_strength < 0.25:
+                        # Folded with true trash - acceptable (no penalty)
+                        pass
+                    elif first_hand_strength < 0.35:
+                        # Folded with weak hand - small penalty to encourage playing
+                        episode_shaping -= 0.03
+                    elif first_hand_strength < 0.50:
+                        # Folded with playable hand - bigger penalty
+                        episode_shaping -= 0.08
+                    else:
+                        # Folded with decent+ hand - severe penalty
+                        episode_shaping -= 0.15
+                
+                # === HAND STRENGTH CORRELATION ===
+                if hand_strengths:
+                    avg_hand_strength = sum(hand_strengths) / len(hand_strengths)
                     
-                    # Track average value estimate
-                    if len(episode['values']) > 0:
-                        avg_value = sum([v.item() for v in episode['values']]) / len(episode['values'])
-                        self.stats['avg_value_estimate'].append(avg_value)
+                    if normalized_reward > 0:  # Won the hand
+                        if avg_hand_strength > 0.70:
+                            # Won with strong hand - expected and good value extraction
+                            episode_shaping += 0.10
+                        elif avg_hand_strength > 0.55:
+                            # Won with medium hand - good play
+                            episode_shaping += 0.05
+                        elif avg_hand_strength < 0.35:
+                            # Won with weak hand (bluff worked)
+                            # Small bonus only if we didn't do trash all-in
+                            if not all_in_with_trash and not all_in_with_weak:
+                                episode_shaping += 0.03
+                    else:  # Lost the hand
+                        if avg_hand_strength > 0.70:
+                            # Lost with strong hand (cooler/bad luck)
+                            # Reduce penalty - this wasn't misplay
+                            episode_shaping += 0.05
+                        elif avg_hand_strength < 0.35:
+                            # Lost with weak hand
+                            # If we folded, that's good. If we played, that's bad.
+                            if fold_count == 0:
+                                # Played weak hand without folding - bad
+                                episode_shaping -= 0.08
+                
+                # Bonus for winning pots uncontested (good aggression that induces folds)
+                # But NOT if we used trash all-in to do it
+                if episode.get('won_uncontested', False) and normalized_reward > 0:
+                    if not all_in_with_trash and not all_in_with_weak:
+                        episode_shaping += 0.06  # Reward controlled aggression
+                    # No bonus for all-in forcing fold - that's not skillful
+                
+                # Position-aware adjustment (playing OOP is harder)
+                if episode.get('is_out_of_position', False) and normalized_reward < 0:
+                    normalized_reward *= 0.95
+                
+                # Apply episode-level shaping to final reward
+                normalized_reward += episode_shaping
+                
+                # Main reward at the end
+                step_rewards[-1] += normalized_reward
+                
+                # Compute GAE
+                advantages, returns = self.ppo_trainer.compute_gae(
+                    step_rewards,
+                    episode['values'],
+                    episode['dones'],
+                    torch.tensor(0.0)  # No next value (terminal)
+                )
+                
+                # Store episode data
+                all_states.append(episode['states'])
+                all_actions.append(episode['actions'])
+                all_log_probs.append(episode['log_probs'])
+                all_values.append(episode['values'])
+                all_advantages.append(advantages)
+                all_returns.append(returns)
+                all_legal_masks.append(episode['legal_actions_masks'])
+                
+                # Store hand strengths for auxiliary loss
+                if episode.get('hand_strengths'):
+                    hs_tensor = torch.tensor(episode['hand_strengths'], dtype=torch.float32)
+                    all_hand_strengths.append(hs_tensor)
+                
+                episode_rewards.append(episode['main_reward'])
+                episode_lengths.append(num_steps)
+                processed_count += 1
+                
+                if self.log_level >= 2 and processed_count % 50 == 0:
+                    avg_reward = sum(episode_rewards[-50:]) / min(50, len(episode_rewards))
+                    print(f"  Processed {processed_count}/{num_episodes} episodes - Avg Reward (last 50): {avg_reward:.3f}")
                     
-                    # Compute advantages and returns using GAE
-                    rewards = torch.tensor([episode['main_reward']], dtype=torch.float32)
-                    
-                    # For poker, we get reward at end of hand, so we need to propagate it back
-                    num_steps = len(episode['states'])
-                    step_rewards = torch.zeros(num_steps)
-                    
-                    # Normalize reward to be in range [-1, 1]
-                    # episode['main_reward'] is already normalized by starting_chips in collect_episode
-                    normalized_reward = episode['main_reward']
-                    # Relax clipping to allow for > 1.0 wins in deep stack scenarios, but cap extreme values
-                    normalized_reward = max(-2.0, min(5.0, normalized_reward))
-                    
-                    # === REWARD SHAPING for better learning signal ===
-                    # Key principle: Shaping must be STRONG enough to overwhelm poker variance
-                    
-                    # 1. Per-step action appropriateness rewards (based on hand strength)
-                    # These provide dense signal about whether actions matched hand quality
-                    per_step_shaping = episode.get('step_rewards', [])
-                    if per_step_shaping:
-                        for idx, shaping_reward in enumerate(per_step_shaping):
-                            if idx < num_steps:
-                                step_rewards[idx] += shaping_reward
-                    
-                    # 2. Episode-level shaping (STRONGLY ENHANCED)
-                    episode_shaping = 0.0
-                    
-                    hand_strengths = episode.get('hand_strengths', [])
-                    action_types = episode.get('action_types', [])
-                    
-                    # Detect problematic all-in behavior with detailed tracking
-                    all_in_with_weak = False
-                    all_in_with_trash = False
-                    all_in_count = 0
-                    fold_count = 0
-                    
-                    if hand_strengths and action_types:
-                        for hs, act in zip(hand_strengths, action_types):
-                            if act == 'all_in':
-                                all_in_count += 1
-                                if hs < 0.45:  # Weak threshold raised
-                                    all_in_with_weak = True
-                                if hs < 0.30:  # Trash threshold raised
-                                    all_in_with_trash = True
-                            if act == 'fold':
-                                fold_count += 1
-                    
-                    # === KEY ANTI-ALL-IN PENALTIES ===
-                    # These MUST be strong enough that the model learns:
-                    # "All-in with weak hands is ALWAYS bad, even if I got lucky this time"
-                    
-                    if all_in_with_trash:
-                        if normalized_reward > 0:
-                            # WON by luck with trash all-in
-                            # CRITICAL: Must HEAVILY penalize even winning to prevent exploitation learning
-                            episode_shaping -= 0.40  # "Lucky win" - still terrible play
-                        else:
-                            # LOST with trash all-in
-                            # Expected result, but reinforce that this was bad
-                            episode_shaping -= 0.30  # Strong additional penalty
-                    elif all_in_with_weak:
-                        if normalized_reward > 0:
-                            # Won with weak all-in - reduce reward significantly
-                            episode_shaping -= 0.25  # Penalize lucky wins
-                        else:
-                            # Lost with weak all-in - expected, but reinforce
-                            episode_shaping -= 0.15
-                    
-                    # === FOLD PENALTY TO DISCOURAGE OVER-FOLDING ===
-                    # Penalize folding to encourage playing and learning from outcomes
-                    if fold_count > 0 and hand_strengths:
-                        first_hand_strength = hand_strengths[0]
-                        if first_hand_strength < 0.25:
-                            # Folded with true trash - acceptable (no penalty)
-                            pass
-                        elif first_hand_strength < 0.35:
-                            # Folded with weak hand - small penalty to encourage playing
-                            episode_shaping -= 0.03
-                        elif first_hand_strength < 0.50:
-                            # Folded with playable hand - bigger penalty
-                            episode_shaping -= 0.08
-                        else:
-                            # Folded with decent+ hand - severe penalty
-                            episode_shaping -= 0.15
-                    
-                    # === HAND STRENGTH CORRELATION ===
-                    if hand_strengths:
-                        avg_hand_strength = sum(hand_strengths) / len(hand_strengths)
-                        
-                        if normalized_reward > 0:  # Won the hand
-                            if avg_hand_strength > 0.70:
-                                # Won with strong hand - expected and good value extraction
-                                episode_shaping += 0.10
-                            elif avg_hand_strength > 0.55:
-                                # Won with medium hand - good play
-                                episode_shaping += 0.05
-                            elif avg_hand_strength < 0.35:
-                                # Won with weak hand (bluff worked)
-                                # Small bonus only if we didn't do trash all-in
-                                if not all_in_with_trash and not all_in_with_weak:
-                                    episode_shaping += 0.03
-                        else:  # Lost the hand
-                            if avg_hand_strength > 0.70:
-                                # Lost with strong hand (cooler/bad luck)
-                                # Reduce penalty - this wasn't misplay
-                                episode_shaping += 0.05
-                            elif avg_hand_strength < 0.35:
-                                # Lost with weak hand
-                                # If we folded, that's good. If we played, that's bad.
-                                if fold_count == 0:
-                                    # Played weak hand without folding - bad
-                                    episode_shaping -= 0.08
-                    
-                    # Bonus for winning pots uncontested (good aggression that induces folds)
-                    # But NOT if we used trash all-in to do it
-                    if episode.get('won_uncontested', False) and normalized_reward > 0:
-                        if not all_in_with_trash and not all_in_with_weak:
-                            episode_shaping += 0.06  # Reward controlled aggression
-                        # No bonus for all-in forcing fold - that's not skillful
-                    
-                    # Position-aware adjustment (playing OOP is harder)
-                    if episode.get('is_out_of_position', False) and normalized_reward < 0:
-                        normalized_reward *= 0.95
-                    
-                    # Apply episode-level shaping to final reward
-                    normalized_reward += episode_shaping
-                    
-                    # Main reward at the end
-                    step_rewards[-1] += normalized_reward
-                    
-                    # Compute GAE
-                    advantages, returns = self.ppo_trainer.compute_gae(
-                        step_rewards,
-                        episode['values'],
-                        episode['dones'],
-                        torch.tensor(0.0)  # No next value (terminal)
-                    )
-                    
-                    # Store episode data
-                    all_states.append(episode['states'])
-                    all_actions.append(episode['actions'])
-                    all_log_probs.append(episode['log_probs'])
-                    all_values.append(episode['values'])
-                    all_advantages.append(advantages)
-                    all_returns.append(returns)
-                    all_legal_masks.append(episode['legal_actions_masks'])
-                    
-                    # Store hand strengths for auxiliary loss
-                    if episode.get('hand_strengths'):
-                        hs_tensor = torch.tensor(episode['hand_strengths'], dtype=torch.float32)
-                        all_hand_strengths.append(hs_tensor)
-                    
-                    episode_rewards.append(episode['main_reward'])
-                    episode_lengths.append(num_steps)
-                    
-                    if self.log_level >= 2 and (i + 1) % 10 == 0:
-                        avg_reward = sum(episode_rewards[-10:]) / len(episode_rewards[-10:])
-                        print(f"  Episode {i+1}/{num_episodes} - Avg Reward (last 10): {avg_reward:.3f}")
-                        
-                except Exception as e:
-                    print(f"⚠️  Error in episode collection: {e}")
-                    traceback.print_exc()
+            except Exception as e:
+                print(f"⚠️  Error processing episode: {e}")
+                traceback.print_exc()
         
         if not all_states:
             if self.log_level >= 1:
@@ -1358,6 +1487,10 @@ class RLTrainingSession:
             hand_strengths=hand_strengths,
             verbose=(self.log_level >= 2)
         )
+        
+        # Sync updated model weights to parallel workers if using multi-process rollouts
+        if self.num_workers > 0 and self._rollout_manager is not None:
+            self._rollout_manager.update_model_weights()
         
         # Entropy coefficient is now handled by adaptive entropy scheduler if enabled
         # Only manually anneal if adaptive entropy is disabled
@@ -1990,6 +2123,10 @@ def main() -> int:
     parser.add_argument('--regret-weight', type=float, default=0.5,
                        help='Weight for regret-based reward adjustment (default: 0.5)')
     
+    # Multi-process rollout settings
+    parser.add_argument('--num-workers', type=int, default=0,
+                       help='Number of parallel worker processes for rollouts (0=use threads, recommended: num_cpus-1)')
+    
     # Other
     parser.add_argument('--verbose', action='store_true',
                        help='Verbose output')
@@ -2089,6 +2226,15 @@ def main() -> int:
         'maxPlayers': args.num_players
     }
     
+    # Model config for parallel workers
+    model_config = {
+        'input_dim': input_dim,
+        'hidden_dim': args.hidden_dim,
+        'num_heads': args.num_heads,
+        'num_layers': args.num_layers,
+        'dropout': args.dropout,
+    }
+    
     # Create training session
     if LOG_LEVEL >= 1:
         print("\n🚀 Starting RL training session...")
@@ -2098,6 +2244,8 @@ def main() -> int:
         if args.num_runouts > 0:
             print(f"  Monte Carlo runouts per decision: {args.num_runouts}")
             print(f"  Regret weight: {args.regret_weight}")
+        if args.num_workers > 0:
+            print(f"  Parallel workers: {args.num_workers}")
     
     session = RLTrainingSession(
         model=model,
@@ -2108,7 +2256,9 @@ def main() -> int:
         tensorboard_dir=tensorboard_dir,
         log_level=LOG_LEVEL,
         num_runouts=args.num_runouts,
-        regret_weight=args.regret_weight
+        regret_weight=args.regret_weight,
+        num_workers=args.num_workers,
+        model_config=model_config
     )
     
     # Store initial entropy coefficient for plateau response
@@ -2171,6 +2321,9 @@ def main() -> int:
     
     # Save final model
     session.save_checkpoint(name="final")
+    
+    # Cleanup parallel rollout workers
+    session._shutdown_parallel_rollouts()
     
     print("\n✓ Training complete!")
     print(f"  Total episodes: {session.stats['total_episodes']}")
