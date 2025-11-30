@@ -599,18 +599,18 @@ json Game::getActionConstraints() const {
     // Determine legal actions
     json legalActions = json::array();
     
-    // Can always fold
-    legalActions.push_back("fold");
-    
     // Check or call
     if (toCall == 0) {
+        // Can check for free - no need to offer fold (folding is strictly dominated by checking)
         legalActions.push_back("check");
         // Can bet ONLY if no current bet exists in the round AND have enough for min bet
         if (playerChips >= config.bigBlind && currentBet == 0) {
             legalActions.push_back("bet");
         }
     } else {
-        // There's a bet to call
+        // There's a bet to call - fold is a valid option here
+        legalActions.push_back("fold");
+        
         if (playerChips >= toCall) {
             legalActions.push_back("call");
             // Can raise if have enough chips beyond call
