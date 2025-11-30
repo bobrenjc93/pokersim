@@ -304,6 +304,23 @@
             border-radius: 4px;
         }
         
+        .position-badge {
+            font-size: 0.6rem;
+            font-weight: 700;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+        }
+        
+        .position-badge.sb {
+            background: var(--chip-blue);
+            color: white;
+        }
+        
+        .position-badge.bb {
+            background: var(--chip-red);
+            color: white;
+        }
+        
         .player-bet {
             font-family: 'JetBrains Mono', monospace;
             font-size: 0.85rem;
@@ -940,22 +957,50 @@
             box-shadow: 0 4px 15px rgba(212, 175, 55, 0.4);
         }
         
-        /* Last Action Display */
-        .last-action {
-            background: rgba(0,0,0,0.3);
-            padding: 0.75rem 1rem;
-            border-radius: 8px;
-            margin-bottom: 1rem;
+        /* History Panel (separate box underneath action panel) */
+        .history-panel {
+            background: var(--bg-card);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 16px;
+            padding: 1rem 1.5rem;
+            margin-top: 1rem;
             font-size: 0.85rem;
             display: none;
-            transition: all 0.3s ease;
+            max-height: 180px;
+            overflow-y: auto;
         }
         
-        .last-action.visible {
+        .history-panel.visible {
+            display: block;
+        }
+        
+        .action-history-title {
+            font-size: 0.7rem;
+            font-weight: 600;
+            color: rgba(255,255,255,0.5);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.5rem;
+        }
+        
+        .action-history-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
+        }
+        
+        .action-history-item {
             display: flex;
             align-items: center;
             gap: 0.5rem;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            background: rgba(255,255,255,0.03);
             animation: fadeInAction 0.3s ease-out;
+        }
+        
+        .action-history-item.new {
+            animation: highlightAction 0.5s ease-out;
         }
         
         @keyframes fadeInAction {
@@ -969,16 +1014,78 @@
             }
         }
         
-        .last-action .player {
-            font-weight: 600;
+        @keyframes highlightAction {
+            0% { 
+                opacity: 0; 
+                transform: translateX(-10px);
+                background: rgba(212, 175, 55, 0.3);
+            }
+            50% {
+                background: rgba(212, 175, 55, 0.2);
+            }
+            100% { 
+                opacity: 1; 
+                transform: translateX(0);
+                background: rgba(255,255,255,0.03);
+            }
         }
         
-        .last-action .player.human {
+        .action-history-item .stage-label {
+            font-size: 0.65rem;
+            font-family: 'JetBrains Mono', monospace;
+            padding: 0.15rem 0.4rem;
+            border-radius: 3px;
+            background: rgba(255,255,255,0.1);
+            color: rgba(255,255,255,0.6);
+            text-transform: uppercase;
+            min-width: 50px;
+            text-align: center;
+        }
+        
+        .action-history-item .player {
+            font-weight: 600;
+            min-width: 60px;
+        }
+        
+        .action-history-item .player.human {
             color: var(--accent-cyan);
         }
         
-        .last-action .player.ai {
+        .action-history-item .player.ai {
             color: var(--accent-rose);
+        }
+        
+        .action-history-item .action-text {
+            color: rgba(255,255,255,0.8);
+        }
+        
+        .action-history-item .action-amount {
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--gold);
+        }
+        
+        /* Scrollbar styling for history panel */
+        .history-panel::-webkit-scrollbar {
+            width: 6px;
+        }
+        
+        .history-panel::-webkit-scrollbar-track {
+            background: rgba(255,255,255,0.05);
+            border-radius: 3px;
+        }
+        
+        .history-panel::-webkit-scrollbar-thumb {
+            background: rgba(255,255,255,0.2);
+            border-radius: 3px;
+        }
+        
+        .history-panel::-webkit-scrollbar-thumb:hover {
+            background: rgba(255,255,255,0.3);
+        }
+        
+        /* Legacy last-action for backwards compat - hidden */
+        .last-action {
+            display: none !important;
         }
         
         /* Action Processing Animation */
@@ -1181,11 +1288,11 @@
                     <div class="stat-label">Hands Played</div>
                 </div>
                 <div class="stat-item">
-                    <div class="stat-value" id="humanTotalChips">1000</div>
+                    <div class="stat-value" id="humanBankroll">1000</div>
                     <div class="stat-label">Your Bankroll</div>
                 </div>
                 <div class="stat-item">
-                    <div class="stat-value" id="aiTotalChips">1000</div>
+                    <div class="stat-value" id="aiBankroll">1000</div>
                     <div class="stat-label">AI Bankroll</div>
                 </div>
                 <button class="btn btn-primary" id="changeOpponentBtn" style="padding: 0.5rem 1rem; font-size: 0.8rem;">
@@ -1201,7 +1308,8 @@
                         <div class="player-info">
                             <span class="player-name" id="aiName">AI Opponent</span>
                             <span class="player-chips">$<span id="aiChips">1000</span></span>
-                            <span class="dealer-button" id="aiDealerBtn" style="display: none;">D</span>
+                            <span class="position-badge sb" id="aiSB" style="display: none;">SB</span>
+                            <span class="position-badge bb" id="aiBB" style="display: none;">BB</span>
                         </div>
                         <div class="player-bet" id="aiBet" style="display: none;">Bet: $0</div>
                         <div class="cards-row" id="aiCards">
@@ -1231,6 +1339,7 @@
                             </div>
                             <span class="result-profit positive" id="resultProfit">+$120</span>
                             <button class="btn-next-hand" id="nextHandBtn">Next Hand</button>
+                            <button class="btn-next-hand" id="newGameBtn" style="display: none; background: linear-gradient(135deg, var(--accent-emerald) 0%, #00b377 100%);">New Game</button>
                         </div>
                     </div>
                     
@@ -1239,7 +1348,8 @@
                         <div class="player-info">
                             <span class="player-name">You</span>
                             <span class="player-chips">$<span id="humanChips">1000</span></span>
-                            <span class="dealer-button" id="humanDealerBtn" style="display: none;">D</span>
+                            <span class="position-badge sb" id="humanSB" style="display: none;">SB</span>
+                            <span class="position-badge bb" id="humanBB" style="display: none;">BB</span>
                         </div>
                         <div class="player-bet" id="humanBet" style="display: none;">Bet: $0</div>
                         <div class="cards-row" id="humanCards">
@@ -1264,11 +1374,6 @@
                 <div class="action-processing" id="actionProcessing">
                     <span class="action-text" id="processingText">You call</span>
                     <span class="action-amount" id="processingAmount">$20</span>
-                </div>
-                
-                <div class="last-action" id="lastAction">
-                    <span class="player ai" id="lastActionPlayer">AI</span>
-                    <span id="lastActionText">raised to $40</span>
                 </div>
                 
                 <div class="loading" id="aiThinking">
@@ -1316,6 +1421,14 @@
                             <button class="btn-raise-now" id="raiseNowBtn">Raise</button>
                         </div>
                     </div>
+                </div>
+            </div>
+            
+            <!-- History Panel (separate box) -->
+            <div class="history-panel" id="actionHistory">
+                <div class="action-history-title">Action History</div>
+                <div class="action-history-list" id="actionHistoryList">
+                    <!-- Actions will be populated here -->
                 </div>
             </div>
         </div>
@@ -1392,6 +1505,11 @@
                 gameContainer.classList.remove('active');
             });
             nextHandBtn.addEventListener('click', newHand);
+            document.getElementById('newGameBtn').addEventListener('click', () => {
+                setupPanel.style.display = 'block';
+                gameContainer.classList.remove('active');
+                resultBanner.classList.remove('active');
+            });
             
             // Action buttons
             document.querySelectorAll('.action-btn').forEach(btn => {
@@ -1474,12 +1592,22 @@
                         <div class="card-placeholder"></div>
                     `;
                     
-                    // Hide last action
-                    document.getElementById('lastAction').classList.remove('visible');
+                    // Clear action history
+                    document.getElementById('actionHistory').classList.remove('visible');
+                    document.getElementById('actionHistoryList').innerHTML = '';
                     
                     await updateUIWithAnimations(true);
                 } else {
-                    alert(data.error || 'Failed to start new hand');
+                    // Handle session expired
+                    if (data.error === 'Invalid session') {
+                        alert('Session expired (server may have restarted). Please start a new game.');
+                        setupPanel.style.display = 'block';
+                        gameContainer.classList.remove('active');
+                        resultBanner.classList.remove('active');
+                        sessionId = null;
+                    } else {
+                        alert(data.error || 'Failed to start new hand');
+                    }
                 }
             } catch (e) {
                 console.error('Failed to start new hand:', e);
@@ -1751,9 +1879,19 @@
                     }
                 } else {
                     showAiThinking(false);
-                    alert(data.error || 'Action failed');
                     isAnimating = false;
-                    setActionsEnabled(true);
+                    
+                    // Handle session expired (server restart clears in-memory sessions)
+                    if (data.error === 'Invalid session') {
+                        alert('Session expired (server may have restarted). Please start a new game.');
+                        setupPanel.style.display = 'block';
+                        gameContainer.classList.remove('active');
+                        resultBanner.classList.remove('active');
+                        sessionId = null;
+                    } else {
+                        alert(data.error || 'Action failed');
+                        setActionsEnabled(true);
+                    }
                 }
             } catch (e) {
                 console.error('Failed to submit action:', e);
@@ -1784,13 +1922,15 @@
             
             // Update stats (no animation needed)
             document.getElementById('handsPlayed').textContent = gameState.hands_played;
-            document.getElementById('humanTotalChips').textContent = gameState.human_total_chips;
-            document.getElementById('aiTotalChips').textContent = gameState.ai_total_chips;
+            document.getElementById('humanBankroll').textContent = gameState.human_bankroll;
+            document.getElementById('aiBankroll').textContent = gameState.ai_bankroll;
             
             // Update AI info
             document.getElementById('aiName').textContent = gameState.ai.name;
             document.getElementById('aiChips').textContent = gameState.ai.chips;
-            document.getElementById('aiDealerBtn').style.display = gameState.ai.is_dealer ? 'inline' : 'none';
+            // In heads-up, dealer is SB, non-dealer is BB
+            document.getElementById('aiSB').style.display = gameState.ai.is_dealer ? 'inline' : 'none';
+            document.getElementById('aiBB').style.display = gameState.ai.is_dealer ? 'none' : 'inline';
             
             // Update AI bet
             const aiBetEl = document.getElementById('aiBet');
@@ -1803,7 +1943,9 @@
             
             // Update human info
             document.getElementById('humanChips').textContent = gameState.human.chips;
-            document.getElementById('humanDealerBtn').style.display = gameState.human.is_dealer ? 'inline' : 'none';
+            // In heads-up, dealer is SB, non-dealer is BB
+            document.getElementById('humanSB').style.display = gameState.human.is_dealer ? 'inline' : 'none';
+            document.getElementById('humanBB').style.display = gameState.human.is_dealer ? 'none' : 'inline';
             
             // Update human bet
             const humanBetEl = document.getElementById('humanBet');
@@ -1863,8 +2005,8 @@
                 turnIndicator.className = 'turn-indicator opponent-turn';
             }
             
-            // Update last action
-            updateLastAction();
+            // Update action history
+            updateActionHistory();
             
             // Update action buttons
             updateActionButtons();
@@ -1961,28 +2103,58 @@
             }
         }
         
-        function updateLastAction() {
-            const lastActionEl = document.getElementById('lastAction');
-            const action = gameState.last_action;
+        function updateActionHistory() {
+            const historyEl = document.getElementById('actionHistory');
+            const listEl = document.getElementById('actionHistoryList');
+            const actions = gameState.action_history || [];
             
-            if (!action) {
-                lastActionEl.classList.remove('visible');
+            if (actions.length === 0) {
+                historyEl.classList.remove('visible');
                 return;
             }
             
-            const playerEl = document.getElementById('lastActionPlayer');
-            const textEl = document.getElementById('lastActionText');
+            historyEl.classList.add('visible');
             
-            playerEl.textContent = action.player === 'human' ? 'You' : gameState.ai.name;
-            playerEl.className = `player ${action.player}`;
+            // Determine how many new actions since last update
+            const prevCount = previousGameState?.action_history?.length || 0;
             
-            let actionText = action.action;
-            if (action.amount > 0) {
-                actionText += ` $${action.amount}`;
-            }
-            textEl.textContent = actionText;
+            // Build HTML for all actions
+            listEl.innerHTML = actions.map((action, idx) => {
+                const playerName = action.player === 'human' ? 'You' : gameState.ai.name;
+                const playerClass = action.player;
+                const stage = action.stage || 'Preflop';
+                const isNew = idx >= prevCount;
+                
+                let actionText = formatActionName(action.action);
+                let amountHtml = '';
+                if (action.amount > 0) {
+                    amountHtml = `<span class="action-amount">$${action.amount}</span>`;
+                }
+                
+                return `
+                    <div class="action-history-item ${isNew ? 'new' : ''}">
+                        <span class="stage-label">${stage}</span>
+                        <span class="player ${playerClass}">${playerName}</span>
+                        <span class="action-text">${actionText}</span>
+                        ${amountHtml}
+                    </div>
+                `;
+            }).join('');
             
-            lastActionEl.classList.add('visible');
+            // Scroll to bottom to show latest action
+            historyEl.scrollTop = historyEl.scrollHeight;
+        }
+        
+        function formatActionName(action) {
+            const names = {
+                'fold': 'folds',
+                'check': 'checks',
+                'call': 'calls',
+                'bet': 'bets',
+                'raise': 'raises to',
+                'all_in': 'goes all-in'
+            };
+            return names[action] || action;
         }
         
         function updateActionButtons() {
@@ -2019,25 +2191,52 @@
             const resultText = document.getElementById('resultText');
             const resultWinner = document.getElementById('resultWinner');
             const resultProfit = document.getElementById('resultProfit');
+            const nextHandBtn = document.getElementById('nextHandBtn');
+            const newGameBtn = document.getElementById('newGameBtn');
             
-            if (result.winner === 'human') {
-                resultText.className = 'result-text win';
-                resultText.querySelector('span:first-child').textContent = '🏆';
-                resultWinner.textContent = 'You Win!';
-                resultProfit.textContent = `+$${Math.abs(result.human_profit)}`;
-                resultProfit.className = 'result-profit positive';
-            } else if (result.winner === 'ai') {
-                resultText.className = 'result-text lose';
-                resultText.querySelector('span:first-child').textContent = '😔';
-                resultWinner.textContent = `${gameState.ai.name} Wins`;
-                resultProfit.textContent = `-$${Math.abs(result.human_profit)}`;
-                resultProfit.className = 'result-profit negative';
+            // Check if game is over
+            const isGameOver = gameState.game_over;
+            
+            if (isGameOver) {
+                // Game over - show final result
+                if (gameState.game_over_winner === 'human') {
+                    resultText.className = 'result-text win';
+                    resultText.querySelector('span:first-child').textContent = '🎉';
+                    resultWinner.textContent = 'You Win The Match!';
+                    resultProfit.textContent = `Final: $${gameState.human_bankroll}`;
+                    resultProfit.className = 'result-profit positive';
+                } else {
+                    resultText.className = 'result-text lose';
+                    resultText.querySelector('span:first-child').textContent = '💀';
+                    resultWinner.textContent = 'Game Over - AI Wins!';
+                    resultProfit.textContent = 'Busted!';
+                    resultProfit.className = 'result-profit negative';
+                }
+                nextHandBtn.style.display = 'none';
+                newGameBtn.style.display = 'inline-block';
             } else {
-                resultText.className = 'result-text tie';
-                resultText.querySelector('span:first-child').textContent = '🤝';
-                resultWinner.textContent = 'Tie!';
-                resultProfit.textContent = '$0';
-                resultProfit.className = 'result-profit';
+                // Regular hand result
+                if (result.winner === 'human') {
+                    resultText.className = 'result-text win';
+                    resultText.querySelector('span:first-child').textContent = '🏆';
+                    resultWinner.textContent = 'You Win!';
+                    resultProfit.textContent = `+$${Math.abs(result.human_profit)}`;
+                    resultProfit.className = 'result-profit positive';
+                } else if (result.winner === 'ai') {
+                    resultText.className = 'result-text lose';
+                    resultText.querySelector('span:first-child').textContent = '😔';
+                    resultWinner.textContent = `${gameState.ai.name} Wins`;
+                    resultProfit.textContent = `-$${Math.abs(result.human_profit)}`;
+                    resultProfit.className = 'result-profit negative';
+                } else {
+                    resultText.className = 'result-text tie';
+                    resultText.querySelector('span:first-child').textContent = '🤝';
+                    resultWinner.textContent = 'Tie!';
+                    resultProfit.textContent = '$0';
+                    resultProfit.className = 'result-profit';
+                }
+                nextHandBtn.style.display = 'inline-block';
+                newGameBtn.style.display = 'none';
             }
             
             // Show the inline result banner

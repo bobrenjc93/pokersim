@@ -112,13 +112,17 @@ def load_opponent(checkpoint_path: str) -> ModelAgent:
     return agent
 
 
-def call_api(history: List[Dict]) -> Dict:
+def call_api(history: List[Dict], starting_chips: Optional[int] = None) -> Dict:
     """Call the poker API binding"""
+    config = {
+        **GAME_CONFIG,
+        'seed': random.randint(0, 1000000)
+    }
+    if starting_chips is not None:
+        config['startingChips'] = starting_chips
+    
     payload = {
-        'config': {
-            **GAME_CONFIG,
-            'seed': random.randint(0, 1000000)
-        },
+        'config': config,
         'history': history
     }
     
@@ -190,6 +194,10 @@ def get_game_state_for_client(session_data: Dict, player_perspective: str = 'hum
     # Hide AI cards unless showdown
     show_ai_cards = is_complete or session_data.get('show_ai_cards', False)
     
+    # Get bankroll info
+    human_bankroll = session_data.get('human_bankroll', GAME_CONFIG['startingChips'])
+    ai_bankroll = session_data.get('ai_bankroll', GAME_CONFIG['startingChips'])
+    
     return {
         'session_id': session_data.get('session_id'),
         'stage': stage,
@@ -199,14 +207,14 @@ def get_game_state_for_client(session_data: Dict, player_perspective: str = 'hum
             'chips': human_player.get('chips', 0) if human_player else 0,
             'bet': human_player.get('bet', 0) if human_player else 0,
             'cards': human_cards,
-            'is_dealer': human_player.get('isDealer', False) if human_player else False,
+            'is_dealer': session_data.get('human_is_dealer', False),
             'in_hand': human_player.get('isInHand', True) if human_player else False,
         },
         'ai': {
             'chips': ai_player.get('chips', 0) if ai_player else 0,
             'bet': ai_player.get('bet', 0) if ai_player else 0,
             'cards': ai_cards if show_ai_cards else [{'rank': '?', 'suit': '?', 'display': '??', 'hidden': True}] * 2,
-            'is_dealer': ai_player.get('isDealer', False) if ai_player else False,
+            'is_dealer': not session_data.get('human_is_dealer', False),
             'in_hand': ai_player.get('isInHand', True) if ai_player else False,
             'name': session_data.get('opponent_name', 'AI')
         },
@@ -216,10 +224,13 @@ def get_game_state_for_client(session_data: Dict, player_perspective: str = 'hum
         'legal_actions': legal_actions,
         'action_constraints': action_constraints,
         'last_action': session_data.get('last_action'),
+        'action_history': session_data.get('action_history', []),
         'hand_result': session_data.get('hand_result'),
         'hands_played': session_data.get('hands_played', 0),
-        'human_total_chips': session_data.get('human_total_chips', GAME_CONFIG['startingChips']),
-        'ai_total_chips': session_data.get('ai_total_chips', GAME_CONFIG['startingChips']),
+        'human_bankroll': human_bankroll,
+        'ai_bankroll': ai_bankroll,
+        'game_over': session_data.get('game_over', False),
+        'game_over_winner': session_data.get('game_over_winner'),
     }
 
 
@@ -276,14 +287,24 @@ def start_game():
             'error': f'Failed to load model: {str(e)}'
         }), 500
     
-    # Initialize game history
-    history = [
-        {'type': 'addPlayer', 'playerId': 'human', 'playerName': 'You'},
-        {'type': 'addPlayer', 'playerId': 'ai', 'playerName': opponent.name}
-    ]
+    # Initialize bankrolls and dealer position
+    starting_chips = GAME_CONFIG['startingChips']
+    human_is_dealer = random.choice([True, False])  # Random first dealer
+    
+    # Initialize game history - dealer (SB) is added first in heads-up
+    if human_is_dealer:
+        history = [
+            {'type': 'addPlayer', 'playerId': 'human', 'playerName': 'You'},
+            {'type': 'addPlayer', 'playerId': 'ai', 'playerName': opponent.name}
+        ]
+    else:
+        history = [
+            {'type': 'addPlayer', 'playerId': 'ai', 'playerName': opponent.name},
+            {'type': 'addPlayer', 'playerId': 'human', 'playerName': 'You'}
+        ]
     
     # Get initial state
-    response = call_api(history)
+    response = call_api(history, starting_chips)
     if not response.get('success'):
         return jsonify({
             'success': False,
@@ -298,28 +319,39 @@ def start_game():
         'history': history,
         'game_state': response['gameState'],
         'hands_played': 0,
-        'human_total_chips': GAME_CONFIG['startingChips'],
-        'ai_total_chips': GAME_CONFIG['startingChips'],
+        'human_bankroll': starting_chips,
+        'ai_bankroll': starting_chips,
+        'human_is_dealer': human_is_dealer,
+        'hand_effective_stack': starting_chips,
         'last_action': None,
+        'action_history': [],  # Track all actions in the hand
         'hand_result': None,
+        'game_over': False,
+        'game_over_winner': None,
     }
     
     # Reset opponent's action history
     opponent.reset_hand()
     
-    # Check if AI needs to act first
-    game_state = response['gameState']
-    current_player = game_state.get('currentPlayerId', '')
-    
-    if current_player == 'ai':
-        # AI acts first
-        session_data = game_sessions[session_id]
-        process_ai_turn(session_data, opponent)
+    # Process any AI turns needed at the start
+    session_data = game_sessions[session_id]
+    while True:
+        game_state = session_data['game_state']
+        stage = game_state.get('stage', '').lower()
+        if stage in ['complete', 'showdown']:
+            handle_hand_complete(session_data)
+            break
+        
+        current_player = game_state.get('currentPlayerId', '')
+        if current_player == 'ai':
+            process_ai_turn(session_data, opponent)
+        else:
+            break
     
     return jsonify({
         'success': True,
         'session_id': session_id,
-        'game_state': get_game_state_for_client(game_sessions[session_id])
+        'game_state': get_game_state_for_client(session_data)
     })
 
 
@@ -370,7 +402,8 @@ def process_ai_turn(session_data: Dict, opponent: ModelAgent) -> Optional[Dict]:
     })
     
     # Update game state
-    response = call_api(session_data['history'])
+    effective_stack = session_data.get('hand_effective_stack', GAME_CONFIG['startingChips'])
+    response = call_api(session_data['history'], effective_stack)
     if response.get('success'):
         session_data['game_state'] = response['gameState']
     
@@ -380,9 +413,11 @@ def process_ai_turn(session_data: Dict, opponent: ModelAgent) -> Optional[Dict]:
         'action': action_type,
         'amount': amount,
         'label': action_label,
-        'probabilities': probs
+        'probabilities': probs,
+        'stage': game_state.get('stage', 'Preflop')
     }
     session_data['last_action'] = action_info
+    session_data['action_history'].append(action_info)
     
     # Notify opponent of its own action (for history tracking)
     opponent.observe_action('ai', action_type, amount, game_state.get('pot', 0), game_state.get('stage', 'Preflop'))
@@ -460,7 +495,8 @@ def player_action():
     
     # Test the action before committing to history
     test_history = session_data['history'] + [new_action]
-    response = call_api(test_history)
+    effective_stack = session_data.get('hand_effective_stack', GAME_CONFIG['startingChips'])
+    response = call_api(test_history, effective_stack)
     if not response.get('success'):
         return jsonify({
             'success': False,
@@ -471,33 +507,38 @@ def player_action():
     session_data['history'].append(new_action)
     
     session_data['game_state'] = response['gameState']
-    session_data['last_action'] = {
+    human_action_info = {
         'player': 'human',
         'action': final_action,
         'amount': final_amount,
-        'label': action_type
+        'label': action_type,
+        'stage': game_state.get('stage', 'Preflop')
     }
+    session_data['last_action'] = human_action_info
+    session_data['action_history'].append(human_action_info)
     
     # Load opponent and notify of human action
     opponent = load_opponent(session_data['checkpoint_path'])
     opponent.observe_action('human', final_action, final_amount, 
                            game_state.get('pot', 0), game_state.get('stage', 'Preflop'))
     
-    # Check if hand is complete
-    new_stage = session_data['game_state'].get('stage', '').lower()
-    if new_stage in ['complete', 'showdown']:
-        # Hand is over
-        handle_hand_complete(session_data)
-    else:
-        # Check if AI needs to act
+    # Loop to handle AI turns (including across street transitions)
+    # The AI may need to act multiple times if:
+    # 1. AI acts and the street transitions (e.g., flop → turn)
+    # 2. AI is first to act on the new street (e.g., BB acts first postflop)
+    while True:
+        new_stage = session_data['game_state'].get('stage', '').lower()
+        if new_stage in ['complete', 'showdown']:
+            # Hand is over
+            handle_hand_complete(session_data)
+            break
+        
         new_current_player = session_data['game_state'].get('currentPlayerId', '')
         if new_current_player == 'ai':
             process_ai_turn(session_data, opponent)
-            
-            # Check again if hand is complete after AI action
-            new_stage = session_data['game_state'].get('stage', '').lower()
-            if new_stage in ['complete', 'showdown']:
-                handle_hand_complete(session_data)
+        else:
+            # It's human's turn now
+            break
     
     return jsonify({
         'success': True,
@@ -519,10 +560,10 @@ def handle_hand_complete(session_data: Dict):
         else:
             ai_player = p
     
-    # Calculate results
-    starting_chips = GAME_CONFIG['startingChips']
-    human_profit = (human_player.get('chips', 0) - starting_chips) if human_player else 0
-    ai_profit = (ai_player.get('chips', 0) - starting_chips) if ai_player else 0
+    # Calculate results based on the effective stack used this hand
+    effective_stack = session_data.get('hand_effective_stack', GAME_CONFIG['startingChips'])
+    human_profit = (human_player.get('chips', 0) - effective_stack) if human_player else 0
+    ai_profit = (ai_player.get('chips', 0) - effective_stack) if ai_player else 0
     
     # Determine winner
     if human_profit > 0:
@@ -548,8 +589,18 @@ def handle_hand_complete(session_data: Dict):
     
     session_data['show_ai_cards'] = True
     session_data['hands_played'] += 1
-    session_data['human_total_chips'] += human_profit
-    session_data['ai_total_chips'] += ai_profit
+    
+    # Update bankrolls
+    session_data['human_bankroll'] += human_profit
+    session_data['ai_bankroll'] += ai_profit
+    
+    # Check for game over (someone busted)
+    if session_data['human_bankroll'] <= 0:
+        session_data['game_over'] = True
+        session_data['game_over_winner'] = 'ai'
+    elif session_data['ai_bankroll'] <= 0:
+        session_data['game_over'] = True
+        session_data['game_over_winner'] = 'human'
 
 
 @app.route('/api/new_hand', methods=['POST'])
@@ -566,14 +617,40 @@ def new_hand():
     
     session_data = game_sessions[session_id]
     
-    # Reset for new hand
-    history = [
-        {'type': 'addPlayer', 'playerId': 'human', 'playerName': 'You'},
-        {'type': 'addPlayer', 'playerId': 'ai', 'playerName': session_data.get('opponent_name', 'AI')}
-    ]
+    # Check if game is over
+    if session_data.get('game_over'):
+        return jsonify({
+            'success': False,
+            'error': 'Game is over! Start a new session to play again.'
+        }), 400
     
-    # Get new game state
-    response = call_api(history)
+    # Alternate dealer position (in heads-up, dealer is SB)
+    session_data['human_is_dealer'] = not session_data.get('human_is_dealer', False)
+    human_is_dealer = session_data['human_is_dealer']
+    
+    # Use effective stack as the minimum of both bankrolls
+    human_bankroll = session_data.get('human_bankroll', GAME_CONFIG['startingChips'])
+    ai_bankroll = session_data.get('ai_bankroll', GAME_CONFIG['startingChips'])
+    effective_stack = min(human_bankroll, ai_bankroll)
+    
+    # Store effective stack for profit calculation
+    session_data['hand_effective_stack'] = effective_stack
+    
+    # Reset for new hand - dealer (SB) is added first in heads-up
+    opponent_name = session_data.get('opponent_name', 'AI')
+    if human_is_dealer:
+        history = [
+            {'type': 'addPlayer', 'playerId': 'human', 'playerName': 'You'},
+            {'type': 'addPlayer', 'playerId': 'ai', 'playerName': opponent_name}
+        ]
+    else:
+        history = [
+            {'type': 'addPlayer', 'playerId': 'ai', 'playerName': opponent_name},
+            {'type': 'addPlayer', 'playerId': 'human', 'playerName': 'You'}
+        ]
+    
+    # Get new game state with effective stack
+    response = call_api(history, effective_stack)
     if not response.get('success'):
         return jsonify({
             'success': False,
@@ -583,6 +660,7 @@ def new_hand():
     session_data['history'] = history
     session_data['game_state'] = response['gameState']
     session_data['last_action'] = None
+    session_data['action_history'] = []  # Reset action history for new hand
     session_data['hand_result'] = None
     session_data['show_ai_cards'] = False
     
@@ -590,10 +668,19 @@ def new_hand():
     opponent = load_opponent(session_data['checkpoint_path'])
     opponent.reset_hand()
     
-    # Check if AI needs to act first
-    current_player = response['gameState'].get('currentPlayerId', '')
-    if current_player == 'ai':
-        process_ai_turn(session_data, opponent)
+    # Process any AI turns needed at the start
+    while True:
+        game_state = session_data['game_state']
+        stage = game_state.get('stage', '').lower()
+        if stage in ['complete', 'showdown']:
+            handle_hand_complete(session_data)
+            break
+        
+        current_player = game_state.get('currentPlayerId', '')
+        if current_player == 'ai':
+            process_ai_turn(session_data, opponent)
+        else:
+            break
     
     return jsonify({
         'success': True,
@@ -627,5 +714,5 @@ if __name__ == '__main__':
     checkpoints = get_available_checkpoints()
     print(f"Available checkpoints: {len(checkpoints)}")
     
-    app.run(host='0.0.0.0', port=port, debug=True)
+    app.run(host='0.0.0.0', port=port, debug=True, use_reloader=False)
 
