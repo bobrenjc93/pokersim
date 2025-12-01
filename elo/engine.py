@@ -10,6 +10,8 @@ import re
 import json
 import random
 import math
+import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional, TYPE_CHECKING
 from dataclasses import dataclass, field
@@ -23,6 +25,7 @@ if str(TRAINING_DIR) not in sys.path:
 
 from model_agent import (
     extract_state,
+    ModelAgent,
     RandomAgent,
     HeuristicAgent,
     TightAgent,
@@ -40,6 +43,181 @@ from config import DEFAULT_MODELS_DIR
 
 if TYPE_CHECKING:
     from rl_model import PokerActorCritic
+
+
+# Hand logging configuration
+HAND_LOGS_DIR = Path(os.environ.get('HAND_LOGS_DIR', '/tmp/pokersim/hand_logs'))
+HAND_LOG_FREQUENCY = 100  # Log 1 out of every N hands
+
+
+class HandLogger:
+    """
+    Logger for recording poker hands with full action history and model predictions.
+    Saves hands to disk in JSON format for analysis with the hand-viewer.
+    """
+    
+    def __init__(self, logs_dir: Path = HAND_LOGS_DIR):
+        self.logs_dir = logs_dir
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        self.hand_counter = 0
+        self.current_hand = None
+    
+    def should_log(self) -> bool:
+        """Check if the current hand should be logged (1 in HAND_LOG_FREQUENCY)."""
+        return self.hand_counter % HAND_LOG_FREQUENCY == 0
+    
+    def start_hand(
+        self,
+        player_a_id: str,
+        player_b_id: str,
+        player_a_name: str,
+        player_b_name: str,
+        player_a_config: Dict,
+        player_b_config: Dict,
+        starting_stack_a: int,
+        starting_stack_b: int
+    ):
+        """Start logging a new hand."""
+        self.hand_counter += 1
+        
+        if not self.should_log():
+            self.current_hand = None
+            return
+        
+        self.current_hand = {
+            'hand_id': str(uuid.uuid4()),
+            'timestamp': datetime.now().isoformat(),
+            'players': [
+                {
+                    'player_id': player_a_id,
+                    'name': player_a_name,
+                    'model_path': player_a_config.get('path', ''),
+                    'agent_type': player_a_config.get('type', 'unknown'),
+                    'starting_stack': starting_stack_a,
+                    'hole_cards': [],
+                    'is_dealer': False,
+                    'is_small_blind': False,
+                    'is_big_blind': False
+                },
+                {
+                    'player_id': player_b_id,
+                    'name': player_b_name,
+                    'model_path': player_b_config.get('path', ''),
+                    'agent_type': player_b_config.get('type', 'unknown'),
+                    'starting_stack': starting_stack_b,
+                    'hole_cards': [],
+                    'is_dealer': False,
+                    'is_small_blind': False,
+                    'is_big_blind': False
+                }
+            ],
+            'community_cards': {
+                'flop': [],
+                'turn': None,
+                'river': None
+            },
+            'actions': [],
+            'result': {}
+        }
+    
+    def set_hole_cards(self, player_id: str, hole_cards: List):
+        """Record hole cards for a player."""
+        if not self.current_hand:
+            return
+        
+        for p in self.current_hand['players']:
+            if p['player_id'] == player_id:
+                p['hole_cards'] = hole_cards
+                break
+    
+    def set_player_positions(self, game_state: Dict):
+        """Record player positions (dealer, SB, BB) from game state."""
+        if not self.current_hand:
+            return
+        
+        for game_player in game_state.get('players', []):
+            player_id = game_player.get('id')
+            for p in self.current_hand['players']:
+                if p['player_id'] == player_id:
+                    p['is_dealer'] = game_player.get('isDealer', False)
+                    p['is_small_blind'] = game_player.get('isSmallBlind', False)
+                    p['is_big_blind'] = game_player.get('isBigBlind', False)
+                    break
+    
+    def set_community_cards(self, stage: str, cards: List):
+        """Record community cards for a stage."""
+        if not self.current_hand:
+            return
+        
+        stage_lower = stage.lower()
+        if stage_lower == 'flop' and cards:
+            self.current_hand['community_cards']['flop'] = cards[:3]
+        elif stage_lower == 'turn' and cards and len(cards) > 3:
+            self.current_hand['community_cards']['turn'] = cards[3]
+        elif stage_lower == 'river' and cards and len(cards) > 4:
+            self.current_hand['community_cards']['river'] = cards[4]
+    
+    def log_action(
+        self,
+        player_id: str,
+        player_name: str,
+        action_type: str,
+        action_label: str,
+        amount: int,
+        stage: str,
+        pot: int,
+        predictions: Optional[Dict[str, float]] = None
+    ):
+        """Log an action with optional model predictions."""
+        if not self.current_hand:
+            return
+        
+        action_data = {
+            'player_id': player_id,
+            'player_name': player_name,
+            'action_type': action_type,
+            'action_label': action_label,
+            'amount': amount,
+            'stage': stage,
+            'pot_after': pot,
+            'predictions': predictions or {}
+        }
+        
+        self.current_hand['actions'].append(action_data)
+    
+    def end_hand(
+        self,
+        winner_id: str,
+        winner_name: str,
+        final_pot: int,
+        profits: Dict[str, int]
+    ):
+        """Finalize and save the hand log."""
+        if not self.current_hand:
+            return
+        
+        self.current_hand['result'] = {
+            'winner_id': winner_id,
+            'winner_name': winner_name,
+            'final_pot': final_pot,
+            'profits': profits
+        }
+        
+        # Save to file
+        filename = f"{self.current_hand['hand_id']}.json"
+        filepath = self.logs_dir / filename
+        
+        try:
+            with open(filepath, 'w') as f:
+                json.dump(self.current_hand, f, indent=2)
+        except Exception as e:
+            print(f"Failed to save hand log: {e}")
+        
+        self.current_hand = None
+    
+    def cancel_hand(self):
+        """Cancel current hand logging (e.g., on error)."""
+        self.current_hand = None
 
 
 @dataclass
@@ -198,6 +376,9 @@ class PokerEloArena:
         
         # Cache for loaded models
         self.model_cache = {}
+        
+        # Hand logger for saving hands to disk
+        self.hand_logger = HandLogger()
     
     def load_model(self, checkpoint_path: Path) -> "PokerActorCritic":
         """Load a model from a checkpoint."""
@@ -214,13 +395,18 @@ class PokerEloArena:
             print(f"Error loading model {checkpoint_path}: {e}")
             raise
     
-    def _call_api(self, history: List[Dict]) -> Dict:
+    def _call_api(self, history: List[Dict], starting_chips: Optional[int] = None) -> Dict:
         """Call poker API binding."""
+        config = {
+            **self.game_config,
+            'seed': random.randint(0, 1000000)
+        }
+        # Override starting chips if provided
+        if starting_chips is not None:
+            config['startingChips'] = starting_chips
+            
         payload = {
-            'config': {
-                **self.game_config,
-                'seed': random.randint(0, 1000000)
-            },
+            'config': config,
             'history': history
         }
         
@@ -268,12 +454,23 @@ class PokerEloArena:
         else:
             return RandomAgent(player_id, name)
 
-    def play_hand(self, agents: Dict) -> Tuple[int, int, bool]:
+    def play_hand(
+        self, 
+        agents: Dict,
+        config_a: Optional[Dict] = None,
+        config_b: Optional[Dict] = None,
+        stack_p0: Optional[int] = None,
+        stack_p1: Optional[int] = None
+    ) -> Tuple[int, int, bool]:
         """
         Play a single hand between two agents.
         
         Args:
             agents: Dict mapping player_id to agent instance
+            config_a: Optional config for player A (for logging)
+            config_b: Optional config for player B (for logging)
+            stack_p0: Starting stack for p0 (defaults to STARTING_STACK)
+            stack_p1: Starting stack for p1 (defaults to STARTING_STACK)
             
         Returns:
             Tuple of (profit_p0, profit_p1, error)
@@ -281,18 +478,47 @@ class PokerEloArena:
         agent_a = agents['p0']
         agent_b = agents['p1']
         
+        # Use provided stacks or default
+        actual_stack_p0 = stack_p0 if stack_p0 is not None else self.STARTING_STACK
+        actual_stack_p1 = stack_p1 if stack_p1 is not None else self.STARTING_STACK
+        
+        # For heads-up, both players must have the same stack in the API
+        # Use the minimum of both stacks (effective stack)
+        effective_stack = min(actual_stack_p0, actual_stack_p1)
+        
+        # Start hand logging with actual individual stacks
+        if config_a and config_b:
+            self.hand_logger.start_hand(
+                player_a_id='p0',
+                player_b_id='p1',
+                player_a_name=agent_a.name,
+                player_b_name=agent_b.name,
+                player_a_config=config_a,
+                player_b_config=config_b,
+                starting_stack_a=actual_stack_p0,
+                starting_stack_b=actual_stack_p1
+            )
+        
         history = [
             {'type': 'addPlayer', 'playerId': 'p0', 'playerName': agent_a.name},
             {'type': 'addPlayer', 'playerId': 'p1', 'playerName': agent_b.name}
         ]
         
-        response = self._call_api(history)
+        response = self._call_api(history, starting_chips=effective_stack)
         if not response['success']:
+            self.hand_logger.cancel_hand()
             return 0, 0, True
             
         game_state = response['gameState']
         raises_this_round = 0
         current_betting_stage = None
+        last_logged_stage = None
+        
+        # Log hole cards and positions if logging this hand
+        if self.hand_logger.current_hand:
+            for p in game_state.get('players', []):
+                self.hand_logger.set_hole_cards(p['id'], p.get('holeCards', []))
+            self.hand_logger.set_player_positions(game_state)
         
         for _ in range(200):  # Max steps per hand
             stage = game_state.get('stage', '').lower()
@@ -302,6 +528,12 @@ class PokerEloArena:
             if stage != current_betting_stage:
                 current_betting_stage = stage
                 raises_this_round = 0
+            
+            # Log community cards when stage changes
+            if self.hand_logger.current_hand and stage != last_logged_stage:
+                community_cards = game_state.get('communityCards', [])
+                self.hand_logger.set_community_cards(stage, community_cards)
+                last_logged_stage = stage
             
             current_player_id = game_state.get('currentPlayerId')
             if not current_player_id or current_player_id == 'none':
@@ -319,19 +551,42 @@ class PokerEloArena:
                     legal_actions = ['fold']
             
             state_dict = extract_state(game_state, current_player_id)
-            action_type, amount, _ = agent.select_action(state_dict, legal_actions)
+            
+            # Get action with predictions if it's a ModelAgent and we're logging
+            predictions = None
+            if self.hand_logger.current_hand and isinstance(agent, ModelAgent):
+                # ModelAgent supports return_probs to get probability distribution
+                action_type, amount, action_label, predictions = agent.select_action(
+                    state_dict, legal_actions, return_probs=True
+                )
+            else:
+                action_type, amount, action_label = agent.select_action(state_dict, legal_actions)
             
             player_chips = state_dict.get('player_chips', 0)
             to_call = state_dict.get('to_call', 0)
             
             # Convert to all_in if needed
+            original_action_type = action_type
             if action_type in ['bet', 'raise'] and amount >= player_chips:
                 action_type, amount = 'all_in', 0
             elif action_type == 'call' and to_call >= player_chips > 0:
                 action_type, amount = 'all_in', 0
             
-            if action_type in ['raise', 'bet']:
+            if original_action_type in ['raise', 'bet']:
                 raises_this_round += 1
+            
+            # Store action info for logging after API call
+            pending_action_log = None
+            if self.hand_logger.current_hand:
+                pending_action_log = {
+                    'player_id': current_player_id,
+                    'player_name': agent.name,
+                    'action_type': action_type,
+                    'action_label': action_label or action_type,
+                    'amount': amount,
+                    'stage': stage,
+                    'predictions': predictions
+                }
             
             history.append({
                 'type': 'playerAction',
@@ -340,27 +595,59 @@ class PokerEloArena:
                 'amount': amount
             })
             
-            response = self._call_api(history)
+            response = self._call_api(history, starting_chips=effective_stack)
             if not response['success']:
+                self.hand_logger.cancel_hand()
                 return 0, 0, True
             game_state = response['gameState']
+            
+            # Log action with actual pot value from the updated game state
+            if pending_action_log:
+                pot_after = game_state.get('pot', 0)
+                self.hand_logger.log_action(
+                    player_id=pending_action_log['player_id'],
+                    player_name=pending_action_log['player_name'],
+                    action_type=pending_action_log['action_type'],
+                    action_label=pending_action_log['action_label'],
+                    amount=pending_action_log['amount'],
+                    stage=pending_action_log['stage'],
+                    pot=pot_after,
+                    predictions=pending_action_log['predictions']
+                )
         
-        # Calculate profit/loss in chips
-        initial = self.STARTING_STACK
+        # Calculate profit/loss in chips (based on effective stack used in this hand)
         profit_a = profit_b = 0
         for p in game_state['players']:
-            profit = p['chips'] - initial
+            profit = p['chips'] - effective_stack
             if p['id'] == 'p0':
                 profit_a = profit
             else:
                 profit_b = profit
+        
+        # End hand logging
+        if self.hand_logger.current_hand:
+            winner_id = 'p0' if profit_a > 0 else ('p1' if profit_b > 0 else None)
+            winner_name = agent_a.name if profit_a > 0 else (agent_b.name if profit_b > 0 else 'Draw')
+            # Calculate final pot from the max pot seen during actions
+            # (game_state.pot is 0 after hand ends because chips are distributed)
+            actions = self.hand_logger.current_hand.get('actions', [])
+            final_pot = max((a.get('pot_after', 0) for a in actions), default=0) if actions else 0
+            
+            self.hand_logger.end_hand(
+                winner_id=winner_id or '',
+                winner_name=winner_name,
+                final_pot=final_pot,
+                profits={'p0': profit_a, 'p1': profit_b}
+            )
             
         return profit_a, profit_b, False
     
     def play_freezeout_round(
         self, 
         agents: Dict,
-        agents_swapped: Dict
+        agents_swapped: Dict,
+        config_a: Optional[Dict] = None,
+        config_b: Optional[Dict] = None
     ) -> Dict[str, Any]:
         """
         Play a single freezeout round between two agents.
@@ -370,6 +657,8 @@ class PokerEloArena:
         Args:
             agents: Dict mapping player_id to agent instance (normal order)
             agents_swapped: Dict mapping player_id to agent instance (swapped order)
+            config_a: Optional config for player A (for logging)
+            config_b: Optional config for player B (for logging)
             
         Returns:
             Round result with winner info
@@ -390,11 +679,23 @@ class PokerEloArena:
             try:
                 if swap:
                     # B is p0 (button/SB), A is p1 (BB)
-                    profit_p0, profit_p1, error = self.play_hand(agents_swapped)
+                    profit_p0, profit_p1, error = self.play_hand(
+                        agents_swapped, 
+                        config_a=config_b,  # B is p0
+                        config_b=config_a,  # A is p1
+                        stack_p0=stack_b,   # B's stack
+                        stack_p1=stack_a    # A's stack
+                    )
                     profit_a, profit_b = profit_p1, profit_p0
                 else:
                     # A is p0 (button/SB), B is p1 (BB)
-                    profit_a, profit_b, error = self.play_hand(agents)
+                    profit_a, profit_b, error = self.play_hand(
+                        agents, 
+                        config_a=config_a, 
+                        config_b=config_b,
+                        stack_p0=stack_a,   # A's stack
+                        stack_p1=stack_b    # B's stack
+                    )
                 
                 if error:
                     continue
@@ -480,7 +781,12 @@ class PokerEloArena:
         
         # Play ROUNDS_PER_MATCH rounds (best-of-9 by default)
         for round_num in range(self.ROUNDS_PER_MATCH):
-            result = self.play_freezeout_round(agents, agents_swapped)
+            result = self.play_freezeout_round(
+                agents, 
+                agents_swapped,
+                config_a=config_a,
+                config_b=config_b
+            )
             
             if result.get('error'):
                 continue

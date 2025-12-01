@@ -65,9 +65,23 @@ The server runs on port 5051 by default. Open http://localhost:5051 in your brow
   - Higher K = faster rating spread (use 40-60 to reach 4-5k top ratings quickly)
   - Lower K = more stable ratings (use 20-32 for slower convergence)
 
+## Hand Logging
+
+During matches, 1 in every 100 hands is logged to disk for analysis with the hand-viewer:
+
+- **Log Directory**: `/tmp/pokersim/hand_logs/` (configurable via `HAND_LOGS_DIR` env var)
+- **Log Frequency**: Every 100th hand (configurable via `HAND_LOG_FREQUENCY` in `engine.py`)
+- **Format**: JSON files with hand ID, players, hole cards, community cards, actions, and model predictions
+
+To view logged hands:
+```bash
+cd ../hand-viewer
+./start.sh
+```
+
 ## Files
 
-- `engine.py` - Core ELO calculation and poker game logic
+- `engine.py` - Core ELO calculation, poker game logic, and hand logging
 - `server.py` - Flask web server with SSE streaming
 - `templates/index.html` - Web UI
 - `pyproject.toml` - Python dependencies

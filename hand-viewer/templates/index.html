@@ -1,0 +1,1129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hand Viewer — Poker AI</title>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-deep: #0c0c10;
+            --bg-primary: #111116;
+            --bg-card: #18181f;
+            --bg-elevated: #1e1e28;
+            --bg-hover: #252532;
+            --border-subtle: #2a2a38;
+            --border-default: #3a3a4d;
+            --text-primary: #f0f0f5;
+            --text-secondary: #a0a0b8;
+            --text-muted: #606078;
+            --accent-blue: #5b8def;
+            --accent-green: #4ade80;
+            --accent-red: #f87171;
+            --accent-yellow: #fbbf24;
+            --accent-purple: #a78bfa;
+            --card-red: #dc2626;
+            --card-black: #1f2937;
+        }
+        
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: 'DM Sans', sans-serif;
+            background: var(--bg-deep);
+            color: var(--text-primary);
+            min-height: 100vh;
+            background-image: 
+                radial-gradient(ellipse at 0% 0%, rgba(91, 141, 239, 0.06) 0%, transparent 50%),
+                radial-gradient(ellipse at 100% 100%, rgba(167, 139, 250, 0.04) 0%, transparent 50%);
+        }
+        
+        .app-container {
+            display: flex;
+            min-height: 100vh;
+        }
+        
+        /* Sidebar */
+        .sidebar {
+            width: 380px;
+            background: var(--bg-primary);
+            border-right: 1px solid var(--border-subtle);
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+        }
+        
+        .sidebar-header {
+            padding: 1.25rem 1.5rem;
+            border-bottom: 1px solid var(--border-subtle);
+        }
+        
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+        
+        .logo-icon {
+            width: 36px;
+            height: 36px;
+            background: linear-gradient(135deg, var(--accent-blue) 0%, var(--accent-purple) 100%);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.25rem;
+        }
+        
+        .logo h1 {
+            font-size: 1.25rem;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+        }
+        
+        .stats-bar {
+            padding: 0.75rem 1.5rem;
+            background: var(--bg-card);
+            border-bottom: 1px solid var(--border-subtle);
+            display: flex;
+            gap: 1.5rem;
+            font-size: 0.75rem;
+        }
+        
+        .stat-item {
+            display: flex;
+            flex-direction: column;
+            gap: 0.15rem;
+        }
+        
+        .stat-label {
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-size: 0.65rem;
+        }
+        
+        .stat-value {
+            font-family: 'IBM Plex Mono', monospace;
+            font-weight: 600;
+            color: var(--accent-blue);
+        }
+        
+        .hand-list-container {
+            flex: 1;
+            overflow-y: auto;
+        }
+        
+        .hand-list {
+            padding: 0.5rem;
+        }
+        
+        .hand-item {
+            padding: 0.875rem 1rem;
+            background: var(--bg-card);
+            border: 1px solid transparent;
+            border-radius: 10px;
+            margin-bottom: 0.5rem;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        
+        .hand-item:hover {
+            background: var(--bg-elevated);
+            border-color: var(--border-subtle);
+        }
+        
+        .hand-item.active {
+            background: var(--bg-elevated);
+            border-color: var(--accent-blue);
+            box-shadow: 0 0 0 1px var(--accent-blue);
+        }
+        
+        .hand-item-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.5rem;
+        }
+        
+        .hand-id {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+        
+        .hand-time {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+        }
+        
+        .hand-players {
+            font-size: 0.85rem;
+            margin-bottom: 0.35rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .vs-badge {
+            font-size: 0.65rem;
+            color: var(--text-muted);
+            padding: 0.1rem 0.3rem;
+            background: var(--bg-deep);
+            border-radius: 4px;
+        }
+        
+        .hand-result {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.75rem;
+        }
+        
+        .winner-badge {
+            padding: 0.2rem 0.5rem;
+            background: rgba(74, 222, 128, 0.15);
+            color: var(--accent-green);
+            border-radius: 4px;
+            font-weight: 500;
+        }
+        
+        .pot-size {
+            font-family: 'IBM Plex Mono', monospace;
+            color: var(--accent-yellow);
+        }
+        
+        /* Main Content */
+        .main-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        
+        .empty-state {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-muted);
+            gap: 1rem;
+        }
+        
+        .empty-state-icon {
+            font-size: 4rem;
+            opacity: 0.3;
+        }
+        
+        .empty-state h2 {
+            font-size: 1.25rem;
+            font-weight: 500;
+        }
+        
+        .empty-state p {
+            font-size: 0.875rem;
+            max-width: 400px;
+            text-align: center;
+            line-height: 1.5;
+        }
+        
+        /* Hand Detail View */
+        .hand-detail {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        
+        .detail-header {
+            padding: 1.25rem 1.5rem;
+            background: var(--bg-primary);
+            border-bottom: 1px solid var(--border-subtle);
+        }
+        
+        .detail-header-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .detail-title {
+            font-size: 1.125rem;
+            font-weight: 600;
+        }
+        
+        .detail-meta {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-top: 0.35rem;
+        }
+        
+        .player-cards-row {
+            display: flex;
+            gap: 2rem;
+            margin-top: 1rem;
+            padding: 1rem;
+            background: var(--bg-card);
+            border-radius: 10px;
+        }
+        
+        .player-hand {
+            flex: 1;
+        }
+        
+        .player-hand-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.5rem;
+        }
+        
+        .player-name {
+            font-weight: 600;
+            font-size: 0.9rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .position-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 22px;
+            height: 22px;
+            border-radius: 50%;
+            font-size: 0.6rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            flex-shrink: 0;
+        }
+        
+        .position-badge.dealer {
+            background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+            color: white;
+            box-shadow: 0 2px 4px rgba(245, 158, 11, 0.3);
+        }
+        
+        .position-badge.sb {
+            background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
+            color: white;
+            box-shadow: 0 2px 4px rgba(99, 102, 241, 0.3);
+        }
+        
+        .position-badge.bb {
+            background: linear-gradient(135deg, #ec4899 0%, #db2777 100%);
+            color: white;
+            box-shadow: 0 2px 4px rgba(236, 72, 153, 0.3);
+        }
+        
+        .player-stack {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+        }
+        
+        .cards-display {
+            display: flex;
+            gap: 0.35rem;
+        }
+        
+        .card {
+            width: 42px;
+            height: 58px;
+            background: white;
+            border-radius: 6px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 1rem;
+            font-weight: 700;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+            position: relative;
+        }
+        
+        .card.red { color: #dc2626; }
+        .card.black { color: #1f2937; }
+        
+        .card .suit {
+            font-size: 0.9rem;
+            margin-top: -2px;
+        }
+        
+        .card.back {
+            background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+            background-image: 
+                linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%),
+                repeating-linear-gradient(45deg, transparent, transparent 5px, rgba(255,255,255,0.1) 5px, rgba(255,255,255,0.1) 10px);
+        }
+        
+        /* Community Cards */
+        .community-section {
+            padding: 1rem 1.5rem;
+            background: var(--bg-card);
+            border-bottom: 1px solid var(--border-subtle);
+        }
+        
+        .community-label {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.5rem;
+        }
+        
+        .community-cards {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+        
+        .card-placeholder {
+            width: 42px;
+            height: 58px;
+            background: var(--bg-elevated);
+            border: 2px dashed var(--border-default);
+            border-radius: 6px;
+        }
+        
+        /* Action Log */
+        .actions-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 1rem 1.5rem;
+        }
+        
+        .actions-title {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.75rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .stage-divider {
+            padding: 0.5rem 0.75rem;
+            background: var(--bg-elevated);
+            border-radius: 6px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: var(--accent-purple);
+            margin: 0.75rem 0;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        
+        .action-item {
+            display: grid;
+            grid-template-columns: 100px 1fr auto;
+            gap: 1rem;
+            padding: 0.75rem;
+            background: var(--bg-card);
+            border-radius: 8px;
+            margin-bottom: 0.5rem;
+            align-items: start;
+        }
+        
+        .action-player {
+            font-weight: 500;
+            font-size: 0.85rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        
+        .action-main {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+        
+        .action-type-row {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .action-type {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            padding: 0.25rem 0.6rem;
+            border-radius: 5px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        
+        .action-type.fold {
+            background: rgba(248, 113, 113, 0.15);
+            color: var(--accent-red);
+        }
+        
+        .action-type.check {
+            background: rgba(160, 160, 184, 0.15);
+            color: var(--text-secondary);
+        }
+        
+        .action-type.call {
+            background: rgba(91, 141, 239, 0.15);
+            color: var(--accent-blue);
+        }
+        
+        .action-type.bet, .action-type.raise {
+            background: rgba(74, 222, 128, 0.15);
+            color: var(--accent-green);
+        }
+        
+        .action-type.all_in {
+            background: rgba(251, 191, 36, 0.2);
+            color: var(--accent-yellow);
+        }
+        
+        .action-amount {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+        }
+        
+        /* Model Predictions */
+        .predictions {
+            background: var(--bg-deep);
+            border-radius: 6px;
+            padding: 0.75rem;
+        }
+        
+        .predictions-label {
+            font-size: 0.65rem;
+            color: var(--text-muted);
+            margin-bottom: 0.5rem;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+        }
+        
+        .predictions-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 0.75rem;
+        }
+        
+        .prediction-category {
+            background: var(--bg-card);
+            border-radius: 6px;
+            padding: 0.5rem;
+        }
+        
+        .prediction-category-label {
+            font-size: 0.6rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.4rem;
+            padding-bottom: 0.3rem;
+            border-bottom: 1px solid var(--border-subtle);
+        }
+        
+        .prediction-bars {
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+        }
+        
+        .prediction-row {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            font-size: 0.65rem;
+        }
+        
+        .prediction-action {
+            width: 55px;
+            color: var(--text-muted);
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 0.6rem;
+            white-space: nowrap;
+        }
+        
+        .prediction-bar-container {
+            flex: 1;
+            height: 10px;
+            background: var(--bg-elevated);
+            border-radius: 3px;
+            overflow: hidden;
+            min-width: 40px;
+        }
+        
+        .prediction-bar {
+            height: 100%;
+            background: var(--accent-blue);
+            border-radius: 3px;
+            transition: width 0.3s;
+        }
+        
+        .prediction-bar.chosen {
+            background: var(--accent-green);
+        }
+        
+        .prediction-bar.fold-bar {
+            background: var(--accent-red);
+        }
+        
+        .prediction-bar.check-bar {
+            background: var(--text-secondary);
+        }
+        
+        .prediction-bar.call-bar {
+            background: var(--accent-blue);
+        }
+        
+        .prediction-bar.bet-bar {
+            background: var(--accent-green);
+        }
+        
+        .prediction-bar.raise-bar {
+            background: var(--accent-yellow);
+        }
+        
+        .prediction-bar.allin-bar {
+            background: var(--accent-purple);
+        }
+        
+        .prediction-value {
+            width: 38px;
+            text-align: right;
+            font-family: 'IBM Plex Mono', monospace;
+            color: var(--text-secondary);
+            font-size: 0.6rem;
+        }
+        
+        .prediction-row.chosen .prediction-action {
+            color: var(--accent-green);
+            font-weight: 600;
+        }
+        
+        .prediction-row.zero-prob {
+            opacity: 0.4;
+        }
+        
+        .action-pot {
+            text-align: right;
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+        
+        .pot-label {
+            font-size: 0.6rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+        }
+        
+        .pot-value {
+            color: var(--accent-yellow);
+        }
+        
+        /* Result Section */
+        .result-section {
+            padding: 1rem 1.5rem;
+            background: var(--bg-primary);
+            border-top: 1px solid var(--border-subtle);
+        }
+        
+        .result-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 1rem;
+        }
+        
+        .result-item {
+            padding: 0.75rem;
+            background: var(--bg-card);
+            border-radius: 8px;
+            text-align: center;
+        }
+        
+        .result-item-label {
+            font-size: 0.65rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.25rem;
+        }
+        
+        .result-item-value {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 1rem;
+            font-weight: 600;
+        }
+        
+        .result-item-value.winner {
+            color: var(--accent-green);
+        }
+        
+        .result-item-value.profit {
+            color: var(--accent-green);
+        }
+        
+        .result-item-value.loss {
+            color: var(--accent-red);
+        }
+        
+        /* Loading state */
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 2rem;
+            color: var(--text-muted);
+        }
+        
+        .loading::after {
+            content: '';
+            width: 20px;
+            height: 20px;
+            margin-left: 0.75rem;
+            border: 2px solid var(--border-default);
+            border-top-color: var(--accent-blue);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        /* Scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        
+        ::-webkit-scrollbar-track {
+            background: var(--bg-primary);
+        }
+        
+        ::-webkit-scrollbar-thumb {
+            background: var(--border-default);
+            border-radius: 4px;
+        }
+        
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--border-subtle);
+        }
+    </style>
+</head>
+<body>
+    <div class="app-container">
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo">
+                    <div class="logo-icon">🃏</div>
+                    <h1>Hand Viewer</h1>
+                </div>
+            </div>
+            <div class="stats-bar">
+                <div class="stat-item">
+                    <span class="stat-label">Total Hands</span>
+                    <span class="stat-value" id="totalHands">—</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Logs Dir</span>
+                    <span class="stat-value" id="logsDir" style="font-size: 0.65rem; max-width: 150px; overflow: hidden; text-overflow: ellipsis;">—</span>
+                </div>
+            </div>
+            <div class="hand-list-container">
+                <div class="hand-list" id="handList">
+                    <div class="loading">Loading hands</div>
+                </div>
+            </div>
+        </aside>
+        
+        <main class="main-content" id="mainContent">
+            <div class="empty-state" id="emptyState">
+                <div class="empty-state-icon">🎴</div>
+                <h2>Select a hand to view</h2>
+                <p>Hand histories are logged during ELO evaluation. Select a hand from the list to see all actions, model predictions, and results.</p>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        let currentHand = null;
+        let handsList = [];
+        
+        // Card rendering helpers
+        const SUIT_SYMBOLS = {
+            'H': '♥', 'D': '♦', 'C': '♣', 'S': '♠',
+            'hearts': '♥', 'diamonds': '♦', 'clubs': '♣', 'spades': '♠'
+        };
+        
+        const SUIT_COLORS = {
+            'H': 'red', 'D': 'red', 'C': 'black', 'S': 'black',
+            'hearts': 'red', 'diamonds': 'red', 'clubs': 'black', 'spades': 'black'
+        };
+        
+        function parseCard(card) {
+            if (typeof card === 'string') {
+                // Format: "9H", "TH", "AS"
+                const rank = card[0] === 'T' ? '10' : card[0];
+                const suit = card[1];
+                return { rank, suit };
+            } else if (typeof card === 'object') {
+                // Format: {rank: "9", suit: "H"}
+                let rank = card.rank;
+                if (rank === 'T') rank = '10';
+                return { rank, suit: card.suit };
+            }
+            return { rank: '?', suit: '?' };
+        }
+        
+        function renderCard(card) {
+            const { rank, suit } = parseCard(card);
+            const symbol = SUIT_SYMBOLS[suit] || suit;
+            const color = SUIT_COLORS[suit] || 'black';
+            return `<div class="card ${color}">
+                <span class="rank">${rank}</span>
+                <span class="suit">${symbol}</span>
+            </div>`;
+        }
+        
+        function renderCardPlaceholder() {
+            return `<div class="card-placeholder"></div>`;
+        }
+        
+        // Format timestamp
+        function formatTime(timestamp) {
+            if (!timestamp) return '';
+            const date = new Date(timestamp);
+            return date.toLocaleString();
+        }
+        
+        function formatTimeShort(timestamp) {
+            if (!timestamp) return '';
+            const date = new Date(timestamp);
+            return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        }
+        
+        // Load hands list
+        async function loadHands() {
+            try {
+                const response = await fetch('/api/hands');
+                const data = await response.json();
+                handsList = data.hands;
+                
+                document.getElementById('totalHands').textContent = data.total || 0;
+                document.getElementById('logsDir').textContent = data.logs_dir || 'N/A';
+                document.getElementById('logsDir').title = data.logs_dir || '';
+                
+                renderHandsList();
+            } catch (e) {
+                console.error('Failed to load hands:', e);
+                document.getElementById('handList').innerHTML = `
+                    <div class="empty-state">
+                        <p>Failed to load hands. Make sure the server is running.</p>
+                    </div>
+                `;
+            }
+        }
+        
+        function renderHandsList() {
+            const container = document.getElementById('handList');
+            
+            if (handsList.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state" style="padding: 2rem;">
+                        <p style="font-size: 0.85rem; color: var(--text-muted);">
+                            No hands logged yet.<br><br>
+                            Run ELO evaluation to start logging hands.
+                        </p>
+                    </div>
+                `;
+                return;
+            }
+            
+            container.innerHTML = handsList.map(hand => `
+                <div class="hand-item" data-filename="${hand.filename}" onclick="selectHand('${hand.filename}')">
+                    <div class="hand-item-header">
+                        <span class="hand-id">${hand.hand_id.substring(0, 12)}...</span>
+                        <span class="hand-time">${formatTimeShort(hand.timestamp)}</span>
+                    </div>
+                    <div class="hand-players">
+                        <span>${hand.players[0] || 'Player 1'}</span>
+                        <span class="vs-badge">vs</span>
+                        <span>${hand.players[1] || 'Player 2'}</span>
+                    </div>
+                    <div class="hand-result">
+                        <span class="winner-badge">🏆 ${hand.winner}</span>
+                        <span class="pot-size">Pot: ${hand.total_pot}</span>
+                    </div>
+                </div>
+            `).join('');
+        }
+        
+        // Select and load a hand
+        async function selectHand(filename) {
+            // Update active state
+            document.querySelectorAll('.hand-item').forEach(el => {
+                el.classList.remove('active');
+                if (el.dataset.filename === filename) {
+                    el.classList.add('active');
+                }
+            });
+            
+            try {
+                const response = await fetch(`/api/hand/${filename}`);
+                currentHand = await response.json();
+                renderHandDetail();
+            } catch (e) {
+                console.error('Failed to load hand:', e);
+            }
+        }
+        
+        function renderPositionBadges(player) {
+            let badges = '';
+            if (player.is_dealer) {
+                badges += '<span class="position-badge dealer" title="Dealer">D</span>';
+            }
+            if (player.is_small_blind) {
+                badges += '<span class="position-badge sb" title="Small Blind">SB</span>';
+            }
+            if (player.is_big_blind) {
+                badges += '<span class="position-badge bb" title="Big Blind">BB</span>';
+            }
+            return badges;
+        }
+        
+        function renderHandDetail() {
+            const hand = currentHand;
+            if (!hand) return;
+            
+            const mainContent = document.getElementById('mainContent');
+            
+            // Get players
+            const player1 = hand.players?.[0] || {};
+            const player2 = hand.players?.[1] || {};
+            
+            // Community cards by stage
+            const communityCards = hand.community_cards || {};
+            const allCommunity = [
+                ...(communityCards.flop || []),
+                ...(communityCards.turn ? [communityCards.turn] : []),
+                ...(communityCards.river ? [communityCards.river] : [])
+            ];
+            
+            // Result
+            const result = hand.result || {};
+            
+            mainContent.innerHTML = `
+                <div class="hand-detail">
+                    <div class="detail-header">
+                        <div class="detail-header-row">
+                            <div>
+                                <div class="detail-title">Hand ${hand.hand_id?.substring(0, 16) || 'Unknown'}</div>
+                                <div class="detail-meta">${formatTime(hand.timestamp)}</div>
+                            </div>
+                        </div>
+                        
+                        <div class="player-cards-row">
+                            <div class="player-hand">
+                                <div class="player-hand-header">
+                                    <span class="player-name">
+                                        ${player1.name || player1.player_id || 'Player 1'}
+                                        ${renderPositionBadges(player1)}
+                                    </span>
+                                    <span class="player-stack">Stack: ${player1.starting_stack || '?'}</span>
+                                </div>
+                                <div class="cards-display">
+                                    ${(player1.hole_cards || []).map(c => renderCard(c)).join('') || renderCardPlaceholder() + renderCardPlaceholder()}
+                                </div>
+                            </div>
+                            <div class="player-hand">
+                                <div class="player-hand-header">
+                                    <span class="player-name">
+                                        ${player2.name || player2.player_id || 'Player 2'}
+                                        ${renderPositionBadges(player2)}
+                                    </span>
+                                    <span class="player-stack">Stack: ${player2.starting_stack || '?'}</span>
+                                </div>
+                                <div class="cards-display">
+                                    ${(player2.hole_cards || []).map(c => renderCard(c)).join('') || renderCardPlaceholder() + renderCardPlaceholder()}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="community-section">
+                        <div class="community-label">Community Cards</div>
+                        <div class="community-cards">
+                            ${allCommunity.length > 0 
+                                ? allCommunity.map(c => renderCard(c)).join('')
+                                : Array(5).fill(null).map(() => renderCardPlaceholder()).join('')
+                            }
+                        </div>
+                    </div>
+                    
+                    <div class="actions-container">
+                        <div class="actions-title">
+                            <span>Action Log</span>
+                            <span>${(hand.actions || []).length} actions</span>
+                        </div>
+                        ${renderActions(hand.actions || [])}
+                    </div>
+                    
+                    <div class="result-section">
+                        <div class="result-grid">
+                            <div class="result-item">
+                                <div class="result-item-label">Winner</div>
+                                <div class="result-item-value winner">${result.winner_name || 'N/A'}</div>
+                            </div>
+                            <div class="result-item">
+                                <div class="result-item-label">Final Pot</div>
+                                <div class="result-item-value">${result.final_pot || 0}</div>
+                            </div>
+                            <div class="result-item">
+                                <div class="result-item-label">${player1.name || 'P1'} Profit</div>
+                                <div class="result-item-value ${(result.profits?.[player1.player_id] || 0) >= 0 ? 'profit' : 'loss'}">
+                                    ${(result.profits?.[player1.player_id] || 0) >= 0 ? '+' : ''}${result.profits?.[player1.player_id] || 0}
+                                </div>
+                            </div>
+                            <div class="result-item">
+                                <div class="result-item-label">${player2.name || 'P2'} Profit</div>
+                                <div class="result-item-value ${(result.profits?.[player2.player_id] || 0) >= 0 ? 'profit' : 'loss'}">
+                                    ${(result.profits?.[player2.player_id] || 0) >= 0 ? '+' : ''}${result.profits?.[player2.player_id] || 0}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+        
+        function renderActions(actions) {
+            if (!actions || actions.length === 0) {
+                return '<div class="loading">No actions recorded</div>';
+            }
+            
+            let html = '';
+            let currentStage = null;
+            
+            actions.forEach((action, idx) => {
+                // Stage divider
+                if (action.stage && action.stage !== currentStage) {
+                    currentStage = action.stage;
+                    html += `<div class="stage-divider">${currentStage}</div>`;
+                }
+                
+                // Get player name
+                const playerName = action.player_name || action.player_id || 'Unknown';
+                
+                // Action type styling
+                let actionClass = action.action_type?.toLowerCase() || 'check';
+                if (actionClass.startsWith('bet_') || actionClass === 'bet') actionClass = 'bet';
+                if (actionClass.startsWith('raise_') || actionClass === 'raise') actionClass = 'raise';
+                
+                // Predictions rendering - show ALL actions by category
+                let predictionsHtml = '';
+                if (action.predictions && Object.keys(action.predictions).length > 0) {
+                    const chosenAction = action.action_label || action.action_type;
+                    
+                    // Define action categories
+                    const categories = {
+                        'Basic': ['fold', 'check', 'call'],
+                        'Bet Sizes': ['bet_10%', 'bet_25%', 'bet_33%', 'bet_50%', 'bet_75%', 'bet_100%', 'bet_150%', 'bet_200%', 'bet_300%'],
+                        'Raise Sizes': ['raise_10%', 'raise_25%', 'raise_33%', 'raise_50%', 'raise_75%', 'raise_100%', 'raise_150%', 'raise_200%', 'raise_300%', 'all_in']
+                    };
+                    
+                    // Get bar class based on action type
+                    const getBarClass = (act) => {
+                        if (act === 'fold') return 'fold-bar';
+                        if (act === 'check') return 'check-bar';
+                        if (act === 'call') return 'call-bar';
+                        if (act.startsWith('bet_')) return 'bet-bar';
+                        if (act.startsWith('raise_')) return 'raise-bar';
+                        if (act === 'all_in') return 'allin-bar';
+                        return '';
+                    };
+                    
+                    // Format action name for display
+                    const formatAction = (act) => {
+                        if (act === 'all_in') return 'ALL-IN';
+                        return act.replace('_', ' ').replace('%', '');
+                    };
+                    
+                    // Render each category
+                    const categoryHtml = Object.entries(categories).map(([catName, actions]) => {
+                        const actionRows = actions.map(act => {
+                            const prob = action.predictions[act] || 0;
+                            const isChosen = act === chosenAction || 
+                                (chosenAction && act.toLowerCase() === chosenAction.toLowerCase());
+                            const zeroClass = prob < 0.001 ? 'zero-prob' : '';
+                            const barClass = isChosen ? 'chosen' : getBarClass(act);
+                            
+                            return `
+                                <div class="prediction-row ${isChosen ? 'chosen' : ''} ${zeroClass}">
+                                    <span class="prediction-action">${formatAction(act)}</span>
+                                    <div class="prediction-bar-container">
+                                        <div class="prediction-bar ${barClass}" style="width: ${Math.max(prob * 100, prob > 0 ? 1 : 0)}%"></div>
+                                    </div>
+                                    <span class="prediction-value">${(prob * 100).toFixed(1)}%</span>
+                                </div>
+                            `;
+                        }).join('');
+                        
+                        return `
+                            <div class="prediction-category">
+                                <div class="prediction-category-label">${catName}</div>
+                                <div class="prediction-bars">
+                                    ${actionRows}
+                                </div>
+                            </div>
+                        `;
+                    }).join('');
+                    
+                    predictionsHtml = `
+                        <div class="predictions">
+                            <div class="predictions-label">Model Action Distribution</div>
+                            <div class="predictions-grid">
+                                ${categoryHtml}
+                            </div>
+                        </div>
+                    `;
+                }
+                
+                html += `
+                    <div class="action-item">
+                        <div class="action-player">${playerName}</div>
+                        <div class="action-main">
+                            <div class="action-type-row">
+                                <span class="action-type ${actionClass}">${action.action_type || '?'}</span>
+                                ${action.amount ? `<span class="action-amount">${action.amount}</span>` : ''}
+                            </div>
+                            ${predictionsHtml}
+                        </div>
+                        <div class="action-pot">
+                            <div class="pot-label">Pot</div>
+                            <div class="pot-value">${typeof action.pot_after === 'number' ? action.pot_after : (typeof action.pot === 'number' ? action.pot : '—')}</div>
+                        </div>
+                    </div>
+                `;
+            });
+            
+            return html;
+        }
+        
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            loadHands();
+            
+            // Refresh every 30 seconds
+            setInterval(loadHands, 30000);
+        });
+    </script>
+</body>
+</html>
+
