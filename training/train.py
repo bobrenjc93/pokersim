@@ -2362,9 +2362,71 @@ class RLTrainingSession:
         # Cleanup old checkpoints - keep only last 50 iteration checkpoints
         self._cleanup_old_checkpoints(max_checkpoints=50)
     
+    def _select_checkpoints_to_keep(
+        self, 
+        iter_checkpoints: list, 
+        max_checkpoints: int
+    ) -> set:
+        """
+        Select which checkpoints to keep with good coverage across all iterations.
+        
+        Uses a combination of:
+        1. Always keep first checkpoint (earliest training baseline)
+        2. Keep recent checkpoints densely (last ~40% of slots)
+        3. Exponentially spaced checkpoints for earlier training
+        
+        This ensures we have checkpoints from throughout training history,
+        with more density on recent iterations.
+        
+        Args:
+            iter_checkpoints: List of (iter_num, path) sorted by iter_num
+            max_checkpoints: Maximum number to keep
+            
+        Returns:
+            Set of checkpoint paths to keep
+        """
+        n = len(iter_checkpoints)
+        if n <= max_checkpoints:
+            return set(cp[1] for cp in iter_checkpoints)
+        
+        keep_indices = set()
+        
+        # Always keep first checkpoint (baseline of training)
+        keep_indices.add(0)
+        
+        # Always keep the very last checkpoint
+        keep_indices.add(n - 1)
+        
+        # Allocate ~40% of slots to most recent checkpoints (dense recent coverage)
+        recent_slots = max(10, max_checkpoints * 2 // 5)
+        recent_start = max(0, n - recent_slots)
+        for i in range(recent_start, n):
+            keep_indices.add(i)
+        
+        # Fill remaining slots with spread-out checkpoints from earlier training
+        remaining_slots = max_checkpoints - len(keep_indices)
+        if remaining_slots > 0 and recent_start > 1:
+            # Range we need to cover with exponential spacing: indices 1 to (recent_start - 1)
+            # Use power-law spacing: denser toward recent, sparser at start
+            for slot in range(remaining_slots):
+                # t goes from 0 to 1 as slot increases
+                t = (slot + 1) / (remaining_slots + 1)
+                # Power < 1 biases toward higher indices (closer to recent)
+                # Power = 0.5 gives sqrt spacing, 0.7 is slightly more uniform
+                idx = int(1 + t ** 0.6 * (recent_start - 2))
+                idx = max(1, min(idx, recent_start - 1))
+                keep_indices.add(idx)
+        
+        # Convert indices to paths
+        return set(iter_checkpoints[i][1] for i in keep_indices)
+    
     def _cleanup_old_checkpoints(self, max_checkpoints: int = 50):
         """
-        Remove old iteration checkpoints, keeping only the most recent ones.
+        Remove old iteration checkpoints, keeping spread-out coverage across training.
+        
+        Instead of keeping just the last N checkpoints, this uses exponential spacing
+        to preserve checkpoints from throughout training history. This allows comparing
+        model performance from early, middle, and late training stages.
         
         Preserves special checkpoints: latest, final, baseline.
         Only removes iteration checkpoints (poker_rl_iter_*.pt).
@@ -2389,11 +2451,16 @@ class RLTrainingSession:
         # Sort by iteration number (ascending)
         iter_checkpoints.sort(key=lambda x: x[0])
         
-        # If we have more than max_checkpoints, remove the oldest
-        if len(iter_checkpoints) > max_checkpoints:
-            checkpoints_to_remove = iter_checkpoints[:-max_checkpoints]
-            
-            for iter_num, checkpoint_file in checkpoints_to_remove:
+        # If we have fewer than max_checkpoints, nothing to do
+        if len(iter_checkpoints) <= max_checkpoints:
+            return
+        
+        # Select checkpoints to KEEP using spread-out spacing
+        keep_set = self._select_checkpoints_to_keep(iter_checkpoints, max_checkpoints)
+        
+        # Remove checkpoints not in keep_set
+        for iter_num, checkpoint_file in iter_checkpoints:
+            if checkpoint_file not in keep_set:
                 try:
                     # Remove from opponent pool if present
                     if checkpoint_file in self.opponent_pool:
