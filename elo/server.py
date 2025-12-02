@@ -21,11 +21,11 @@ if str(TRAINING_DIR) not in sys.path:
     sys.path.append(str(TRAINING_DIR))
 
 try:
-    from engine import PokerEloArena, EloCalculator, parse_checkpoints
+    from engine import PokerEloArena, EloCalculator, parse_checkpoints, select_spread_checkpoints
     from config import DEFAULT_MODELS_DIR
 except ImportError as e:
     try:
-        from elo.engine import PokerEloArena, EloCalculator, parse_checkpoints
+        from elo.engine import PokerEloArena, EloCalculator, parse_checkpoints, select_spread_checkpoints
         from elo.config import DEFAULT_MODELS_DIR
     except ImportError:
         print(f"Error importing modules: {e}")
@@ -153,13 +153,12 @@ class EloJobManager:
             
             sorted_cps = sorted(checkpoints, key=lambda x: x[0])
             
-            # Select 5 evenly spaced checkpoints
+            # Select checkpoints with spread-out coverage across training history
             num_to_select = 5
             if len(sorted_cps) > num_to_select:
-                # Calculate evenly spaced indices
-                indices = [int(i * (len(sorted_cps) - 1) / (num_to_select - 1)) for i in range(num_to_select)]
-                sorted_cps = [sorted_cps[i] for i in indices]
-                print(f"Selected {len(sorted_cps)} evenly spaced checkpoints from {len(checkpoints)} total")
+                sorted_cps = select_spread_checkpoints(sorted_cps, num_to_select)
+                iter_nums = [cp[0] for cp in sorted_cps]
+                print(f"Selected {len(sorted_cps)} spread-out checkpoints: {iter_nums}")
             else:
                 print(f"Using all {len(sorted_cps)} checkpoints as participants")
             

@@ -575,6 +575,14 @@ class PokerEloArena:
             if original_action_type in ['raise', 'bet']:
                 raises_this_round += 1
             
+            # Calculate the pot from chip differences (API's pot field is unreliable)
+            # Pot = total chips bet = effective_stack * num_players - sum(current_chips)
+            def calc_pot_from_chips(gs, eff_stack):
+                total_chips_remaining = sum(p.get('chips', eff_stack) for p in gs.get('players', []))
+                return (eff_stack * 2) - total_chips_remaining
+            
+            pot_before_action = calc_pot_from_chips(game_state, effective_stack)
+            
             # Store action info for logging after API call
             pending_action_log = None
             if self.hand_logger.current_hand:
@@ -585,7 +593,8 @@ class PokerEloArena:
                     'action_label': action_label or action_type,
                     'amount': amount,
                     'stage': stage,
-                    'predictions': predictions
+                    'predictions': predictions,
+                    'pot_before': pot_before_action
                 }
             
             history.append({
@@ -601,9 +610,18 @@ class PokerEloArena:
                 return 0, 0, True
             game_state = response['gameState']
             
-            # Log action with actual pot value from the updated game state
+            # Log action with pot value
+            # Calculate pot after action from chip differences
             if pending_action_log:
-                pot_after = game_state.get('pot', 0)
+                new_stage = game_state.get('stage', '').lower()
+                
+                # If the hand ended (chips distributed), use pot_before as it represents the pot won
+                if new_stage in ['complete', 'showdown']:
+                    pot_after = pending_action_log['pot_before']
+                else:
+                    # Calculate pot from chip differences after the action
+                    pot_after = calc_pot_from_chips(game_state, effective_stack)
+                
                 self.hand_logger.log_action(
                     player_id=pending_action_log['player_id'],
                     player_name=pending_action_log['player_name'],
@@ -911,4 +929,63 @@ def parse_checkpoints(directory: Path) -> List[Tuple[int, Path]]:
             checkpoints.append((iteration, f))
             
     return sorted(checkpoints, key=lambda x: x[0])
+
+
+def select_spread_checkpoints(
+    checkpoints: List[Tuple[int, Path]], 
+    max_checkpoints: int
+) -> List[Tuple[int, Path]]:
+    """
+    Select checkpoints with good coverage across all iterations.
+    
+    Uses exponential spacing to keep more recent checkpoints while still 
+    preserving checkpoints from earlier in training for historical comparison.
+    
+    Strategy:
+    - Always keep first checkpoint (baseline/-1 or earliest iteration)
+    - Always keep last checkpoint (most recent)
+    - Keep more checkpoints from recent training (~40% of slots)
+    - Use power-law spacing for earlier checkpoints
+    
+    Args:
+        checkpoints: List of (iteration_number, path) tuples, sorted by iteration
+        max_checkpoints: Maximum number of checkpoints to select
+        
+    Returns:
+        List of (iteration_number, path) tuples with spread-out coverage
+    """
+    n = len(checkpoints)
+    if n <= max_checkpoints:
+        return checkpoints
+    
+    keep_indices = set()
+    
+    # Always keep first checkpoint (baseline or earliest)
+    keep_indices.add(0)
+    
+    # Always keep the very last checkpoint
+    keep_indices.add(n - 1)
+    
+    # Allocate ~40% of slots to most recent checkpoints (dense recent coverage)
+    recent_slots = max(2, max_checkpoints * 2 // 5)
+    recent_start = max(0, n - recent_slots)
+    for i in range(recent_start, n):
+        keep_indices.add(i)
+    
+    # Fill remaining slots with spread-out checkpoints from earlier training
+    remaining_slots = max_checkpoints - len(keep_indices)
+    if remaining_slots > 0 and recent_start > 1:
+        # Range we need to cover: indices 1 to (recent_start - 1)
+        # Use power-law spacing: denser toward recent, sparser at start
+        for slot in range(remaining_slots):
+            # t goes from 0 to 1 as slot increases
+            t = (slot + 1) / (remaining_slots + 1)
+            # Power < 1 biases toward higher indices (closer to recent)
+            idx = int(1 + t ** 0.6 * (recent_start - 2))
+            idx = max(1, min(idx, recent_start - 1))
+            keep_indices.add(idx)
+    
+    # Sort and return selected checkpoints
+    sorted_indices = sorted(keep_indices)[:max_checkpoints]
+    return [checkpoints[i] for i in sorted_indices]
 
