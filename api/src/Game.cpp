@@ -570,7 +570,31 @@ bool Game::advanceGame() {
     pot.startNewRound();
     
     // Perform stage transition using shared logic
-    return performStageTransition();
+    if (!performStageTransition()) {
+        return false;
+    }
+    
+    // If we didn't reach showdown/complete, reset player state for new betting round
+    // This ensures consistency with advanceStage() behavior
+    if (stage != Stage::SHOWDOWN && stage != Stage::COMPLETE) {
+        // Reset to first player after dealer for new betting round
+        currentPlayerIndex = (dealerPosition + 1) % players.size();
+        while (!players[currentPlayerIndex]->canAct() && 
+               currentPlayerIndex != dealerPosition) {
+            currentPlayerIndex = (currentPlayerIndex + 1) % players.size();
+        }
+        
+        lastRaiserIndex = -1;
+        
+        // Reset lastAction for all active players for the new betting round
+        for (auto& player : players) {
+            if (player->isInHand() && player->canAct()) {
+                player->resetLastAction();
+            }
+        }
+    }
+    
+    return true;
 }
 
 json Game::getActionConstraints() const {
@@ -594,21 +618,35 @@ json Game::getActionConstraints() const {
     
     // Calculate key amounts
     int toCall = currentBet - playerBet;
+    
+    // Sanity check: toCall should never be negative
+    if (toCall < 0) {
+        toCall = 0;
+    }
+    
     int minRaiseTotal = toCall + minRaise; // Total amount needed to raise (call + min raise)
     
     // Determine legal actions
     json legalActions = json::array();
     
-    // Check or call
+    // Key insight: Fold is ONLY valid when there's an active bet to respond to.
+    // When no bet is facing us (toCall == 0), we can check for free - folding
+    // would be strictly dominated by checking and makes no strategic sense.
+    // 
+    // First to act on a new betting round (flop/turn/river) should NEVER have fold
+    // as an option since currentBet == 0 and playerBet == 0, so toCall == 0.
+    
     if (toCall == 0) {
-        // Can check for free - no need to offer fold (folding is strictly dominated by checking)
+        // No bet facing us - can check for free
+        // Fold is NOT offered since it's strictly dominated by checking
         legalActions.push_back("check");
+        
         // Can bet ONLY if no current bet exists in the round AND have enough for min bet
         if (playerChips >= config.bigBlind && currentBet == 0) {
             legalActions.push_back("bet");
         }
     } else {
-        // There's a bet to call - fold is a valid option here
+        // There's a bet to call (toCall > 0) - fold is a valid strategic option
         legalActions.push_back("fold");
         
         if (playerChips >= toCall) {

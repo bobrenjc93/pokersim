@@ -35,43 +35,43 @@ void Pot::collectBets(std::vector<Player*>& players) {
         }
     }
     
-    if (playerBets.empty()) {
-        return;
+    // Only create pots if there are actual bets to collect
+    if (!playerBets.empty()) {
+        // Sort by bet amount
+        std::sort(playerBets.begin(), playerBets.end(), 
+                  [](const auto& a, const auto& b) { return a.second < b.second; });
+        
+        int previousBetLevel = 0;
+        
+        // Create pots for each bet level
+        for (size_t i = 0; i < playerBets.size(); ) {
+            int currentBetLevel = playerBets[i].second;
+            int potAmount = 0;
+            
+            SidePot pot(0);
+            pot.eligiblePlayerIds.reserve(playerBets.size() - i);  // Reserve space for eligible players
+            
+            // Collect from all players still in
+            for (size_t j = i; j < playerBets.size(); j++) {
+                int contribution = std::min(currentBetLevel - previousBetLevel, 
+                                           playerBets[j].second - previousBetLevel);
+                potAmount += contribution;
+                pot.eligiblePlayerIds.push_back(playerBets[j].first);
+            }
+            
+            pot.amount = potAmount;
+            pots.push_back(std::move(pot));  // Move instead of copy
+            
+            // Move to next bet level
+            previousBetLevel = currentBetLevel;
+            while (i < playerBets.size() && playerBets[i].second == currentBetLevel) {
+                i++;
+            }
+        }
     }
     
-    // Sort by bet amount
-    std::sort(playerBets.begin(), playerBets.end(), 
-              [](const auto& a, const auto& b) { return a.second < b.second; });
-    
-    int previousBetLevel = 0;
-    
-    // Create pots for each bet level
-    for (size_t i = 0; i < playerBets.size(); ) {
-        int currentBetLevel = playerBets[i].second;
-        int potAmount = 0;
-        
-        SidePot pot(0);
-        pot.eligiblePlayerIds.reserve(playerBets.size() - i);  // Reserve space for eligible players
-        
-        // Collect from all players still in
-        for (size_t j = i; j < playerBets.size(); j++) {
-            int contribution = std::min(currentBetLevel - previousBetLevel, 
-                                       playerBets[j].second - previousBetLevel);
-            potAmount += contribution;
-            pot.eligiblePlayerIds.push_back(playerBets[j].first);
-        }
-        
-        pot.amount = potAmount;
-        pots.push_back(std::move(pot));  // Move instead of copy
-        
-        // Move to next bet level
-        previousBetLevel = currentBetLevel;
-        while (i < playerBets.size() && playerBets[i].second == currentBetLevel) {
-            i++;
-        }
-    }
-    
-    // Reset player bets
+    // ALWAYS reset player bets and current bet, even if no bets were collected.
+    // This ensures a clean state for the next betting round.
     for (auto* player : players) {
         player->resetBet();
     }
