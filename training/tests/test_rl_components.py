@@ -48,11 +48,11 @@ def test_poker_actor_critic():
     # Forward
     action_logits, value = model(x)
     
-    assert action_logits.shape == (batch_size, 22)  # 22 actions
+    assert action_logits.shape == (batch_size, 13)  # 13 actions (unified action space)
     assert value.shape == (batch_size, 1)
     
     # Probabilities
     probs, val = model.get_action_probs(x)
-    assert probs.shape == (batch_size, 22)
+    assert probs.shape == (batch_size, 13)
     assert torch.allclose(probs.sum(dim=1), torch.ones(batch_size))
 

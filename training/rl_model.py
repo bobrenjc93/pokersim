@@ -35,7 +35,7 @@ class PokerActorCritic(nn.Module):
         hidden_dim: int = 256,
         num_heads: int = 8,
         num_layers: int = 4,
-        num_actions: int = 22,  # fold, check, call, bet/raise sizes, all-in
+        num_actions: int = 13,  # fold, check, call, 9 raise sizes, all-in (unified action space)
         dropout: float = 0.1,
         gradient_checkpointing: bool = False
     ):
@@ -115,7 +115,7 @@ class PokerActorCritic(nn.Module):
         )
         
         # Action space prior adjustment to balance probability mass
-        # fold(1), check(1), call(1), bet(9), raise(9), all_in(1)
+        # Unified action space: fold(1), check(1), call(1), raise_X%(9), all_in(1)
         # Single-slot actions need boost relative to multi-slot actions
         action_prior = torch.zeros(num_actions)
         
@@ -136,7 +136,8 @@ class PokerActorCritic(nn.Module):
         
         # VERY STRONG NEGATIVE prior for all_in to discourage overuse
         # A value of -3.5 makes all-in roughly 33x less likely than without the prior
-        all_in_idx = 21
+        # With unified action space, all_in is now at index 12
+        all_in_idx = 12
         if all_in_idx < num_actions:
             action_prior[all_in_idx] = -3.5  # Very strong penalty
         
@@ -331,7 +332,7 @@ class PokerActorCritic(nn.Module):
         # Create penalty tensor - mostly zeros, but penalize all-in when hand is weak
         # Penalty reduced from -5.0 to -3.0 to allow some bluffing/semi-bluffs
         all_in_penalty = torch.zeros_like(action_logits)
-        all_in_penalty[:, 21] = -3.0 * weak_hand_mask.squeeze()  # All-in index is 21
+        all_in_penalty[:, 12] = -3.0 * weak_hand_mask.squeeze()  # All-in index is 12 in unified action space
         
         # Also penalize large raises (indices 17-20: raise_100%, raise_150%, raise_200%, raise_300%)
         # Penalty reduced from -2.0 to -1.0
@@ -385,7 +386,7 @@ class PokerActorCritic(nn.Module):
         
         weak_hand_mask = (hand_strength < self.hand_strength_threshold).float()
         all_in_penalty = torch.zeros_like(action_logits)
-        all_in_penalty[:, 21] = -3.0 * weak_hand_mask.squeeze()
+        all_in_penalty[:, 12] = -3.0 * weak_hand_mask.squeeze()  # All-in index is 12
         for raise_idx in [17, 18, 19, 20]:
             if raise_idx < action_logits.size(1):
                 all_in_penalty[:, raise_idx] = -1.0 * weak_hand_mask.squeeze()

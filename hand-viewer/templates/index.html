@@ -1026,64 +1026,96 @@
                 if (actionClass.startsWith('bet_') || actionClass === 'bet') actionClass = 'bet';
                 if (actionClass.startsWith('raise_') || actionClass === 'raise') actionClass = 'raise';
                 
-                // Predictions rendering - show ALL actions by category
+                // Predictions rendering - unified action space (13 actions)
+                // fold, check, call, raise_10%, raise_25%, raise_33%, raise_50%, raise_75%, 
+                // raise_100%, raise_150%, raise_200%, raise_300%, all_in
                 let predictionsHtml = '';
                 if (action.predictions && Object.keys(action.predictions).length > 0) {
                     const chosenAction = action.action_label || action.action_type;
                     
                     // Define action categories
-                    const categories = {
-                        'Basic': ['fold', 'check', 'call'],
-                        'Bet Sizes': ['bet_10%', 'bet_25%', 'bet_33%', 'bet_50%', 'bet_75%', 'bet_100%', 'bet_150%', 'bet_200%', 'bet_300%'],
-                        'Raise Sizes': ['raise_10%', 'raise_25%', 'raise_33%', 'raise_50%', 'raise_75%', 'raise_100%', 'raise_150%', 'raise_200%', 'raise_300%', 'all_in']
-                    };
+                    const basicActions = ['fold', 'check', 'call'];
+                    // Unified raise sizes (model outputs raise_X% which becomes bet or raise based on context)
+                    const raiseSizes = ['10%', '25%', '33%', '50%', '75%', '100%', '150%', '200%', '300%'];
                     
                     // Get bar class based on action type
                     const getBarClass = (act) => {
                         if (act === 'fold') return 'fold-bar';
                         if (act === 'check') return 'check-bar';
                         if (act === 'call') return 'call-bar';
-                        if (act.startsWith('bet_')) return 'bet-bar';
                         if (act.startsWith('raise_')) return 'raise-bar';
                         if (act === 'all_in') return 'allin-bar';
                         return '';
                     };
                     
-                    // Format action name for display
-                    const formatAction = (act) => {
-                        if (act === 'all_in') return 'ALL-IN';
-                        return act.replace('_', ' ').replace('%', '');
-                    };
-                    
-                    // Render each category
-                    const categoryHtml = Object.entries(categories).map(([catName, actions]) => {
-                        const actionRows = actions.map(act => {
-                            const prob = action.predictions[act] || 0;
-                            const isChosen = act === chosenAction || 
-                                (chosenAction && act.toLowerCase() === chosenAction.toLowerCase());
-                            const zeroClass = prob < 0.001 ? 'zero-prob' : '';
-                            const barClass = isChosen ? 'chosen' : getBarClass(act);
-                            
-                            return `
-                                <div class="prediction-row ${isChosen ? 'chosen' : ''} ${zeroClass}">
-                                    <span class="prediction-action">${formatAction(act)}</span>
-                                    <div class="prediction-bar-container">
-                                        <div class="prediction-bar ${barClass}" style="width: ${Math.max(prob * 100, prob > 0 ? 1 : 0)}%"></div>
-                                    </div>
-                                    <span class="prediction-value">${(prob * 100).toFixed(1)}%</span>
-                                </div>
-                            `;
-                        }).join('');
+                    // Render basic actions category
+                    const basicRows = basicActions.map(act => {
+                        const prob = action.predictions[act] || 0;
+                        const isChosen = act === chosenAction || 
+                            (chosenAction && act.toLowerCase() === chosenAction.toLowerCase());
+                        const zeroClass = prob < 0.001 ? 'zero-prob' : '';
+                        const barClass = isChosen ? 'chosen' : getBarClass(act);
                         
                         return `
-                            <div class="prediction-category">
-                                <div class="prediction-category-label">${catName}</div>
-                                <div class="prediction-bars">
-                                    ${actionRows}
+                            <div class="prediction-row ${isChosen ? 'chosen' : ''} ${zeroClass}">
+                                <span class="prediction-action">${act.toUpperCase()}</span>
+                                <div class="prediction-bar-container">
+                                    <div class="prediction-bar ${barClass}" style="width: ${Math.max(prob * 100, prob > 0 ? 1 : 0)}%"></div>
                                 </div>
+                                <span class="prediction-value">${(prob * 100).toFixed(1)}%</span>
                             </div>
                         `;
                     }).join('');
+                    
+                    // Render raise category - unified raise_X% actions
+                    const raiseRows = raiseSizes.map(size => {
+                        const raiseKey = `raise_${size}`;
+                        const prob = action.predictions[raiseKey] || 0;
+                        
+                        const isChosen = raiseKey === chosenAction ||
+                            (chosenAction && chosenAction.toLowerCase() === raiseKey.toLowerCase());
+                        const zeroClass = prob < 0.001 ? 'zero-prob' : '';
+                        const barClass = isChosen ? 'chosen' : 'raise-bar';
+                        
+                        return `
+                            <div class="prediction-row ${isChosen ? 'chosen' : ''} ${zeroClass}">
+                                <span class="prediction-action">${size.replace('%', '')}</span>
+                                <div class="prediction-bar-container">
+                                    <div class="prediction-bar ${barClass}" style="width: ${Math.max(prob * 100, prob > 0 ? 1 : 0)}%"></div>
+                                </div>
+                                <span class="prediction-value">${(prob * 100).toFixed(1)}%</span>
+                            </div>
+                        `;
+                    }).join('');
+                    
+                    // All-in row
+                    const allInProb = action.predictions['all_in'] || 0;
+                    const isAllInChosen = chosenAction === 'all_in';
+                    const allInRow = `
+                        <div class="prediction-row ${isAllInChosen ? 'chosen' : ''} ${allInProb < 0.001 ? 'zero-prob' : ''}">
+                            <span class="prediction-action">ALL-IN</span>
+                            <div class="prediction-bar-container">
+                                <div class="prediction-bar ${isAllInChosen ? 'chosen' : 'allin-bar'}" style="width: ${Math.max(allInProb * 100, allInProb > 0 ? 1 : 0)}%"></div>
+                            </div>
+                            <span class="prediction-value">${(allInProb * 100).toFixed(1)}%</span>
+                        </div>
+                    `;
+                    
+                    const categoryHtml = `
+                        <div class="prediction-category">
+                            <div class="prediction-category-label">Basic</div>
+                            <div class="prediction-bars">
+                                ${basicRows}
+                            </div>
+                        </div>
+                        <div class="prediction-category" style="grid-column: span 2;">
+                            <div class="prediction-category-label">Raise (% of pot)</div>
+                            <div class="prediction-bars" style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.25rem 1rem;">
+                                ${raiseRows}
+                                ${allInRow}
+                            </div>
+                        </div>
+                    `;
                     
                     predictionsHtml = `
                         <div class="predictions">

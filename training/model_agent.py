@@ -19,30 +19,31 @@ from rl_state_encoder import RLStateEncoder
 from rl_model import PokerActorCritic
 
 
-# Action mapping (same as train.py)
+# Unified action space - bet and raise consolidated into "raise" (contextually becomes bet or raise)
+# 13 total actions: fold, check, call, 9 raise sizes, all_in
 ACTION_MAP = {
     'fold': 0, 'check': 1, 'call': 2,
-    'bet_10%': 3, 'bet_25%': 4, 'bet_33%': 5, 'bet_50%': 6, 'bet_75%': 7,
-    'bet_100%': 8, 'bet_150%': 9, 'bet_200%': 10, 'bet_300%': 11,
-    'raise_10%': 12, 'raise_25%': 13, 'raise_33%': 14, 'raise_50%': 15, 'raise_75%': 16,
-    'raise_100%': 17, 'raise_150%': 18, 'raise_200%': 19, 'raise_300%': 20,
-    'all_in': 21
+    'raise_10%': 3, 'raise_25%': 4, 'raise_33%': 5, 'raise_50%': 6, 'raise_75%': 7,
+    'raise_100%': 8, 'raise_150%': 9, 'raise_200%': 10, 'raise_300%': 11,
+    'all_in': 12
 }
 
 ACTION_NAMES = [
     'fold', 'check', 'call',
-    'bet_10%', 'bet_25%', 'bet_33%', 'bet_50%', 'bet_75%', 'bet_100%', 'bet_150%', 'bet_200%', 'bet_300%',
     'raise_10%', 'raise_25%', 'raise_33%', 'raise_50%', 'raise_75%', 'raise_100%', 'raise_150%', 'raise_200%', 'raise_300%',
     'all_in'
 ]
 
-# Bet size percentages
-BET_SIZE_MAP = {
-    'bet_10%': 0.10, 'bet_25%': 0.25, 'bet_33%': 0.33, 'bet_50%': 0.50, 'bet_75%': 0.75,
-    'bet_100%': 1.0, 'bet_150%': 1.5, 'bet_200%': 2.0, 'bet_300%': 3.0,
+NUM_ACTIONS = len(ACTION_NAMES)  # 13
+
+# Raise size percentages (of pot)
+RAISE_SIZE_MAP = {
     'raise_10%': 0.10, 'raise_25%': 0.25, 'raise_33%': 0.33, 'raise_50%': 0.50, 'raise_75%': 0.75,
     'raise_100%': 1.0, 'raise_150%': 1.5, 'raise_200%': 2.0, 'raise_300%': 3.0,
 }
+
+# Backwards compatibility alias
+BET_SIZE_MAP = RAISE_SIZE_MAP
 
 
 def convert_action_label(
@@ -52,8 +53,11 @@ def convert_action_label(
     """
     Convert action label to (action_type, amount).
     
+    Unified raise_X% actions are converted to either 'bet' or 'raise' based on
+    game context (whether there's already a bet to face).
+    
     Args:
-        action_label: Action label (e.g., 'bet_50%', 'call')
+        action_label: Action label (e.g., 'raise_50%', 'call')
         state: Game state
     
     Returns:
@@ -65,52 +69,53 @@ def convert_action_label(
     if action_label in ['fold', 'check', 'call', 'all_in', 'bet', 'raise']:
         return action_label, 0
     
-    # Bet actions
-    if action_label.startswith('bet_'):
-        pot = state.get('pot', 0)
-        min_bet = state.get('min_bet', state.get('big_blind', 20))
-        
-        # Get bet size fraction
-        size_fraction = BET_SIZE_MAP.get(action_label, 0.5)
-        
-        # Calculate amount based on pot size
-        target_amount = int(pot * size_fraction) if pot > 0 else min_bet
-        amount = max(min_bet, target_amount)
-        
-        # If bet would use all or most of our chips, go all-in instead
-        if amount >= player_chips:
-            return 'all_in', 0
-        
-        return 'bet', amount
-    
-    # Raise actions
+    # Unified raise actions - convert to bet or raise based on game context
     if action_label.startswith('raise_'):
         pot = state.get('pot', 0)
         player_bet = state.get('player_bet', 0)
         current_bet = state.get('current_bet', 0)
         to_call = max(0, current_bet - player_bet)
+        min_bet = state.get('min_bet', state.get('big_blind', 20))
         min_raise = state.get('min_raise_total', state.get('big_blind', 20))
         
-        # Get raise size fraction
-        size_fraction = BET_SIZE_MAP.get(action_label, 0.5)
-        raise_size = int(pot * size_fraction) if pot > 0 else min_raise
+        # Get size fraction
+        size_fraction = RAISE_SIZE_MAP.get(action_label, 0.5)
+        sizing_amount = int(pot * size_fraction) if pot > 0 else min_bet
         
-        # The amount is the additional chips to add (call + raise increment)
-        amount = to_call + raise_size
-        
-        # Ensure we meet minimum raise requirement
-        if amount < min_raise:
-            amount = min_raise
-        
-        # If raise would use all or most of our chips, go all-in
-        if amount >= player_chips:
-            return 'all_in', 0
-        
-        # If we can't afford the minimum raise, go all-in instead
-        if player_chips < min_raise:
-            return 'all_in', 0
-        
-        return 'raise', amount
+        # Determine if this should be a bet or raise based on whether there's a bet to face
+        if to_call == 0:
+            # No bet to face - this is a BET
+            amount = max(min_bet, sizing_amount)
+            
+            # If bet would use all chips, go all-in
+            if amount >= player_chips:
+                return 'all_in', 0
+            
+            return 'bet', amount
+        else:
+            # There's a bet to face - this is a RAISE
+            # Amount is call + raise increment
+            amount = to_call + sizing_amount
+            
+            # Ensure we meet minimum raise requirement
+            if amount < min_raise:
+                amount = min_raise
+            
+            # If raise would use all chips, go all-in
+            if amount >= player_chips:
+                return 'all_in', 0
+            
+            # If we can't afford the minimum raise, go all-in instead
+            if player_chips < min_raise:
+                return 'all_in', 0
+            
+            return 'raise', amount
+    
+    # Legacy support for bet_X% actions (convert to raise_X% logic)
+    if action_label.startswith('bet_'):
+        # Convert bet_X% to equivalent raise_X%
+        raise_label = action_label.replace('bet_', 'raise_')
+        return convert_action_label(raise_label, state)
     
     # Fallback
     return 'check', 0
@@ -120,26 +125,25 @@ def create_legal_actions_mask(legal_actions: List[str], device: torch.device) ->
     """
     Create a boolean mask for legal actions.
     
+    With the unified action space, 'bet' and 'raise' both enable the same raise_X% actions.
+    The convert_action_label function handles converting to the correct game action.
+    
     Args:
         legal_actions: List of legal action strings (e.g., ['fold', 'call', 'raise'])
         device: Torch device
     
     Returns:
-        Boolean tensor of shape (1, num_actions)
+        Boolean tensor of shape (1, NUM_ACTIONS)
     """
-    mask = torch.zeros(1, len(ACTION_NAMES), dtype=torch.bool, device=device)
+    mask = torch.zeros(1, NUM_ACTIONS, dtype=torch.bool, device=device)
     
     for action in legal_actions:
         if action in ACTION_MAP:
             # Simple action (fold, check, call, all_in)
             mask[0, ACTION_MAP[action]] = True
-        elif action == 'bet':
-            # Enable all bet sizes
-            for action_name in ACTION_NAMES:
-                if action_name.startswith('bet_'):
-                    mask[0, ACTION_MAP[action_name]] = True
-        elif action == 'raise':
-            # Enable all raise sizes
+        elif action in ('bet', 'raise'):
+            # Enable all raise_X% sizing actions
+            # (they become bet or raise based on game context in convert_action_label)
             for action_name in ACTION_NAMES:
                 if action_name.startswith('raise_'):
                     mask[0, ACTION_MAP[action_name]] = True
@@ -576,7 +580,7 @@ class HeuristicAgent:
             if can_raise:
                 action_label = 'raise_100%'
             elif can_bet:
-                action_label = 'bet_75%'
+                action_label = 'raise_75%'
             elif can_call:
                 action_label = 'call'
             else:
@@ -585,7 +589,7 @@ class HeuristicAgent:
         # Strong hand -> Bet small / Call
         elif strength > 0.6:
             if can_bet:
-                action_label = 'bet_50%'
+                action_label = 'raise_50%'
             elif can_call:
                 action_label = 'call'
             else:
@@ -604,7 +608,7 @@ class HeuristicAgent:
         # Weak hand -> Check/Fold (bluff occasionally)
         else:
             if random.random() < 0.1 and can_bet: # Bluff 10%
-                action_label = 'bet_50%'
+                action_label = 'raise_50%'
             elif can_check:
                 action_label = 'check'
             else:
@@ -734,7 +738,7 @@ class TightAgent:
                 if can_raise:
                     action_label = 'raise_75%'
                 elif can_bet:
-                    action_label = 'bet_75%'
+                    action_label = 'raise_75%'
                 elif can_call:
                     action_label = 'call'
                 else:
@@ -768,7 +772,7 @@ class TightAgent:
             # Strong made hand - bet for value
             if strength >= 0.65:
                 if can_bet:
-                    action_label = 'bet_50%'
+                    action_label = 'raise_50%'
                 elif can_raise:
                     action_label = 'raise_50%'
                 elif can_call:
@@ -824,7 +828,7 @@ class LoosePassiveAgent:
             if roll < 0.85:
                 action_label = 'check'
             elif can_bet:
-                action_label = 'bet_33%'  # Small bet sometimes
+                action_label = 'raise_33%'  # Small bet sometimes
             else:
                 action_label = 'check'
         # Facing bet - call most of the time
@@ -873,12 +877,12 @@ class AggressiveAgent:
         if can_bet:
             if roll < 0.65:
                 # Bet most of the time when we can
-                sizes = ['bet_50%', 'bet_75%', 'bet_100%']
+                sizes = ['raise_50%', 'raise_75%', 'raise_100%']
                 action_label = random.choice(sizes)
             elif roll < 0.85:
-                action_label = 'check' if can_check else random.choice(['bet_50%', 'bet_75%'])
+                action_label = 'check' if can_check else random.choice(['raise_50%', 'raise_75%'])
             else:
-                action_label = 'check' if can_check else 'bet_50%'
+                action_label = 'check' if can_check else 'raise_50%'
         elif can_raise:
             if roll < 0.55:
                 # Raise frequently
@@ -990,7 +994,7 @@ class CallingStationAgent:
         if can_check:
             if roll < 0.10 and can_bet:
                 # Occasionally bet (10%)
-                action_label = 'bet_33%'
+                action_label = 'raise_33%'
             else:
                 action_label = 'check'
         # Facing bet or raise - CALL FREQUENTLY
@@ -1118,7 +1122,7 @@ class HeroCallerAgent:
         
         if can_check:
             if hand_strength >= 0.55 and can_bet and roll < 0.50:
-                action_label = 'bet_50%'
+                action_label = 'raise_50%'
             else:
                 action_label = 'check'
         elif can_call:
@@ -1173,7 +1177,7 @@ class AlwaysRaiseAgent(SimpleAgent):
         if 'raise' in legal_actions:
             return 'raise_100%'
         if 'bet' in legal_actions:
-            return 'bet_100%'
+            return 'raise_100%'
         if 'all_in' in legal_actions:
             return 'all_in'
         if 'call' in legal_actions:

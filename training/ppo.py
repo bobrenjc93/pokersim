@@ -323,7 +323,8 @@ class PPOTrainer:
         ) if use_adaptive_entropy else None
         
         # Maximum entropy for action space (log of num_actions)
-        self.max_entropy = math.log(22)  # 22 actions in the action space
+        # Unified action space: 13 actions (fold, check, call, 9 raise sizes, all_in)
+        self.max_entropy = math.log(13)
         
         # Mixed precision training (GPU only, provides ~30-50% speedup)
         self.use_amp = use_amp and AMP_AVAILABLE and device.type == 'cuda'
