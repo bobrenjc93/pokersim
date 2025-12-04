@@ -936,56 +936,75 @@ def select_spread_checkpoints(
     max_checkpoints: int
 ) -> List[Tuple[int, Path]]:
     """
-    Select checkpoints with good coverage across all iterations.
+    Select checkpoints with maximum coverage across all iterations.
     
-    Uses exponential spacing to keep more recent checkpoints while still 
-    preserving checkpoints from earlier in training for historical comparison.
+    Uses farthest-first (maximin distance) greedy selection with logarithmic
+    scaling of iteration numbers. This gives more weight to early iterations
+    where learning changes are typically most dramatic, while still maintaining
+    good coverage of later training.
     
     Strategy:
     - Always keep first checkpoint (baseline/-1 or earliest iteration)
     - Always keep last checkpoint (most recent)
-    - Keep more checkpoints from recent training (~40% of slots)
-    - Use power-law spacing for earlier checkpoints
+    - Use log-scaled iteration numbers for distance calculation
+    - Greedily select remaining checkpoints to maximize minimum distance
+      to already-selected checkpoints (farthest-first traversal)
     
     Args:
         checkpoints: List of (iteration_number, path) tuples, sorted by iteration
         max_checkpoints: Maximum number of checkpoints to select
         
     Returns:
-        List of (iteration_number, path) tuples with spread-out coverage
+        List of (iteration_number, path) tuples with maximized spread
     """
     n = len(checkpoints)
     if n <= max_checkpoints:
         return checkpoints
     
-    keep_indices = set()
+    # Extract iteration numbers and apply log scaling for distance calculation
+    # Add offset to handle baseline (-1) and iter_0 cases
+    iterations = [cp[0] for cp in checkpoints]
+    min_iter = min(iterations)
+    offset = 2 - min_iter  # Ensure all values are >= 2 for log scaling
     
-    # Always keep first checkpoint (baseline or earliest)
-    keep_indices.add(0)
+    def log_scale(iter_num: int) -> float:
+        """Apply log scaling to iteration number."""
+        return math.log(iter_num + offset)
     
-    # Always keep the very last checkpoint
-    keep_indices.add(n - 1)
+    # Pre-compute log-scaled values for all checkpoints
+    log_iterations = [log_scale(it) for it in iterations]
     
-    # Allocate ~40% of slots to most recent checkpoints (dense recent coverage)
-    recent_slots = max(2, max_checkpoints * 2 // 5)
-    recent_start = max(0, n - recent_slots)
-    for i in range(recent_start, n):
-        keep_indices.add(i)
+    # Start with first and last checkpoints (always included)
+    selected_indices = [0, n - 1]
+    selected_log_values = {log_iterations[0], log_iterations[n - 1]}
     
-    # Fill remaining slots with spread-out checkpoints from earlier training
-    remaining_slots = max_checkpoints - len(keep_indices)
-    if remaining_slots > 0 and recent_start > 1:
-        # Range we need to cover: indices 1 to (recent_start - 1)
-        # Use power-law spacing: denser toward recent, sparser at start
-        for slot in range(remaining_slots):
-            # t goes from 0 to 1 as slot increases
-            t = (slot + 1) / (remaining_slots + 1)
-            # Power < 1 biases toward higher indices (closer to recent)
-            idx = int(1 + t ** 0.6 * (recent_start - 2))
-            idx = max(1, min(idx, recent_start - 1))
-            keep_indices.add(idx)
+    # Greedily select remaining checkpoints using farthest-first on log scale
+    remaining_slots = max_checkpoints - 2
+    available_indices = set(range(1, n - 1))
+    
+    for _ in range(remaining_slots):
+        if not available_indices:
+            break
+        
+        best_idx = None
+        best_min_dist = -1.0
+        
+        # Find the checkpoint that maximizes minimum log-distance to selected set
+        for idx in available_indices:
+            log_val = log_iterations[idx]
+            # Calculate minimum distance to any already-selected checkpoint (in log space)
+            min_dist = min(abs(log_val - sel_log) for sel_log in selected_log_values)
+            
+            if min_dist > best_min_dist:
+                best_min_dist = min_dist
+                best_idx = idx
+        
+        if best_idx is not None:
+            selected_indices.append(best_idx)
+            selected_log_values.add(log_iterations[best_idx])
+            available_indices.remove(best_idx)
     
     # Sort and return selected checkpoints
-    sorted_indices = sorted(keep_indices)[:max_checkpoints]
+    sorted_indices = sorted(selected_indices)
     return [checkpoints[i] for i in sorted_indices]
 

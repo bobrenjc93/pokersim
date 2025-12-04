@@ -2362,77 +2362,147 @@ class RLTrainingSession:
         # Cleanup old checkpoints - keep only last 50 iteration checkpoints
         self._cleanup_old_checkpoints(max_checkpoints=50)
     
-    def _select_checkpoints_to_keep(
-        self, 
-        iter_checkpoints: list, 
-        max_checkpoints: int
-    ) -> set:
+    def _compute_checkpoint_crowding(
+        self,
+        iter_checkpoints: list
+    ) -> list:
         """
-        Select which checkpoints to keep with good coverage across all iterations.
+        Compute crowding score for each checkpoint based on local density.
         
-        Uses a combination of:
-        1. Always keep first checkpoint (earliest training baseline)
-        2. Keep recent checkpoints densely (last ~40% of slots)
-        3. Exponentially spaced checkpoints for earlier training
-        
-        This ensures we have checkpoints from throughout training history,
-        with more density on recent iterations.
+        Crowding is inversely proportional to the gap to nearest neighbors.
+        Higher crowding = checkpoint is in a dense region = more likely to drop.
         
         Args:
             iter_checkpoints: List of (iter_num, path) sorted by iter_num
-            max_checkpoints: Maximum number to keep
             
         Returns:
-            Set of checkpoint paths to keep
+            List of crowding scores (higher = more crowded)
         """
         n = len(iter_checkpoints)
-        if n <= max_checkpoints:
-            return set(cp[1] for cp in iter_checkpoints)
+        if n <= 2:
+            return [0.0] * n
         
-        keep_indices = set()
+        crowding = []
+        for i in range(n):
+            iter_num = iter_checkpoints[i][0]
+            
+            # Calculate gap to left neighbor
+            if i > 0:
+                gap_left = iter_num - iter_checkpoints[i - 1][0]
+            else:
+                gap_left = float('inf')  # First checkpoint has no left neighbor
+            
+            # Calculate gap to right neighbor  
+            if i < n - 1:
+                gap_right = iter_checkpoints[i + 1][0] - iter_num
+            else:
+                gap_right = float('inf')  # Last checkpoint has no right neighbor
+            
+            # Crowding = inverse of minimum gap (smaller gap = more crowded)
+            min_gap = min(gap_left, gap_right)
+            if min_gap == float('inf'):
+                crowding.append(0.0)  # Endpoints have zero crowding
+            else:
+                # Use 1/gap so dense regions have high crowding
+                crowding.append(1.0 / max(1.0, min_gap))
         
-        # Always keep first checkpoint (baseline of training)
-        keep_indices.add(0)
+        return crowding
+    
+    def _select_checkpoints_to_delete(
+        self, 
+        iter_checkpoints: list, 
+        num_to_delete: int
+    ) -> set:
+        """
+        Probabilistically select checkpoints to delete based on local density.
         
-        # Always keep the very last checkpoint
-        keep_indices.add(n - 1)
+        Uses density-aware selection where checkpoints in crowded regions
+        have higher probability of deletion. This naturally spreads checkpoints
+        across the iteration range.
         
-        # Allocate ~40% of slots to most recent checkpoints (dense recent coverage)
-        recent_slots = max(10, max_checkpoints * 2 // 5)
-        recent_start = max(0, n - recent_slots)
-        for i in range(recent_start, n):
-            keep_indices.add(i)
+        Always protects:
+        - First checkpoint (training baseline)
+        - Last checkpoint (most recent)
+        - Very recent checkpoints (last 3)
         
-        # Fill remaining slots with spread-out checkpoints from earlier training
-        remaining_slots = max_checkpoints - len(keep_indices)
-        if remaining_slots > 0 and recent_start > 1:
-            # Range we need to cover with exponential spacing: indices 1 to (recent_start - 1)
-            # Use power-law spacing: denser toward recent, sparser at start
-            for slot in range(remaining_slots):
-                # t goes from 0 to 1 as slot increases
-                t = (slot + 1) / (remaining_slots + 1)
-                # Power < 1 biases toward higher indices (closer to recent)
-                # Power = 0.5 gives sqrt spacing, 0.7 is slightly more uniform
-                idx = int(1 + t ** 0.6 * (recent_start - 2))
-                idx = max(1, min(idx, recent_start - 1))
-                keep_indices.add(idx)
+        Args:
+            iter_checkpoints: List of (iter_num, path) sorted by iter_num
+            num_to_delete: Number of checkpoints to delete
+            
+        Returns:
+            Set of checkpoint paths to delete
+        """
+        import random
         
-        # Convert indices to paths
-        return set(iter_checkpoints[i][1] for i in keep_indices)
+        n = len(iter_checkpoints)
+        if n <= 3 or num_to_delete <= 0:
+            return set()
+        
+        # Compute crowding scores
+        crowding = self._compute_checkpoint_crowding(iter_checkpoints)
+        
+        # Indices that are protected from deletion
+        protected = {0, n - 1}  # First and last
+        # Protect last 3 checkpoints (ensures recent progress is never lost)
+        for i in range(max(0, n - 3), n):
+            protected.add(i)
+        
+        # Build candidate list with weights
+        candidates = []
+        weights = []
+        for i in range(n):
+            if i not in protected:
+                candidates.append(i)
+                # Add small epsilon to avoid zero weights
+                weights.append(crowding[i] + 0.01)
+        
+        if not candidates:
+            return set()
+        
+        # Select checkpoints to delete using weighted random sampling
+        to_delete = set()
+        remaining_candidates = list(candidates)
+        remaining_weights = list(weights)
+        
+        for _ in range(min(num_to_delete, len(candidates))):
+            if not remaining_candidates:
+                break
+            
+            # Weighted random selection
+            total = sum(remaining_weights)
+            r = random.random() * total
+            cumsum = 0.0
+            selected_idx = 0
+            for j, w in enumerate(remaining_weights):
+                cumsum += w
+                if r <= cumsum:
+                    selected_idx = j
+                    break
+            
+            # Add to deletion set
+            checkpoint_idx = remaining_candidates[selected_idx]
+            to_delete.add(iter_checkpoints[checkpoint_idx][1])
+            
+            # Remove from candidate pool
+            remaining_candidates.pop(selected_idx)
+            remaining_weights.pop(selected_idx)
+        
+        return to_delete
     
     def _cleanup_old_checkpoints(self, max_checkpoints: int = 50):
         """
-        Remove old iteration checkpoints, keeping spread-out coverage across training.
+        Density-aware checkpoint cleanup that maintains ~max_checkpoints spread across training.
         
-        Instead of keeping just the last N checkpoints, this uses exponential spacing
-        to preserve checkpoints from throughout training history. This allows comparing
-        model performance from early, middle, and late training stages.
+        Uses probabilistic deletion based on local density:
+        - Checkpoints in crowded regions have higher probability of deletion
+        - This naturally spreads checkpoints across the iteration range
+        - Early checkpoints are preserved because they become sparse over time
         
         Preserves special checkpoints: latest, final, baseline.
         Only removes iteration checkpoints (poker_rl_iter_*.pt).
         
         Args:
-            max_checkpoints: Maximum number of iteration checkpoints to keep
+            max_checkpoints: Target number of iteration checkpoints to keep (in expectation)
         """
         import re
         
@@ -2455,12 +2525,15 @@ class RLTrainingSession:
         if len(iter_checkpoints) <= max_checkpoints:
             return
         
-        # Select checkpoints to KEEP using spread-out spacing
-        keep_set = self._select_checkpoints_to_keep(iter_checkpoints, max_checkpoints)
+        # Calculate how many to delete
+        num_to_delete = len(iter_checkpoints) - max_checkpoints
         
-        # Remove checkpoints not in keep_set
+        # Select checkpoints to DELETE using density-aware probabilistic sampling
+        delete_set = self._select_checkpoints_to_delete(iter_checkpoints, num_to_delete)
+        
+        # Remove selected checkpoints
         for iter_num, checkpoint_file in iter_checkpoints:
-            if checkpoint_file not in keep_set:
+            if checkpoint_file in delete_set:
                 try:
                     # Remove from opponent pool if present
                     if checkpoint_file in self.opponent_pool:

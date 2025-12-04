@@ -10,7 +10,7 @@ Only constants that are actively imported elsewhere are defined here.
 
 # Model version for RL training
 # v43: Unified action space - consolidated bet/raise into single raise_X% actions (13 actions instead of 22)
-MODEL_VERSION = 45
+MODEL_VERSION = 2
 
 # Default directory for saving/loading models
 DEFAULT_MODELS_DIR = f"/tmp/pokersim/rl_models_v{MODEL_VERSION}"

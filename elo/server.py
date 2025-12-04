@@ -88,7 +88,8 @@ class EloJobManager:
     def start_job(
         self, 
         models_dir: str = DEFAULT_MODELS_DIR,
-        k_factor: float = 40.0
+        k_factor: float = 40.0,
+        num_models: int = 8
     ):
         """
         Start an ELO simulation job with freezeout matches (1000 chips, 40 BB).
@@ -97,6 +98,7 @@ class EloJobManager:
         Args:
             models_dir: Directory containing model checkpoints
             k_factor: K-factor for ELO calculations (default 40 for faster rating spread)
+            num_models: Maximum number of model checkpoints to select (default 8)
         """
         if self.thread and self.thread.is_alive():
             return False, "Job already running"
@@ -113,7 +115,7 @@ class EloJobManager:
         
         self.thread = threading.Thread(
             target=self._run_simulation,
-            args=(models_dir, k_factor),
+            args=(models_dir, k_factor, num_models),
             daemon=True
         )
         self.thread.start()
@@ -129,7 +131,8 @@ class EloJobManager:
     def _run_simulation(
         self, 
         models_dir_str: str, 
-        k_factor: float
+        k_factor: float,
+        num_models: int
     ):
         """Run ELO simulation with freezeout matches (1000 chips, 40 BB).
         Runs indefinitely until explicitly stopped."""
@@ -154,11 +157,11 @@ class EloJobManager:
             sorted_cps = sorted(checkpoints, key=lambda x: x[0])
             
             # Select checkpoints with spread-out coverage across training history
-            num_to_select = 5
-            if len(sorted_cps) > num_to_select:
-                sorted_cps = select_spread_checkpoints(sorted_cps, num_to_select)
+            # Uses farthest-first selection to maximize iteration distance between models
+            if len(sorted_cps) > num_models:
+                sorted_cps = select_spread_checkpoints(sorted_cps, num_models)
                 iter_nums = [cp[0] for cp in sorted_cps]
-                print(f"Selected {len(sorted_cps)} spread-out checkpoints: {iter_nums}")
+                print(f"Selected {len(sorted_cps)} spread-out checkpoints (max-distance): {iter_nums}")
             else:
                 print(f"Using all {len(sorted_cps)} checkpoints as participants")
             
@@ -367,10 +370,12 @@ def start_job():
     data = request.json or {}
     models_dir = data.get('models_dir', DEFAULT_MODELS_DIR)
     k_factor = data.get('k_factor', 40.0)
+    num_models = data.get('num_models', 8)
     
     success, msg = job_manager.start_job(
         models_dir=models_dir,
-        k_factor=k_factor
+        k_factor=k_factor,
+        num_models=num_models
     )
     return jsonify({'success': success, 'message': msg})
 
