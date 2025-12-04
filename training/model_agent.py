@@ -272,7 +272,8 @@ class ModelAgent:
         checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
         
         # Get model configuration from checkpoint
-        input_dim = checkpoint.get('input_dim', 155)  # Default to RL encoder dim
+        # NOTE: RLStateEncoder produces 167 features, NOT 155!
+        input_dim = checkpoint.get('input_dim', 167)  # Must match RLStateEncoder._FEATURE_DIM
         dropout = checkpoint.get('dropout', 0.1)
 
         # Try to infer model architecture from state_dict if not in checkpoint

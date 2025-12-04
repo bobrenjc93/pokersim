@@ -334,9 +334,9 @@ class PokerActorCritic(nn.Module):
         all_in_penalty = torch.zeros_like(action_logits)
         all_in_penalty[:, 12] = -3.0 * weak_hand_mask.squeeze()  # All-in index is 12 in unified action space
         
-        # Also penalize large raises (indices 17-20: raise_100%, raise_150%, raise_200%, raise_300%)
-        # Penalty reduced from -2.0 to -1.0
-        for raise_idx in [17, 18, 19, 20]:
+        # Also penalize large raises with weak hands
+        # Unified action space indices: raise_100%=8, raise_150%=9, raise_200%=10, raise_300%=11
+        for raise_idx in [8, 9, 10, 11]:
             if raise_idx < action_logits.size(1):
                 all_in_penalty[:, raise_idx] = -1.0 * weak_hand_mask.squeeze()
         
@@ -387,7 +387,8 @@ class PokerActorCritic(nn.Module):
         weak_hand_mask = (hand_strength < self.hand_strength_threshold).float()
         all_in_penalty = torch.zeros_like(action_logits)
         all_in_penalty[:, 12] = -3.0 * weak_hand_mask.squeeze()  # All-in index is 12
-        for raise_idx in [17, 18, 19, 20]:
+        # Unified action space indices: raise_100%=8, raise_150%=9, raise_200%=10, raise_300%=11
+        for raise_idx in [8, 9, 10, 11]:
             if raise_idx < action_logits.size(1):
                 all_in_penalty[:, raise_idx] = -1.0 * weak_hand_mask.squeeze()
         
