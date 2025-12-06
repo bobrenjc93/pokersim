@@ -1,23 +1,60 @@
 """
 Configuration for RL training.
 
-Only constants that are actively imported elsewhere are defined here.
+This module re-exports shared constants from the pokersim package for backwards compatibility.
+All constants are now centrally defined in /api/python/pokersim/config.py.
 """
 
-# =============================================================================
-# Model Version
-# =============================================================================
+# Add api/python to path for pokersim package
+import sys
+from pathlib import Path
+_API_PYTHON_DIR = Path(__file__).parent.parent / "api" / "python"
+if str(_API_PYTHON_DIR) not in sys.path:
+    sys.path.insert(0, str(_API_PYTHON_DIR))
 
-# Model version for RL training
-# v43: Unified action space - consolidated bet/raise into single raise_X% actions (13 actions instead of 22)
-MODEL_VERSION = 3
+# Re-export everything from pokersim.config for backwards compatibility
+from pokersim.config import (
+    MODEL_VERSION,
+    DEFAULT_MODELS_DIR,
+    ACTION_MAP,
+    ACTION_NAMES,
+    NUM_ACTIONS,
+    RAISE_SIZE_MAP,
+    BET_SIZE_MAP,
+    FEATURE_DIM,
+    RANK_MAP,
+    SUIT_MAP,
+    STAGE_MAP,
+    ACTION_TYPE_MAP,
+    LOG_LEVEL,
+    # Game configuration defaults
+    DEFAULT_SMALL_BLIND,
+    DEFAULT_BIG_BLIND,
+    DEFAULT_STARTING_CHIPS,
+    DEFAULT_MAX_HANDS_PER_ROUND,
+    DEFAULT_ROUNDS_PER_MATCH,
+    DEFAULT_MAX_RAISES_PER_ROUND,
+)
 
-# Default directory for saving/loading models
-DEFAULT_MODELS_DIR = f"/tmp/pokersim/rl_models_v{MODEL_VERSION}"
-
-# =============================================================================
-# Logging Configuration
-# =============================================================================
-
-# Log levels: 0=minimal, 1=normal, 2=verbose
-LOG_LEVEL = 1  # Default to normal logging (shows errors and progress)
+__all__ = [
+    'MODEL_VERSION',
+    'DEFAULT_MODELS_DIR',
+    'ACTION_MAP',
+    'ACTION_NAMES',
+    'NUM_ACTIONS',
+    'RAISE_SIZE_MAP',
+    'BET_SIZE_MAP',
+    'FEATURE_DIM',
+    'RANK_MAP',
+    'SUIT_MAP',
+    'STAGE_MAP',
+    'ACTION_TYPE_MAP',
+    'LOG_LEVEL',
+    # Game configuration defaults
+    'DEFAULT_SMALL_BLIND',
+    'DEFAULT_BIG_BLIND',
+    'DEFAULT_STARTING_CHIPS',
+    'DEFAULT_MAX_HANDS_PER_ROUND',
+    'DEFAULT_ROUNDS_PER_MATCH',
+    'DEFAULT_MAX_RAISES_PER_ROUND',
+]

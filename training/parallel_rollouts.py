@@ -188,40 +188,49 @@ class RolloutWorker:
             'encoder': encoder
         })
         
-        # Opponent selection (same distribution as train.py)
+        # Opponent selection (v4: ELO-aligned distribution)
+        # Heuristic 25%, Self-play 40%, Callers 15%, Aggressive 10%, Weak/Misc 10%
         for i in range(1, num_players):
             player_id = f'p{i}'
             roll = random.random()
             
-            if roll < 0.23:
-                agents.append({'id': player_id, 'type': 'calling_station'})
-            elif roll < 0.36:
-                agents.append({'id': player_id, 'type': 'hero_caller'})
-            elif use_opponent_pool and opponent_pool and roll < 0.51:
+            # HEURISTIC (25%) - PRIMARY TARGET - matches ELO baseline
+            # This is the most important opponent for ELO performance
+            if roll < 0.25:
+                agents.append({'id': player_id, 'type': 'heuristic'})  # 25%
+            
+            # SELF-PLAY (40%) - Model vs model learning
+            elif use_opponent_pool and opponent_pool and roll < 0.50:
                 checkpoint_path = random.choice(opponent_pool)
                 agents.append({
                     'id': player_id,
                     'type': 'past_model',
                     'checkpoint_path': checkpoint_path
-                })
-            elif use_opponent_pool and roll < 0.61:
-                agents.append({'id': player_id, 'type': 'model', 'encoder': RLStateEncoder()})
-            elif roll < 0.74:
-                agents.append({'id': player_id, 'type': 'tight'})
-            elif roll < 0.82:
-                agents.append({'id': player_id, 'type': 'heuristic'})
-            elif roll < 0.86:
-                agents.append({'id': player_id, 'type': 'aggressive'})
-            elif roll < 0.89:
-                agents.append({'id': player_id, 'type': 'loose_passive'})
-            elif roll < 0.92:
-                agents.append({'id': player_id, 'type': 'always_call'})
+                })  # 25%
+            elif use_opponent_pool and roll < 0.65:
+                agents.append({'id': player_id, 'type': 'model', 'encoder': RLStateEncoder()})  # 15%
+            
+            # CALLERS (15%) - Punish bluffs, reward value betting
+            elif roll < 0.72:
+                agents.append({'id': player_id, 'type': 'calling_station'})  # 7%
+            elif roll < 0.77:
+                agents.append({'id': player_id, 'type': 'hero_caller'})  # 5%
+            elif roll < 0.80:
+                agents.append({'id': player_id, 'type': 'always_call'})  # 3%
+            
+            # AGGRESSIVE (10%)
+            elif roll < 0.87:
+                agents.append({'id': player_id, 'type': 'aggressive'})  # 7%
+            elif roll < 0.90:
+                agents.append({'id': player_id, 'type': 'always_raise'})  # 3%
+            
+            # WEAK/MISC (10%)
             elif roll < 0.94:
-                agents.append({'id': player_id, 'type': 'always_raise'})
-            elif roll < 0.96:
-                agents.append({'id': player_id, 'type': 'always_fold'})
+                agents.append({'id': player_id, 'type': 'tight'})  # 4%
+            elif roll < 0.97:
+                agents.append({'id': player_id, 'type': 'always_fold'})  # 3%
             else:
-                agents.append({'id': player_id, 'type': 'random'})
+                agents.append({'id': player_id, 'type': 'random'})  # 3%
         
         # Create game directly using stateful binding (FAST!)
         game_config = self.poker_api.GameConfig()
@@ -360,9 +369,11 @@ class RolloutWorker:
                 episode['hand_strengths'].append(hand_strength)
                 episode['regrets'].append({})
                 
-                # Compute step reward shaping
+                # Compute step reward shaping with temporal consistency
                 step_reward = self._compute_action_shaping_reward(
-                    action_type, hand_strength, state_dict, last_action_was_opponent_aggression
+                    action_type, hand_strength, state_dict, last_action_was_opponent_aggression,
+                    step_in_hand=len(episode['states']),  # Current step in hand
+                    total_steps_estimate=6  # Average poker hand has ~4-8 actions
                 )
                 episode['step_rewards'].append(step_reward)
                 
@@ -552,81 +563,26 @@ class RolloutWorker:
         action_type: str,
         hand_strength: float,
         state: Dict,
-        facing_aggression: bool
+        facing_aggression: bool,
+        step_in_hand: int = 0,
+        total_steps_estimate: int = 6
     ) -> float:
-        """Compute per-step reward shaping (same logic as train.py)."""
-        reward = 0.0
+        """Compute per-step reward shaping with temporal consistency.
         
-        TRASH_THRESHOLD = 0.30
-        WEAK_THRESHOLD = 0.45
-        MEDIUM_THRESHOLD = 0.55
-        STRONG_THRESHOLD = 0.70
-        PREMIUM_THRESHOLD = 0.85
+        Delegates to shared implementation in pokersim.reward_shaping.
+        """
+        # Import inside method for multiprocessing compatibility
+        import sys
+        from pathlib import Path
+        _API_PYTHON_DIR = Path(__file__).parent.parent / "api" / "python"
+        if str(_API_PYTHON_DIR) not in sys.path:
+            sys.path.insert(0, str(_API_PYTHON_DIR))
+        from pokersim.reward_shaping import compute_action_shaping_reward
         
-        if action_type == 'fold':
-            if hand_strength < TRASH_THRESHOLD:
-                reward += 0.02 if facing_aggression else -0.03
-            elif hand_strength < WEAK_THRESHOLD:
-                reward += -0.02 if facing_aggression else -0.08
-            elif hand_strength < MEDIUM_THRESHOLD:
-                reward += -0.08 if facing_aggression else -0.12
-            elif hand_strength < STRONG_THRESHOLD:
-                reward -= 0.15
-            else:
-                reward -= 0.22
-        
-        elif action_type == 'all_in':
-            player_chips = state.get('player_chips', 0)
-            player_bet = state.get('player_bet', 0)
-            commitment = player_bet / max(1, player_bet + player_chips)
-            pot = state.get('pot', 0)
-            spr = player_chips / max(1, pot) if pot > 0 else 10.0
-            
-            if hand_strength >= PREMIUM_THRESHOLD:
-                reward += 0.18
-            elif hand_strength >= STRONG_THRESHOLD:
-                reward += 0.10
-            elif hand_strength >= MEDIUM_THRESHOLD:
-                if commitment > 0.6 or spr < 2.0:
-                    reward += 0.0
-                else:
-                    reward -= 0.12
-            elif hand_strength >= WEAK_THRESHOLD:
-                reward -= 0.06 if commitment > 0.7 else -0.30
-            else:
-                reward -= 0.15 if commitment > 0.8 else -0.45
-        
-        elif action_type in ['bet', 'raise']:
-            if hand_strength >= STRONG_THRESHOLD:
-                reward += 0.10
-            elif hand_strength >= MEDIUM_THRESHOLD:
-                reward += 0.04
-            elif hand_strength >= WEAK_THRESHOLD:
-                reward -= 0.05
-            else:
-                reward -= 0.10
-        
-        elif action_type == 'call':
-            if hand_strength >= STRONG_THRESHOLD:
-                reward += 0.08
-            elif hand_strength >= MEDIUM_THRESHOLD:
-                reward += 0.06
-            elif hand_strength >= WEAK_THRESHOLD:
-                reward += 0.02
-            else:
-                reward -= 0.04
-        
-        elif action_type == 'check':
-            if hand_strength >= STRONG_THRESHOLD:
-                reward += 0.02
-            elif hand_strength >= MEDIUM_THRESHOLD:
-                reward += 0.05
-            elif hand_strength < WEAK_THRESHOLD:
-                reward += 0.06
-            else:
-                reward += 0.04
-        
-        return reward
+        return compute_action_shaping_reward(
+            action_type, hand_strength, state, facing_aggression,
+            step_in_hand, total_steps_estimate
+        )
     
     def _empty_episode(self, success: bool = True) -> Dict[str, Any]:
         """Return an empty episode dict."""

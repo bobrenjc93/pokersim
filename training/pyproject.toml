@@ -24,5 +24,5 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["config", "eval", "train", "rl_model", "rl_state_encoder", "ppo", "model_agent"]
+py-modules = ["config", "eval", "train", "rl_model", "rl_state_encoder", "ppo", "model_agent", "monte_carlo", "env", "batched_rollouts", "parallel_rollouts", "benchmark_rollouts"]
 

@@ -25,6 +25,7 @@ try:
 except ImportError:
     poker_api_binding = None
 
+from config import FEATURE_DIM
 from rl_state_encoder import RLStateEncoder, estimate_hand_strength
 from model_agent import (
     ACTION_NAMES, convert_action_label, create_legal_actions_mask, extract_state,
@@ -32,6 +33,15 @@ from model_agent import (
     CallingStationAgent, HeroCallerAgent, AlwaysRaiseAgent, AlwaysCallAgent,
     AlwaysFoldAgent, RandomAgent
 )
+
+# Add api/python to path for pokersim package
+import sys
+from pathlib import Path
+_API_PYTHON_DIR = Path(__file__).parent.parent / "api" / "python"
+if str(_API_PYTHON_DIR) not in sys.path:
+    sys.path.insert(0, str(_API_PYTHON_DIR))
+
+from pokersim.reward_shaping import compute_action_shaping_reward
 
 
 @dataclass
@@ -142,45 +152,52 @@ class BatchedRolloutCollector:
             'encoder': encoder
         })
         
-        # Opponent agents (same distribution as train.py)
+        # Opponent agents (v4: ELO-aligned distribution)
+        # Heuristic 25%, Self-play 40%, Callers 15%, Aggressive 10%, Weak/Misc 10%
         for i in range(1, num_players):
             player_id = f'p{i}'
             roll = random.random()
             
-            if roll < 0.23:
-                agents.append({'id': player_id, 'type': 'calling_station'})
-            elif roll < 0.36:
-                agents.append({'id': player_id, 'type': 'hero_caller'})
-            elif self.opponent_pool and roll < 0.51:
+            # HEURISTIC (25%) - PRIMARY TARGET - matches ELO baseline
+            # This is the most important opponent for ELO performance
+            if roll < 0.25:
+                agents.append({'id': player_id, 'type': 'heuristic'})  # 25%
+            
+            # SELF-PLAY (40%) - Model vs model learning
+            elif self.opponent_pool and roll < 0.50:
                 checkpoint_path = random.choice(self.opponent_pool)
                 agents.append({
                     'id': player_id,
                     'type': 'past_model',
                     'checkpoint_path': checkpoint_path,
                     'encoder': RLStateEncoder(use_buffer=True)
-                })
-            elif roll < 0.61:
+                })  # 25%
+            elif roll < 0.65:
                 agents.append({
                     'id': player_id,
                     'type': 'model',
                     'encoder': RLStateEncoder(use_buffer=True)
-                })
-            elif roll < 0.74:
-                agents.append({'id': player_id, 'type': 'tight'})
-            elif roll < 0.82:
-                agents.append({'id': player_id, 'type': 'heuristic'})
-            elif roll < 0.86:
-                agents.append({'id': player_id, 'type': 'aggressive'})
-            elif roll < 0.89:
-                agents.append({'id': player_id, 'type': 'loose_passive'})
-            elif roll < 0.92:
-                agents.append({'id': player_id, 'type': 'always_call'})
+                })  # 15%
+            
+            # CALLERS (15%)
+            elif roll < 0.72:
+                agents.append({'id': player_id, 'type': 'calling_station'})  # 7%
+            elif roll < 0.77:
+                agents.append({'id': player_id, 'type': 'hero_caller'})  # 5%
+            elif roll < 0.80:
+                agents.append({'id': player_id, 'type': 'always_call'})  # 3%
+            # AGGRESSIVE (10%)
+            elif roll < 0.87:
+                agents.append({'id': player_id, 'type': 'aggressive'})  # 7%
+            elif roll < 0.90:
+                agents.append({'id': player_id, 'type': 'always_raise'})  # 3%
+            # WEAK/MISC (10%)
             elif roll < 0.94:
-                agents.append({'id': player_id, 'type': 'always_raise'})
-            elif roll < 0.96:
-                agents.append({'id': player_id, 'type': 'always_fold'})
+                agents.append({'id': player_id, 'type': 'tight'})  # 4%
+            elif roll < 0.97:
+                agents.append({'id': player_id, 'type': 'always_fold'})  # 3%
             else:
-                agents.append({'id': player_id, 'type': 'random'})
+                agents.append({'id': player_id, 'type': 'random'})  # 3%
         
         # Add players and start hand
         for agent in agents:
@@ -223,7 +240,7 @@ class BatchedRolloutCollector:
             hidden_dim = checkpoint.get('hidden_dim', 256)
             num_heads = checkpoint.get('num_heads', 8)
             num_layers = checkpoint.get('num_layers', 4)
-            input_dim = checkpoint.get('input_dim', 167)
+            input_dim = checkpoint.get('input_dim', FEATURE_DIM)
             
             if 'pos_encoding' in state_dict:
                 hidden_dim = state_dict['pos_encoding'].shape[2]
@@ -245,6 +262,20 @@ class BatchedRolloutCollector:
         except Exception:
             return None
     
+    def _update_histories(self, inst: GameInstance, player_id: str, action_type: str, amount: int, pot: int, stage: str):
+        """Update action history for all agents in the game."""
+        # Update encoders (for model agents)
+        for agent in inst.agents:
+            if 'encoder' in agent:
+                agent['encoder'].add_action(player_id, action_type, amount, pot, stage)
+                
+        # Update heuristic agents
+        for agent in inst.agents:
+            if agent['type'] not in ['model', 'past_model']:
+                agent_instance = self._get_heuristic_agent(agent['type'], agent['id'])
+                if agent_instance and hasattr(agent_instance, 'observe_action'):
+                    agent_instance.observe_action(player_id, action_type, amount, pot, stage)
+
     def _step_game(self, instance: GameInstance) -> bool:
         """
         Advance a game by one step.
@@ -310,8 +341,27 @@ class BatchedRolloutCollector:
         # Track opponent aggression
         instance.last_opponent_aggressive = action_type in ('bet', 'raise', 'all_in')
         
+        # Update histories BEFORE processing action (using current state pot)
+        self._update_histories(
+            instance, 
+            current_player_id, 
+            action_type, 
+            amount, 
+            state_dict.get('pot', 0), 
+            state_dict.get('stage', 'Preflop')
+        )
+        
         # Process action
         if not game.process_action(current_player_id, action_type, amount):
+            # Fallback fold
+            self._update_histories(
+                instance, 
+                current_player_id, 
+                "fold", 
+                0, 
+                state_dict.get('pot', 0), 
+                state_dict.get('stage', 'Preflop')
+            )
             game.process_action(current_player_id, "fold", 0)
         
         return True
@@ -406,6 +456,16 @@ class BatchedRolloutCollector:
             state_dict = extract_state(game_state, inst.main_player_id)
             action_type, amount = convert_action_label(action_label, state_dict)
             
+            # Update histories BEFORE processing action
+            self._update_histories(
+                inst, 
+                inst.main_player_id, 
+                action_type, 
+                amount, 
+                state_dict.get('pot', 0), 
+                state_dict.get('stage', 'Preflop')
+            )
+            
             # Store trajectory data
             inst.states.append(inst.pending_state_tensor.cpu())
             inst.actions.append(action_idx)
@@ -416,7 +476,18 @@ class BatchedRolloutCollector:
             inst.action_types.append(action_type)
             inst.action_labels.append(action_label)
             inst.hand_strengths.append(inst.pending_hand_strength)
-            inst.step_rewards.append(0.0)  # Will be computed later
+            
+            # Compute step reward shaping based on action appropriateness
+            # This is critical for proper learning - previously was always 0.0!
+            step_reward = compute_action_shaping_reward(
+                action_type, 
+                inst.pending_hand_strength, 
+                state_dict, 
+                inst.last_opponent_aggressive,
+                step_in_hand=len(inst.states),  # Current step in hand
+                total_steps_estimate=6  # Average poker hand has ~4-8 actions
+            )
+            inst.step_rewards.append(step_reward)
             
             # Check fold to aggression
             if action_type == 'fold' and inst.last_opponent_aggressive:
@@ -424,6 +495,15 @@ class BatchedRolloutCollector:
             
             # Apply action
             if not inst.game.process_action(inst.main_player_id, action_type, amount):
+                # Fallback fold
+                self._update_histories(
+                    inst, 
+                    inst.main_player_id, 
+                    "fold", 
+                    0, 
+                    state_dict.get('pot', 0), 
+                    state_dict.get('stage', 'Preflop')
+                )
                 inst.game.process_action(inst.main_player_id, "fold", 0)
             
             # Clear pending

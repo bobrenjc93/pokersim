@@ -9,7 +9,7 @@ This monorepo contains:
 - **API**: Pure C++ API server for fast, stateless game simulations
 - **Training**: Reinforcement learning system (PPO) for training poker AI agents
 - **Playground**: Interactive web UI to play poker against trained AI models
-- **Arena**: Evaluation system for comparing model checkpoints
+- **ELO**: ELO rating system for comparing model checkpoints
 
 ## Architecture
 
@@ -73,15 +73,10 @@ Navigate to `http://localhost:5000` in your browser.
 pokersim/
 ├── README.md              # This file
 ├── run_tests.sh           # Master test script
-├── website/               # Python Flask web server
-│   ├── app.py             # Flask application
-│   ├── pyproject.toml     # Python dependencies
-│   ├── start.sh           # Quick start script
-│   └── templates/
-│       └── index.html     # Web UI
-├── api/                   # C++ API server
-│   ├── src/               # Source files
+├── api/                   # C++ API server and shared Python package
+│   ├── src/               # C++ source files
 │   ├── tests/             # Test files
+│   ├── python/pokersim/   # Shared Python package (see below)
 │   ├── CMakeLists.txt     # CMake configuration
 │   ├── Makefile           # Make configuration
 │   └── README.md          # API & engine reference
@@ -89,18 +84,36 @@ pokersim/
 │   ├── train.py           # RL training script (PPO)
 │   ├── eval.py            # Model evaluation script
 │   ├── ppo.py             # PPO algorithm
-│   ├── rl_model.py        # Neural network model
-│   ├── rl_state_encoder.py # State encoding
+│   ├── rl_model.py        # Re-exports from pokersim
+│   ├── rl_state_encoder.py # Re-exports from pokersim
 │   └── start_rl_training_optimized.sh # Training script
+├── elo/                   # ELO Rating Arena
+│   ├── engine.py          # ELO calculation and match logic
+│   ├── server.py          # Web server with real-time UI
+│   └── start.sh           # Quick start script
 ├── playground/            # Interactive poker playground
 │   ├── app.py             # Flask application
 │   ├── start.sh           # Quick start script
 │   └── templates/
 │       └── index.html     # Poker table UI
-└── arena/                 # AI vs AI Evaluation Arena
-    ├── engine.py          # Core arena logic
-    └── server.py          # Web server with real-time UI
+└── hand-viewer/           # Hand history viewer
+    ├── server.py          # Flask application
+    └── start.sh           # Quick start script
 ```
+
+### Shared Python Package (`api/python/pokersim/`)
+
+The core Python components are centralized in `api/python/pokersim/`:
+
+- `config.py` - Shared configuration constants (action space, model version)
+- `model.py` - Neural network architecture (PokerActorCritic)
+- `state_encoder.py` - State encoding for RL (RLStateEncoder)
+- `agents.py` - Agent implementations (ModelAgent, HeuristicAgent, etc.)
+- `utils.py` - Utility functions (action conversion, state extraction)
+- `gameplay.py` - Game runner for matches (PokerGameRunner)
+- `reward_shaping.py` - Reward shaping for training
+- `checkpoint_utils.py` - Model checkpoint management
+- `hand_logger.py` - Hand history logging
 
 ## Features
 
@@ -143,24 +156,24 @@ To evaluate a trained model against random agents:
 uv run python eval.py --model /path/to/model.pt --num-hands 100
 ```
 
-### Advanced Evaluation (Arena)
+### ELO Rating System
 
-The Arena provides a real-time web interface for evaluating model checkpoints:
+The ELO system provides a real-time web interface for evaluating model checkpoints:
 
 ```bash
-cd arena
-uv run python server.py
+cd elo
+./start.sh
 ```
 
-Open `http://localhost:5000` in your browser to access the evaluation UI.
+Open `http://localhost:5051` in your browser to access the ELO rating UI.
 
 #### Features
 
-- **Real-time hand streaming** - Watch each hand play out live
-- **Live statistics** - Win rate, BB/100, and hand count update in real-time
-- **Round-robin tournaments** - All checkpoints play against each other
+- **Real-time ELO updates** - Watch ratings change as matches complete
+- **Live statistics** - Win rate, rating history, and match counts
+- **Round-robin matches** - All checkpoints play against each other
 - **Baseline comparisons** - Compare against Random and Heuristic agents
-- **Interactive charts** - Visualize performance progression over training
+- **Interactive charts** - Visualize rating progression over matches
 
 ### Playground (Play Against AI)
 
@@ -227,7 +240,7 @@ This runs:
 1. **C++ Unit Tests**: Card, Deck, Hand, Player, Game
 2. **API Snapshot Tests**: Validates complex scenarios (side pots, all-ins) via Python
 3. **RL Training Tests**: Unit tests for PPO and state encoder
-4. **Arena Tests**: Tests for the evaluation arena
+4. **ELO Tests**: Tests for the ELO rating system
 
 ## Performance
 

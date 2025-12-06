@@ -1,10 +1,23 @@
+"""
+Vectorized Poker Environment for RL Training.
+
+This module provides a vectorized environment for training poker agents
+using the C++ poker engine with direct bindings.
+
+Uses shared utilities from the pokersim package.
+"""
 import sys
-import os
-import json
 import random
+from pathlib import Path
+from typing import List, Dict, Tuple, Optional, Any, Union
+
 import torch
 import numpy as np
-from typing import List, Dict, Tuple, Optional, Any, Union
+
+# Add api/python to path for pokersim package
+_API_PYTHON_DIR = Path(__file__).parent.parent / "api" / "python"
+if str(_API_PYTHON_DIR) not in sys.path:
+    sys.path.insert(0, str(_API_PYTHON_DIR))
 
 try:
     import poker_api_binding
@@ -12,7 +25,15 @@ except ImportError:
     print("Error: 'poker_api_binding' not found.")
     sys.exit(1)
 
-from model_agent import convert_action_label
+# Import from consolidated pokersim package
+from pokersim import (
+    convert_action_label,
+    extract_state,
+    DEFAULT_SMALL_BLIND,
+    DEFAULT_BIG_BLIND,
+    DEFAULT_STARTING_CHIPS,
+)
+
 
 class VecPokerEnv:
     """

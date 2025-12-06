@@ -1,18 +1,22 @@
 [project]
-name = "pokersim-api-tests"
-version = "0.1.0"
-description = "Test suite for stateless poker engine API"
-requires-python = ">=3.8"
-dependencies = []
+name = "pokersim"
+version = "0.2.0"
+description = "Python package for poker simulation and AI training"
+requires-python = ">=3.9"
+dependencies = [
+    "torch>=2.0.0",
+    "numpy>=1.24.0",
+]
 
-[project.scripts]
-test-stateless-api = "tests.test_stateless_api:main"
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+]
 
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["tests*"]
-
+where = ["python"]
+include = ["pokersim*"]

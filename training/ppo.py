@@ -229,7 +229,7 @@ class PPOTrainer:
         self,
         model: nn.Module,
         learning_rate: float = 3e-4,
-        gamma: float = 0.99,  # Discount factor
+        gamma: float = 0.995,  # Discount factor - increased from 0.99 for short poker hands
         gae_lambda: float = 0.95,  # GAE parameter
         clip_epsilon: float = 0.2,  # PPO clip parameter
         value_loss_coef: float = 0.5,  # Weight for value loss

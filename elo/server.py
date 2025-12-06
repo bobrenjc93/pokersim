@@ -8,6 +8,7 @@ import os
 import sys
 import json
 import queue
+import shutil
 import threading
 import time
 import random
@@ -15,18 +16,23 @@ from pathlib import Path
 import torch
 from flask import Flask, render_template, request, jsonify, Response
 
-# Add training directory to path
-TRAINING_DIR = Path(__file__).parent.parent / "training"
-if str(TRAINING_DIR) not in sys.path:
-    sys.path.append(str(TRAINING_DIR))
 
+# Directory for checkpoint copies (persists through garbage collection)
+ELO_CHECKPOINTS_DIR = Path("/tmp/pokersim/elo")
+
+# Add api/python to path for pokersim package
+_API_PYTHON_DIR = Path(__file__).parent.parent / "api" / "python"
+if str(_API_PYTHON_DIR) not in sys.path:
+    sys.path.insert(0, str(_API_PYTHON_DIR))
+
+# Import from consolidated pokersim package and local engine
 try:
-    from engine import PokerEloArena, EloCalculator, parse_checkpoints, select_spread_checkpoints
-    from config import DEFAULT_MODELS_DIR
+    from pokersim import DEFAULT_MODELS_DIR, parse_checkpoints, select_spread_checkpoints
+    from engine import PokerEloArena, EloCalculator
 except ImportError as e:
     try:
-        from elo.engine import PokerEloArena, EloCalculator, parse_checkpoints, select_spread_checkpoints
-        from elo.config import DEFAULT_MODELS_DIR
+        from pokersim import DEFAULT_MODELS_DIR, parse_checkpoints, select_spread_checkpoints
+        from elo.engine import PokerEloArena, EloCalculator
     except ImportError:
         print(f"Error importing modules: {e}")
         sys.exit(1)
@@ -47,6 +53,48 @@ DEVICE = detect_device()
 app = Flask(__name__)
 
 
+def copy_checkpoints_to_tmp(
+    checkpoints: list[tuple[int, Path]]
+) -> list[tuple[int, Path]]:
+    """
+    Copy checkpoints to /tmp/elo to protect against garbage collection.
+    
+    Creates a unique subdirectory for each simulation run to avoid conflicts.
+    Returns list of (iteration, copied_path) tuples.
+    """
+    # Create unique run directory using timestamp
+    run_id = f"run_{int(time.time() * 1000)}"
+    run_dir = ELO_CHECKPOINTS_DIR / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    
+    copied_checkpoints = []
+    for iter_num, orig_path in checkpoints:
+        dest_path = run_dir / orig_path.name
+        try:
+            shutil.copy2(orig_path, dest_path)
+            copied_checkpoints.append((iter_num, dest_path))
+            print(f"Copied checkpoint: {orig_path.name} -> {dest_path}")
+        except Exception as e:
+            print(f"Warning: Failed to copy {orig_path}: {e}")
+            # Fall back to original path if copy fails
+            copied_checkpoints.append((iter_num, orig_path))
+    
+    # Clean up old run directories (keep only the 3 most recent)
+    try:
+        all_runs = sorted(
+            [d for d in ELO_CHECKPOINTS_DIR.iterdir() if d.is_dir() and d.name.startswith("run_")],
+            key=lambda d: d.stat().st_mtime,
+            reverse=True
+        )
+        for old_run in all_runs[3:]:
+            shutil.rmtree(old_run, ignore_errors=True)
+            print(f"Cleaned up old checkpoint cache: {old_run}")
+    except Exception as e:
+        print(f"Warning: Failed to clean up old runs: {e}")
+    
+    return copied_checkpoints
+
+
 class EloJobManager:
     """Manages ELO simulation jobs with real-time streaming."""
     
@@ -62,6 +110,7 @@ class EloJobManager:
         self.arena = None
         self.subscribers = []
         self.lock = threading.Lock()
+        self.current_run_dir = None  # Track current checkpoint cache directory
     
     def subscribe(self) -> queue.Queue:
         """Create a new subscriber queue for SSE."""
@@ -164,6 +213,12 @@ class EloJobManager:
                 print(f"Selected {len(sorted_cps)} spread-out checkpoints (max-distance): {iter_nums}")
             else:
                 print(f"Using all {len(sorted_cps)} checkpoints as participants")
+            
+            # Copy checkpoints to /tmp/elo to protect against garbage collection
+            # This ensures the simulation can continue even if original checkpoints are deleted
+            print(f"Copying {len(sorted_cps)} checkpoints to {ELO_CHECKPOINTS_DIR}...")
+            sorted_cps = copy_checkpoints_to_tmp(sorted_cps)
+            self.current_run_dir = sorted_cps[0][1].parent if sorted_cps else None
             
             # Build participant list
             participants = {}
