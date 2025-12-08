@@ -157,5 +157,16 @@ result = simulator.play_hand(
 This package requires:
 - `torch>=2.0.0`: For neural network operations
 - `numpy>=1.24.0`: For numerical operations
-- `poker_api_binding`: C++ binding (compile with `cd api && make module`)
+- `poker_api_binding`: C++ binding (**REQUIRED** - compile with `cd api && make module`)
+
+## Performance
+
+All performance-critical logic is implemented in C++ for 10-20x speedup:
+- **State encoding** (`RLStateEncoder`): Encodes game state to 167-dim feature vector
+- **Hand strength estimation**: Evaluates hand strength using poker heuristics  
+- **Action conversion**: Converts unified action labels to game actions
+- **Heuristic agents**: All opponent agents (Random, Tight, Aggressive, etc.)
+
+The Python code in this package is now thin wrappers around C++ implementations.
+This eliminates the previous fallback implementations and requires the C++ binding.
 

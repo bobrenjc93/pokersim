@@ -1,368 +1,414 @@
 #!/usr/bin/env python3
-"""
-Poker AI ELO Rating Web Server
-Real-time ELO rating simulation with Server-Sent Events.
-"""
+"""Poker AI ELO Rating Web Server with real-time SSE updates."""
 
-import os
-import sys
 import json
+import os
 import queue
-import threading
-import time
 import random
+import threading
+import traceback
 from pathlib import Path
+from typing import Dict, List, Optional
+
 import torch
-from flask import Flask, render_template, request, jsonify, Response
+from flask import Flask, Response, jsonify, render_template, request
 
-# Import from common package
-from common import DEFAULT_MODELS_DIR
+from common import DEFAULT_MODELS_DIR, parse_checkpoints, select_spread_checkpoints, detect_device
+from engine import PokerEloArena
 
-# Import from local engine
-from engine import PokerEloArena, EloCalculator, parse_checkpoints, select_spread_checkpoints
-
-
-def detect_device() -> str:
-    """Auto-detect the best available compute device."""
-    if torch.cuda.is_available():
-        return "cuda"
-    elif torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
-
-
-# Auto-detect device at startup
-DEVICE = detect_device()
+MAX_CACHED_MODELS = int(os.environ.get('ELO_MAX_CACHED_MODELS', 2))
+DEVICE = str(detect_device())
+ELO_BASE_SEED = os.environ.get("ELO_SEED", "0")
+# Pairing strategy has a big impact on variance and on how quickly ratings stabilize.
+# Default to round-robin so "best checkpoint" is less likely to be an artifact of
+# random opponent sampling / match order.
+ELO_PAIRING = os.environ.get("ELO_PAIRING", "round_robin").lower()  # "random" | "round_robin"
 
 app = Flask(__name__)
 
+def _auto_models_dir(default_dir: str) -> str:
+    """
+    Choose a sensible models directory.
 
-class EloJobManager:
-    """Manages ELO simulation jobs with real-time streaming."""
+    If the provided directory exists and has checkpoints, keep it.
+    Otherwise, fall back to the newest /tmp/pokersim/rl_models_v* directory
+    that contains at least 2 iteration checkpoints.
+
+    This avoids the common footgun where training wrote to v17 but the ELO server
+    default points at v18 (or vice versa), which can make it look like "iter_1 is best"
+    simply because you're evaluating a different run directory.
+    """
+    try:
+        d = Path(default_dir)
+        if d.exists() and parse_checkpoints(d):
+            return str(d)
+    except Exception:
+        pass
+
+    try:
+        root = Path("/tmp/pokersim")
+        if not root.exists():
+            return default_dir
+        candidates = []
+        for p in root.glob("rl_models_v*"):
+            if not p.is_dir():
+                continue
+            cps = parse_checkpoints(p)
+            # Need at least 2 participants for ELO to be meaningful.
+            if len(cps) >= 2:
+                # Prefer newest by mtime.
+                try:
+                    candidates.append((p.stat().st_mtime, p))
+                except Exception:
+                    candidates.append((0.0, p))
+        if not candidates:
+            return default_dir
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        return str(candidates[0][1])
+    except Exception:
+        return default_dir
+
+def _fingerprint_model(model) -> dict:
+    """Return a lightweight, stable-ish fingerprint for debug/verification."""
+    try:
+        params = [p.detach().float().cpu().view(-1) for p in model.parameters()]
+        if not params:
+            return {"n": 0, "l2": 0.0, "mean_abs": 0.0}
+        v = torch.cat(params)
+        return {"n": int(v.numel()), "l2": float(torch.linalg.vector_norm(v).item()), "mean_abs": float(v.abs().mean().item())}
+    except Exception:
+        return {"n": 0, "l2": 0.0, "mean_abs": 0.0}
+
+def _file_identity(path: str) -> dict:
+    try:
+        st = os.stat(path)
+        return {"size": int(st.st_size), "mtime_ns": int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))}
+    except Exception:
+        return {"size": None, "mtime_ns": None}
+
+def _epoch_from_checkpoint(path: str) -> Optional[int]:
+    try:
+        raw = torch.load(path, map_location="cpu", weights_only=False)
+        if isinstance(raw, dict) and "epoch" in raw:
+            return int(raw.get("epoch"))
+    except Exception:
+        return None
+    return None
+
+def _as_int(x, default: int) -> int:
+    try:
+        return int(x)
+    except Exception:
+        return default
+
+def _as_float(x, default: float) -> float:
+    try:
+        return float(x)
+    except Exception:
+        return default
+
+
+class SSEBroadcaster:
+    """Thread-safe SSE broadcaster for real-time updates."""
     
     def __init__(self):
-        self.thread = None
-        self.stop_event = threading.Event()
-        self.status = {
-            "status": "idle",
-            "current_match": "",
-            "matches_played": 0,
-            "total_matches": 0,
-        }
-        self.arena = None
-        self.subscribers = []
-        self.lock = threading.Lock()
+        self._subs: List[queue.Queue] = []
+        self._lock = threading.Lock()
     
     def subscribe(self) -> queue.Queue:
-        """Create a new subscriber queue for SSE."""
-        q = queue.Queue()
-        with self.lock:
-            self.subscribers.append(q)
+        # Keep this bounded so slow/disconnected clients can't grow memory forever.
+        q = queue.Queue(maxsize=1000)
+        with self._lock:
+            self._subs.append(q)
         return q
     
     def unsubscribe(self, q: queue.Queue):
-        """Remove a subscriber."""
-        with self.lock:
-            if q in self.subscribers:
-                self.subscribers.remove(q)
+        with self._lock:
+            if q in self._subs:
+                self._subs.remove(q)
     
-    def broadcast(self, event: dict):
-        """Send event to all subscribers."""
-        with self.lock:
-            for q in self.subscribers:
+    def send(self, event: dict):
+        with self._lock:
+            for q in self._subs:
                 try:
                     q.put_nowait(event)
                 except queue.Full:
-                    pass
+                    # Drop oldest event to make room (best-effort).
+                    try:
+                        q.get_nowait()
+                        q.put_nowait(event)
+                    except Exception:
+                        pass
+
+
+class EloSimulation:
+    """Manages ELO simulation with background execution."""
     
-    def start_job(
-        self, 
-        models_dir: str = DEFAULT_MODELS_DIR,
-        k_factor: float = 40.0,
-        num_models: int = 8
-    ):
-        """
-        Start an ELO simulation job with freezeout matches (1000 chips, 40 BB).
-        Runs indefinitely until explicitly stopped.
-        
-        Args:
-            models_dir: Directory containing model checkpoints
-            k_factor: K-factor for ELO calculations (default 40 for faster rating spread)
-            num_models: Maximum number of model checkpoints to select (default 8)
-        """
-        if self.thread and self.thread.is_alive():
-            return False, "Job already running"
-        
-        self.stop_event.clear()
-        self.status = {
-            "status": "running",
-            "current_match": "Initializing...",
-            "matches_played": 0,
-            "current_round": 0,
-        }
-        
-        self.broadcast({'type': 'job_started', 'device': DEVICE})
-        
-        self.thread = threading.Thread(
-            target=self._run_simulation,
-            args=(models_dir, k_factor, num_models),
-            daemon=True
-        )
-        self.thread.start()
-        return True, "Started"
+    def __init__(self):
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+        self.status = {'status': 'idle', 'current_match': '', 'matches_played': 0}
+        self.arena: Optional[PokerEloArena] = None
+        self.broadcaster = SSEBroadcaster()
+        self._participants: Dict = {}
     
-    def stop_job(self):
-        """Stop the current job. The simulation thread will broadcast final results."""
-        if self.thread and self.thread.is_alive():
-            self.stop_event.set()
+    @property
+    def is_running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+    
+    def start(self, models_dir: str = DEFAULT_MODELS_DIR, k_factor: float = 40.0, num_models: int = 8) -> tuple:
+        if self.is_running:
+            return False, 'Job already running'
+
+        # Only auto-fallback when the caller is using the default models dir.
+        # If the user explicitly requested a directory, do not silently switch
+        # to a different run (that can create the illusion that "iter_1 is best").
+        requested_models_dir = str(models_dir)
+        resolved_models_dir = requested_models_dir
+        if requested_models_dir == str(DEFAULT_MODELS_DIR):
+            resolved_models_dir = _auto_models_dir(requested_models_dir)
+        else:
+            try:
+                cps = parse_checkpoints(Path(requested_models_dir))
+                if len(cps) < 2:
+                    return False, f"Need at least 2 iter_*.pt checkpoints in {requested_models_dir} (found {len(cps)})"
+            except Exception:
+                return False, f"Invalid models_dir: {requested_models_dir}"
+
+        models_dir = resolved_models_dir
+        self._stop.clear()
+        self.status = {'status': 'running', 'current_match': 'Initializing...', 'matches_played': 0}
+        self.broadcaster.send({
+            'type': 'job_started',
+            'device': DEVICE,
+            'models_dir': models_dir,
+            'requested_models_dir': requested_models_dir,
+        })
+        
+        self._thread = threading.Thread(target=self._run, args=(models_dir, k_factor, num_models), daemon=True)
+        self._thread.start()
+        return True, 'Started'
+    
+    def stop(self) -> bool:
+        if self.is_running:
+            self._stop.set()
+            # Best-effort join so a subsequent start doesn't keep stale state around.
+            try:
+                self._thread.join(timeout=2.0)
+            except Exception:
+                pass
             return True
         return False
     
-    def _run_simulation(
-        self, 
-        models_dir_str: str, 
-        k_factor: float,
-        num_models: int
-    ):
-        """Run ELO simulation with freezeout matches (1000 chips, 40 BB).
-        Runs indefinitely until explicitly stopped."""
+    def _load_participants(self, models_dir: str, num_models: int) -> bool:
+        """Load checkpoints as participants."""
+        checkpoints = parse_checkpoints(Path(models_dir))
+        if not checkpoints:
+            self.broadcaster.send({'type': 'error', 'message': f'No checkpoints in {models_dir}'})
+            return False
+        
+        sorted_cps = sorted(checkpoints, key=lambda x: x[0])
+        if len(sorted_cps) > num_models:
+            sorted_cps = select_spread_checkpoints(sorted_cps, num_models)
+        
+        self._participants = {}
+        load_failures: List[Dict[str, str]] = []
+        warnings: List[Dict[str, str]] = []
+        for iter_num, path in sorted_cps:
+            pid = 'baseline' if iter_num == -1 else f'iter_{iter_num}'
+            name = 'Baseline' if iter_num == -1 else f'Iter_{iter_num}'
+            cfg = {
+                'type': 'model',
+                'path': str(path),
+                'name': name,
+                'iteration': iter_num,
+                # Default to deterministic action selection for stable ELO.
+                'deterministic': True,
+            }
+            # Proactively verify checkpoint loads; drop it if not.
+            model, err = self.arena._cache.get_with_error(cfg['path'])
+            if model is None:
+                load_failures.append({'player_id': pid, 'path': cfg['path'], 'error': err or 'Unknown load error'})
+                continue
+            # Attach identity + fingerprint so the UI/logs can confirm we're evaluating distinct checkpoints.
+            cfg["file"] = _file_identity(cfg["path"])
+            cfg["fingerprint"] = _fingerprint_model(model)
+            # Optional: warn if checkpoint metadata epoch doesn't match filename iteration (iter checkpoints only).
+            if iter_num >= 0:
+                epoch = _epoch_from_checkpoint(cfg["path"])
+                if epoch is not None and epoch not in (-1, iter_num):
+                    warnings.append({
+                        "player_id": pid,
+                        "path": cfg["path"],
+                        "message": f"epoch mismatch: ckpt['epoch']={epoch} but filename iter={iter_num}",
+                    })
+            cfg['model'] = model
+            self._participants[pid] = cfg
+            self.arena.get_or_create_rating(pid)
+
+        if load_failures:
+            # Surface to UI (and logs) so silent load failures don't bias results.
+            self.broadcaster.send({'type': 'checkpoint_load_failures', 'failures': load_failures})
+        if warnings:
+            self.broadcaster.send({'type': 'checkpoint_warnings', 'warnings': warnings})
+        
+        return len(self._participants) >= 2
+    
+    def _get_leaderboard(self) -> list:
+        return sorted([
+            {'player_id': pid, 'name': self._participants.get(pid, {}).get('name', pid), **self.arena.ratings[pid].to_dict()}
+            for pid in self.arena.ratings
+        ], key=lambda x: x['rating'], reverse=True)
+    
+    def _run_match(self, pid_a: str, pid_b: str, match_num: int, round_num: int) -> bool:
+        """Play a single match and broadcast results."""
+        cfg_a, cfg_b = self._participants[pid_a], self._participants[pid_b]
+        
+        self.status['matches_played'] = match_num
+        self.status['current_match'] = f"{cfg_a['name']} vs {cfg_b['name']}"
+        
+        self.broadcaster.send({
+            'type': 'match_started', 'match_num': match_num, 'round': round_num,
+            'player_a': pid_a, 'player_b': pid_b,
+            'name_a': cfg_a['name'], 'name_b': cfg_b['name'],
+            'rating_a': self.arena.ratings[pid_a].rating,
+            'rating_b': self.arena.ratings[pid_b].rating,
+        })
+        
         try:
+            result = self.arena.play_match(pid_a, pid_b, cfg_a, cfg_b)
+            if result.get('error'):
+                return False
+            
+            winner = 'a' if result['score_a'] == 1.0 else ('b' if result['score_a'] == 0.0 else 'draw')
+            self.broadcaster.send({
+                'type': 'match_complete', 'match_num': match_num, 'round': round_num,
+                'player_a': pid_a, 'player_b': pid_b,
+                'name_a': cfg_a['name'], 'name_b': cfg_b['name'], 'winner': winner,
+                **{k: result[k] for k in [
+                    'rounds_played', 'round_wins_a', 'round_wins_b', 'hands_played',
+                    'hand_wins_a', 'hand_wins_b', 'score_a', 'old_rating_a', 'old_rating_b',
+                    'new_rating_a', 'new_rating_b', 'rating_change_a', 'rating_change_b'
+                ]}
+            })
+            return True
+        except Exception as e:
+            print(f'Match error: {e}')
+            return False
+    
+    def _run(self, models_dir: str, k_factor: float, num_models: int):
+        """Main simulation loop."""
+        try:
+            base_seed = None
+            try:
+                # Default to deterministic evaluation unless explicitly disabled.
+                base_seed = None if str(ELO_BASE_SEED).lower() in ("none", "off", "false") else int(ELO_BASE_SEED)
+            except Exception:
+                base_seed = 0
             self.arena = PokerEloArena(
                 device=DEVICE,
-                k_factor=k_factor
+                k_factor=k_factor,
+                max_cached_models=MAX_CACHED_MODELS,
+                base_seed=base_seed,
             )
             
-            models_dir = Path(models_dir_str)
-            checkpoints = parse_checkpoints(models_dir)
-            
-            if not checkpoints:
-                self.status["status"] = "error"
-                self.status["current_match"] = f"No checkpoints found in {models_dir}"
-                self.broadcast({
-                    'type': 'error',
-                    'message': f"No checkpoints found in {models_dir}"
-                })
+            if not self._load_participants(models_dir, num_models):
+                self.broadcaster.send({'type': 'error', 'message': 'Need at least 2 participants'})
                 return
             
-            sorted_cps = sorted(checkpoints, key=lambda x: x[0])
-            
-            # Select checkpoints with spread-out coverage across training history
-            # Uses farthest-first selection to maximize iteration distance between models
-            if len(sorted_cps) > num_models:
-                sorted_cps = select_spread_checkpoints(sorted_cps, num_models)
-                iter_nums = [cp[0] for cp in sorted_cps]
-                print(f"Selected {len(sorted_cps)} spread-out checkpoints (max-distance): {iter_nums}")
-            else:
-                print(f"Using all {len(sorted_cps)} checkpoints as participants")
-            
-            # Build participant list
-            participants = {}
-            
-            # Add model checkpoints
-            for iter_num, path in sorted_cps:
-                # Use special naming for baseline model (iter_num == -1)
-                if iter_num == -1:
-                    player_id = "baseline"
-                    name = "Baseline"
-                else:
-                    player_id = f"iter_{iter_num}"
-                    name = f"Iter_{iter_num}"
-                
-                participants[player_id] = {
-                    'type': 'model',
-                    'path': str(path),
-                    'name': name,
-                    'is_bot': False,
-                    'iteration': iter_num
-                }
-                # Initialize rating
-                self.arena.get_or_create_rating(player_id)
-            
-            player_ids = list(participants.keys())
-            num_players = len(player_ids)
-            
-            if num_players < 2:
-                self.broadcast({
-                    'type': 'error',
-                    'message': 'Need at least 2 participants'
-                })
-                return
-            
-            # Broadcast simulation start
-            self.broadcast({
-                'type': 'simulation_started',
-                'num_checkpoints': len(participants),
-                'total_participants': num_players,
-                'k_factor': k_factor,
+            player_ids = list(self._participants.keys())
+            self.broadcaster.send({
+                'type': 'simulation_started', 'num_checkpoints': len(self._participants), 'k_factor': k_factor,
                 'participants': {
                     pid: {
                         'name': p['name'],
-                        'initial_rating': self.arena.ratings[pid].rating
+                        'iteration': p.get('iteration'),
+                        'initial_rating': self.arena.ratings[pid].rating,
+                        'fingerprint': p.get('fingerprint'),
+                        'file': p.get('file'),
                     }
-                    for pid, p in participants.items()
+                    for pid, p in self._participants.items()
                 }
             })
             
-            match_num = 0
-            round_num = 0
+            match_num = round_num = 0
             
-            # Run indefinitely until stopped
-            while not self.stop_event.is_set():
+            while not self._stop.is_set():
                 round_num += 1
                 self.status['current_round'] = round_num
                 
-                # Shuffle players for random pairings
-                shuffled = player_ids.copy()
-                random.shuffle(shuffled)
+                if ELO_PAIRING == "round_robin":
+                    # Every pair plays once per round (order is stable for reproducibility).
+                    for i in range(len(player_ids)):
+                        for j in range(i + 1, len(player_ids)):
+                            if self._stop.is_set():
+                                break
+                            match_num += 1
+                            self._run_match(player_ids[i], player_ids[j], match_num, round_num)
+                        if self._stop.is_set():
+                            break
+                else:
+                    # Default: random pairings each round (faster, but higher variance).
+                    shuffled = player_ids.copy()
+                    random.shuffle(shuffled)
+                    for i in range(0, len(shuffled) - 1, 2):
+                        if self._stop.is_set():
+                            break
+                        match_num += 1
+                        self._run_match(shuffled[i], shuffled[i + 1], match_num, round_num)
                 
-                # Pair up players
-                for i in range(0, len(shuffled) - 1, 2):
-                    if self.stop_event.is_set():
-                        break
-                    
-                    player_a_id = shuffled[i]
-                    player_b_id = shuffled[i + 1]
-                    
-                    config_a = participants[player_a_id]
-                    config_b = participants[player_b_id]
-                    
-                    match_num += 1
-                    self.status['matches_played'] = match_num
-                    self.status['current_match'] = f"{config_a['name']} vs {config_b['name']}"
-                    
-                    self.broadcast({
-                        'type': 'match_started',
-                        'match_num': match_num,
-                        'round': round_num,
-                        'player_a': player_a_id,
-                        'player_b': player_b_id,
-                        'name_a': config_a['name'],
-                        'name_b': config_b['name'],
-                        'rating_a': self.arena.ratings[player_a_id].rating,
-                        'rating_b': self.arena.ratings[player_b_id].rating,
-                    })
-                    
-                    try:
-                        result = self.arena.play_match(
-                            player_a_id, player_b_id,
-                            config_a, config_b
-                        )
-                        
-                        if result.get('error'):
-                            continue
-                        
-                        # Broadcast match result (best-of-9 rounds)
-                        self.broadcast({
-                            'type': 'match_complete',
-                            'match_num': match_num,
-                            'round': round_num,
-                            'player_a': player_a_id,
-                            'player_b': player_b_id,
-                            'name_a': config_a['name'],
-                            'name_b': config_b['name'],
-                            'rounds_played': result['rounds_played'],
-                            'round_wins_a': result['round_wins_a'],
-                            'round_wins_b': result['round_wins_b'],
-                            'hands_played': result['hands_played'],
-                            'hand_wins_a': result['hand_wins_a'],
-                            'hand_wins_b': result['hand_wins_b'],
-                            'score_a': result['score_a'],
-                            'winner': 'a' if result['score_a'] == 1.0 else ('b' if result['score_a'] == 0.0 else 'draw'),
-                            'old_rating_a': result['old_rating_a'],
-                            'old_rating_b': result['old_rating_b'],
-                            'new_rating_a': result['new_rating_a'],
-                            'new_rating_b': result['new_rating_b'],
-                            'rating_change_a': result['rating_change_a'],
-                            'rating_change_b': result['rating_change_b'],
-                        })
-                        
-                    except Exception as e:
-                        print(f"Error in match: {e}")
-                        self.broadcast({'type': 'error', 'message': str(e)})
-                
-                # Broadcast round complete with full leaderboard
-                self.broadcast({
-                    'type': 'round_complete',
-                    'round': round_num,
-                    'leaderboard': self._get_leaderboard_data(participants),
-                    'rating_histories': self._get_rating_histories()
+                self.broadcaster.send({
+                    'type': 'round_complete', 'round': round_num,
+                    'leaderboard': self._get_leaderboard(),
+                    'rating_histories': {pid: r.history for pid, r in self.arena.ratings.items()}
                 })
             
-            # Stopped by user
-            self.status["status"] = "stopped"
-            self.status["current_match"] = "Stopped"
-            self.broadcast({
-                'type': 'job_stopped',
-                'total_rounds': round_num,
-                'total_matches': match_num,
-                'leaderboard': self._get_leaderboard_data(participants),
-                'rating_histories': self._get_rating_histories()
+            self.status.update({'status': 'stopped', 'current_match': 'Stopped'})
+            self.broadcaster.send({
+                'type': 'job_stopped', 'total_rounds': round_num, 'total_matches': match_num,
+                'leaderboard': self._get_leaderboard(),
+                'rating_histories': {pid: r.history for pid, r in self.arena.ratings.items()}
             })
                 
         except Exception as e:
-            print(f"Job failed: {e}")
-            import traceback
             traceback.print_exc()
-            self.status["status"] = "error"
-            self.status["current_match"] = f"Error: {str(e)}"
-            self.broadcast({'type': 'error', 'message': str(e)})
-    
-    def _get_leaderboard_data(self, participants: dict) -> list:
-        """Get leaderboard data with participant info."""
-        leaderboard = []
-        for player_id, rating in self.arena.ratings.items():
-            participant = participants.get(player_id, {})
-            leaderboard.append({
-                'player_id': player_id,
-                'name': participant.get('name', player_id),
-                'rating': rating.rating,
-                'games_played': rating.games_played,
-                'wins': rating.wins,
-                'losses': rating.losses,
-                'draws': rating.draws,
-                'win_rate': rating.wins / rating.games_played if rating.games_played > 0 else 0
-            })
-        return sorted(leaderboard, key=lambda x: x['rating'], reverse=True)
-    
-    def _get_rating_histories(self) -> dict:
-        """Get rating history for all players."""
-        histories = {}
-        for player_id, rating in self.arena.ratings.items():
-            histories[player_id] = rating.rating_history
-        return histories
+            self.status.update({'status': 'error', 'current_match': f'Error: {e}'})
+            self.broadcaster.send({'type': 'error', 'message': str(e)})
 
 
-job_manager = EloJobManager()
+# Global simulation instance
+simulation = EloSimulation()
 
 
+# Flask Routes
 @app.route('/')
 def index():
-    """Serve the main UI."""
     return render_template('index.html')
 
 
 @app.route('/api/status')
 def get_status():
-    """Get current job status."""
-    return jsonify(job_manager.status)
+    return jsonify(simulation.status)
 
 
 @app.route('/api/config')
 def get_config():
-    """Get server configuration."""
-    return jsonify({'device': DEVICE})
+    return jsonify({'device': DEVICE, 'default_models_dir': str(_auto_models_dir(DEFAULT_MODELS_DIR))})
 
 
 @app.route('/api/start', methods=['POST'])
-def start_job():
-    """Start an ELO simulation job with freezeout matches (1000 chips, 40 BB).
-    Runs indefinitely until explicitly stopped."""
+def start_simulation():
     data = request.json or {}
-    models_dir = data.get('models_dir', DEFAULT_MODELS_DIR)
-    k_factor = data.get('k_factor', 40.0)
-    num_models = data.get('num_models', 8)
-    
-    success, msg = job_manager.start_job(
+    models_dir = str(data.get('models_dir', DEFAULT_MODELS_DIR))
+    k_factor = _as_float(data.get('k_factor', 40.0), 40.0)
+    num_models = _as_int(data.get('num_models', 8), 8)
+
+    if k_factor <= 0:
+        return jsonify({'success': False, 'message': 'k_factor must be > 0'}), 400
+    if num_models < 2:
+        return jsonify({'success': False, 'message': 'num_models must be >= 2'}), 400
+
+    success, msg = simulation.start(
         models_dir=models_dir,
         k_factor=k_factor,
         num_models=num_models
@@ -371,20 +417,17 @@ def start_job():
 
 
 @app.route('/api/stop', methods=['POST'])
-def stop_job():
-    """Stop the current job."""
-    success = job_manager.stop_job()
-    return jsonify({'success': success})
+def stop_simulation():
+    return jsonify({'success': simulation.stop()})
 
 
 @app.route('/api/stream')
 def stream():
-    """Server-Sent Events endpoint for real-time updates."""
+    """SSE endpoint for real-time updates."""
     def generate():
-        q = job_manager.subscribe()
+        q = simulation.broadcaster.subscribe()
         try:
-            yield f"data: {json.dumps({'type': 'status', **job_manager.status})}\n\n"
-            
+            yield f"data: {json.dumps({'type': 'status', **simulation.status})}\n\n"
             while True:
                 try:
                     event = q.get(timeout=30)
@@ -394,24 +437,15 @@ def stream():
         except GeneratorExit:
             pass
         finally:
-            job_manager.unsubscribe(q)
+            simulation.broadcaster.unsubscribe(q)
     
-    return Response(
-        generate(),
-        mimetype='text/event-stream',
-        headers={
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-            'X-Accel-Buffering': 'no'
-        }
-    )
+    return Response(generate(), mimetype='text/event-stream', headers={'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no'})
 
 
 def main():
-    """Run the web server."""
     port = int(os.environ.get('PORT', 5051))
-    print(f"Starting Poker ELO Server on http://localhost:{port}")
-    print(f"Detected compute device: {DEVICE}")
+    print(f'Starting Poker ELO Server on http://localhost:{port}')
+    print(f'Device: {DEVICE}, Max cached models: {MAX_CACHED_MODELS}')
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
 
 

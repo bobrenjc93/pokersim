@@ -64,16 +64,20 @@ echo ""
 
 echo "📋 Part 4: Arena Tests"
 echo "---------------------"
-cd "$SCRIPT_DIR/arena"
+if [ -d "$SCRIPT_DIR/arena" ]; then
+    cd "$SCRIPT_DIR/arena"
 
-if command -v uv &> /dev/null; then
-    # Run arena tests
-    uv run --with pytest pytest tests/
-elif command -v pytest &> /dev/null; then
-    echo "⚠️  uv not found, trying system pytest..."
-    pytest tests/
+    if command -v uv &> /dev/null; then
+        # Run arena tests
+        uv run --with pytest pytest tests/
+    elif command -v pytest &> /dev/null; then
+        echo "⚠️  uv not found, trying system pytest..."
+        pytest tests/
+    else
+        echo "⚠️  Skipping Arena tests: uv not found and pytest not in PATH"
+    fi
 else
-    echo "⚠️  Skipping Arena tests: uv not found and pytest not in PATH"
+    echo "⚠️  Skipping Arena tests: arena/ directory not found"
 fi
 echo ""
 

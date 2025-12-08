@@ -714,7 +714,7 @@ wheels = [
 
 [[package]]
 name = "pokersim-common"
-version = "0.1.0"
+version = "0.1.2"
 source = { directory = "../common" }
 dependencies = [
     { name = "numpy", version = "2.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
@@ -732,8 +732,8 @@ requires-dist = [
 
 [[package]]
 name = "pokersim-elo"
-version = "0.1.0"
-source = { virtual = "." }
+version = "0.1.1"
+source = { editable = "." }
 dependencies = [
     { name = "flask" },
     { name = "numpy", version = "2.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },

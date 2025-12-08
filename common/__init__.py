@@ -9,7 +9,22 @@ This package provides:
 - simulation: Core poker game simulation engine
 """
 
-from .config import MODEL_VERSION, DEFAULT_MODELS_DIR, LOG_LEVEL
+from .config import (
+    MODEL_VERSION,
+    DEFAULT_MODELS_DIR,
+    LOG_LEVEL,
+    detect_device,
+    # ELO arena configuration
+    ELO_STARTING_STACK,
+    ELO_BIG_BLIND,
+    ELO_SMALL_BLIND,
+    ELO_ROUNDS_PER_MATCH,
+    ELO_MAX_HANDS_PER_ROUND,
+    ELO_WIN_THRESHOLD,
+    # Reward structure
+    DEFAULT_HAND_REWARD_SCALE,
+    DEFAULT_MATCH_WIN_BONUS,
+)
 
 from .model_agent import (
     ACTION_MAP,
@@ -33,6 +48,9 @@ from .model_agent import (
     AlwaysCallAgent,
     AlwaysFoldAgent,
     load_model_agent,
+    # Agent registry
+    AGENT_CLASSES,
+    create_agent,
 )
 
 from .rl_state_encoder import (
@@ -57,6 +75,7 @@ from .simulation import (
     GameConfig,
     PokerSimulator,
     DirectGameSimulator,
+    play_hand_direct,
     HandLogger,
     DEFAULT_HAND_LOGS_DIR,
     DEFAULT_HAND_LOG_FREQUENCY,
@@ -65,11 +84,30 @@ from .simulation import (
     call_poker_api,
 )
 
+from .checkpoint_utils import (
+    parse_checkpoints,
+    select_spread_checkpoints,
+    get_spread_checkpoint_paths,
+)
+
+from .model_cache import ModelCache
+
 __all__ = [
     # config
     "MODEL_VERSION",
     "DEFAULT_MODELS_DIR",
     "LOG_LEVEL",
+    "detect_device",
+    # ELO arena configuration
+    "ELO_STARTING_STACK",
+    "ELO_BIG_BLIND",
+    "ELO_SMALL_BLIND",
+    "ELO_ROUNDS_PER_MATCH",
+    "ELO_MAX_HANDS_PER_ROUND",
+    "ELO_WIN_THRESHOLD",
+    # Reward structure
+    "DEFAULT_HAND_REWARD_SCALE",
+    "DEFAULT_MATCH_WIN_BONUS",
     # model_agent
     "ACTION_MAP",
     "ACTION_NAMES",
@@ -92,6 +130,8 @@ __all__ = [
     "AlwaysCallAgent",
     "AlwaysFoldAgent",
     "load_model_agent",
+    "AGENT_CLASSES",
+    "create_agent",
     # rl_state_encoder
     "RANK_MAP",
     "SUIT_MAP",
@@ -110,11 +150,18 @@ __all__ = [
     "GameConfig",
     "PokerSimulator",
     "DirectGameSimulator",
+    "play_hand_direct",
     "HandLogger",
     "DEFAULT_HAND_LOGS_DIR",
     "DEFAULT_HAND_LOG_FREQUENCY",
     "check_binding_available",
     "create_binding_config",
     "call_poker_api",
+    # checkpoint_utils
+    "parse_checkpoints",
+    "select_spread_checkpoints",
+    "get_spread_checkpoint_paths",
+    # model_cache
+    "ModelCache",
 ]
 

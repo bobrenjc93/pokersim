@@ -2,6 +2,7 @@ import json
 import os
 import sys
 import unittest
+from pathlib import Path
 
 # Ensure we can import the binding
 # Adjust path as needed if running from different directories
@@ -10,14 +11,17 @@ try:
 except ImportError:
     # Try to find it in expected locations
     # api/tests/../../training -> root/training
-    sys.path.append(os.path.join(os.path.dirname(__file__), '../../training'))
+    sys.path.append(str((Path(__file__).resolve().parent / "../../training").resolve()))
     try:
         import poker_api_binding
     except ImportError:
-        print("Warning: poker_api_binding not found. Tests will fail if not in path.")
+        poker_api_binding = None
 
 class TestStatefulAPI(unittest.TestCase):
     def setUp(self):
+        if poker_api_binding is None:
+            self.skipTest("poker_api_binding not found (build the pybind module via `make module` first)")
+
         self.config = poker_api_binding.GameConfig()
         self.config.smallBlind = 10
         self.config.bigBlind = 20
@@ -77,5 +81,9 @@ class TestStatefulAPI(unittest.TestCase):
         self.assertIn('pot', data)
         self.assertIn('players', data)
 
-if __name__ == '__main__':
+def main() -> None:
+    """Console entrypoint (used by api/pyproject.toml scripts)."""
     unittest.main()
+
+if __name__ == '__main__':
+    main()

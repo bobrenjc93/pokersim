@@ -1,260 +1,150 @@
 #!/usr/bin/env python3
-"""
-Evaluation Script - Play Against Random Agent
-
-This script evaluates a trained model by:
-1. Loading the trained model
-2. Playing hands against a random agent
-3. Computing performance metrics (win rate, profit)
-
-Prerequisites:
-- Trained model (from train.py)
-
-Usage:
-    python eval.py --model /tmp/pokersim/models/poker_model.pt
-    python eval.py --model /tmp/pokersim/models/poker_model.pt --num-hands 100 --num-players 2
-"""
+"""Evaluate trained poker models against opponents."""
 
 import argparse
+from dataclasses import dataclass
 import sys
-import random
 import time
-import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
-
-try:
-    import orjson as json
-except ImportError:
-    import json
+from typing import Dict
 
 import torch
 
-# Import from common package - shared simulation and agent logic
-from common import (
-    ModelAgent,
-    RandomAgent,
-    extract_state,
-    GameConfig,
-    PokerSimulator,
-    check_binding_available,
-)
+from common import ModelAgent, GameConfig, PokerSimulator, detect_device, AGENT_CLASSES, create_agent
 
 
-class GameEvaluator:
-    """
-    Evaluates agents by playing games via the API.
-    
-    Uses common.simulation.PokerSimulator for the core game logic.
-    """
-    
-    def __init__(self):
-        self.simulator = None
-    
-    def check_server(self) -> bool:
-        """Check if API binding is working"""
-        return check_binding_available()
+@dataclass(frozen=True)
+class EvalConfig:
+    model: str
+    num_hands: int = 100
+    opponent: str = "random"
+    small_blind: int = 10
+    big_blind: int = 20
+    starting_chips: int = 1000
+    verbose: bool = False
+    device: str = "auto"  # auto|cpu|cuda|mps
 
-    def play_hand(
-        self,
-        agents: List[Any],
-        config: Dict[str, Any],
-        verbose: bool = False
-    ) -> Dict[str, Any]:
-        """
-        Play a single hand using the common simulator.
-        
-        Args:
-            agents: List of agent objects (must have player_id and select_action method)
-            config: Game configuration
-            verbose: Print detailed progress
-            
-        Returns:
-            Dictionary with hand results (rewards, etc.)
-        """
-        # Create simulator with the given config
-        sim_config = GameConfig(
-            num_players=len(agents),
-            small_blind=config.get('smallBlind', 10),
-            big_blind=config.get('bigBlind', 20),
-            starting_chips=config.get('startingChips', 1000),
-            min_players=config.get('minPlayers', 2),
-            max_players=config.get('maxPlayers', 2),
-            seed=config.get('seed')
+    @property
+    def game_config(self) -> GameConfig:
+        return GameConfig(
+            small_blind=self.small_blind,
+            big_blind=self.big_blind,
+            starting_chips=self.starting_chips,
         )
-        simulator = PokerSimulator(sim_config)
-        
-        # Convert agent list to dict
-        agents_dict = {agent.player_id: agent for agent in agents}
-        
-        # Verbose callback
-        def on_action(player_id, action_type, amount, action_label, game_state):
-            if verbose:
-                agent = agents_dict.get(player_id)
-                name = agent.name if agent else player_id
-                print(f"  {name}: {action_label} ({amount})")
-        
-        # Play the hand using common simulator
-        result = simulator.play_hand(
-            agents=agents_dict,
-            on_action=on_action if verbose else None
-        )
-        
-        if not result.get('success'):
-            return {'success': False, 'error': result.get('error')}
-        
-        return {
-            'success': True,
-            'rewards': result.get('profits', {}),
-            'steps': result.get('hands_played', 1)
-        }
+
+    def resolve_device(self) -> torch.device:
+        return detect_device() if self.device == "auto" else torch.device(self.device)
 
 
-def play_vs_random(
+def evaluate(
     model_path: str,
     num_hands: int = 100,
-    num_players: int = 2,
-    small_blind: int = 10,
-    big_blind: int = 20,
-    starting_chips: int = 1000,
-    verbose: bool = False,
-    device_name: str = "cpu"
-) -> Dict[str, Any]:
-    """
-    Play hands against random agent(s).
-    """
-    # Setup device
-    if device_name == "cuda" and torch.cuda.is_available():
-        device = torch.device("cuda")
-    elif device_name == "mps" and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        device = torch.device("mps")
-    else:
-        device = torch.device("cpu")
-        
-    print(f"Using device: {device}")
+    opponent_type: str = 'random',
+    game_config: GameConfig = None,
+    device: torch.device = None,
+    verbose: bool = False
+) -> Dict:
+    """Evaluate a trained model against an opponent."""
+    device = device or detect_device()
+    config = game_config or GameConfig()
     
-    evaluator = GameEvaluator()
-    
-    if not evaluator.check_server():
-        print(f"✗ Error: Binding check failed.")
-        return {}
-    
-    print(f"✓ Binding check passed")
-    print(f"  Playing {num_hands} hands with {num_players} players")
-    
-    # Track statistics
-    model_id = "p0"
-    stats = {
-        'hands_played': 0,
-        'hands_won': 0,
-        'hands_lost': 0,
-        'hands_tied': 0,
-        'total_profit': 0,
-        'profits': []
-    }
-    
-    # Create agents (load model once)
-    agents_pool = []
-    
-    # Model agent is player 0
     try:
-        model_agent = ModelAgent(
-            player_id=model_id,
-            name="ModelAgent",
-            model_path=model_path,
-            device=device,
-            deterministic=True  # Use deterministic actions for evaluation
-        )
-        agents_pool.append(model_agent)
+        model_agent = ModelAgent('p0', 'Model', model_path=model_path, device=device, deterministic=True)
     except Exception as e:
         print(f"Error loading model: {e}")
         return {}
     
-    # Random agents
-    for i in range(1, num_players):
-        random_agent = RandomAgent(f"p{i}", f"RandomAgent{i}")
-        agents_pool.append(random_agent)
+    opponent = create_agent(opponent_type, 'p1')
+    if not opponent:
+        print(f"Unknown opponent: {opponent_type}")
+        return {}
     
-    start_time = time.time()
+    print(f"✓ Evaluating vs {opponent_type} for {num_hands} hands on {device}")
     
-    for hand_num in range(num_hands):
-        # Use the agents pool
-        agents = agents_pool
+    sim = PokerSimulator(config)
+    agents = {'p0': model_agent, 'p1': opponent}
+    stats = {'hands_played': 0, 'hands_won': 0, 'hands_lost': 0, 'hands_tied': 0, 'total_profit': 0}
+    
+    start = time.time()
+    
+    for i in range(num_hands):
+        result = sim.play_hand(agents)
         
-        # Game config
-        config = {
-            'smallBlind': small_blind,
-            'bigBlind': big_blind,
-            'startingChips': starting_chips,
-            'minPlayers': num_players,
-            'maxPlayers': num_players,
-            'seed': random.randint(0, 1000000)
-        }
-        
-        # Play hand
-        result = evaluator.play_hand(agents, config, verbose)
-        
-        if not result['success']:
-            print(f"Error in hand {hand_num+1}: {result.get('error')}")
+        if not result.get('success'):
+            if verbose:
+                print(f"Error in hand {i+1}: {result.get('error')}")
             continue
-            
-        # Update stats
-        profit = result['rewards'].get(model_id, 0)
-        stats['total_profit'] += profit
-        stats['profits'].append(profit)
-        stats['hands_played'] += 1
         
-        if profit > 0:
-            stats['hands_won'] += 1
-        elif profit < 0:
-            stats['hands_lost'] += 1
-        else:
-            stats['hands_tied'] += 1
-            
-        # Progress
-        if (hand_num + 1) % 10 == 0:
-            elapsed = time.time() - start_time
-            rate = (hand_num + 1) / elapsed
-            eta = (num_hands - hand_num - 1) / rate if rate > 0 else 0
-            win_rate = stats['hands_won'] / stats['hands_played'] * 100
-            avg_profit = stats['total_profit'] / stats['hands_played']
-            print(f"  Hand {hand_num+1}/{num_hands} | Win Rate: {win_rate:.1f}% | Avg Profit: {avg_profit:.1f} | ETA: {eta:.0f}s")
-
+        profit = result.get('profits', {}).get('p0', 0)
+        stats['total_profit'] += profit
+        stats['hands_played'] += 1
+        stats['hands_won'] += profit > 0
+        stats['hands_lost'] += profit < 0
+        stats['hands_tied'] += profit == 0
+        
+        if (i + 1) % 10 == 0 and stats['hands_played'] > 0:
+            n = stats['hands_played']
+            elapsed = time.time() - start
+            win_rate = stats['hands_won'] / n * 100
+            avg_profit = stats['total_profit'] / n
+            eta = (num_hands - i - 1) / ((i + 1) / elapsed) if elapsed > 0 else 0
+            print(f"  Hand {i+1}/{num_hands} | Win: {win_rate:.1f}% | Avg: {avg_profit:.1f} | ETA: {eta:.0f}s")
+    
     return stats
 
 
+def parse_args() -> EvalConfig:
+    p = argparse.ArgumentParser(description="Evaluate Poker AI Model")
+    p.add_argument('--model', type=str, required=True, help="Path to model checkpoint")
+    p.add_argument('--num-hands', type=int, default=100)
+    p.add_argument('--opponent', type=str, default='random', choices=list(AGENT_CLASSES.keys()))
+    p.add_argument('--small-blind', type=int, default=10)
+    p.add_argument('--big-blind', type=int, default=20)
+    p.add_argument('--starting-chips', type=int, default=1000)
+    p.add_argument('--verbose', action='store_true')
+    p.add_argument('--device', type=str, default='auto', choices=['auto', 'cpu', 'cuda', 'mps'])
+    a = p.parse_args()
+    return EvalConfig(
+        model=a.model,
+        num_hands=a.num_hands,
+        opponent=a.opponent,
+        small_blind=a.small_blind,
+        big_blind=a.big_blind,
+        starting_chips=a.starting_chips,
+        verbose=a.verbose,
+        device=a.device,
+    )
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Evaluate Poker AI Model")
-    parser.add_argument('--model', type=str, required=True, help='Path to model checkpoint')
-    parser.add_argument('--num-hands', type=int, default=100, help='Number of hands to play')
-    parser.add_argument('--num-players', type=int, default=2, help='Number of players')
-    parser.add_argument('--verbose', action='store_true', help='Verbose output')
-    parser.add_argument('--device', type=str, default='cpu', choices=['cpu', 'cuda', 'mps'], help='Device to use')
-    
-    args = parser.parse_args()
-    
-    model_path = Path(args.model)
-    if not model_path.exists():
-        print(f"Error: Model file not found: {model_path}")
+    cfg = parse_args()
+
+    if not Path(cfg.model).exists():
+        print(f"Model not found: {cfg.model}")
         return 1
-        
-    stats = play_vs_random(
-        model_path=str(model_path),
-        num_hands=args.num_hands,
-        num_players=args.num_players,
-        verbose=args.verbose,
-        device_name=args.device
+
+    device = cfg.resolve_device()
+    stats = evaluate(
+        model_path=str(cfg.model),
+        num_hands=cfg.num_hands,
+        opponent_type=cfg.opponent,
+        game_config=cfg.game_config,
+        device=device,
+        verbose=cfg.verbose
     )
     
-    if stats:
-        print("\nEvaluation Complete!")
-        print(f"Hands Played: {stats['hands_played']}")
-        print(f"Win Rate: {stats['hands_won'] / stats['hands_played'] * 100:.2f}%")
-        print(f"Total Profit: {stats['total_profit']}")
-        print(f"Avg Profit/Hand: {stats['total_profit'] / stats['hands_played']:.2f}")
-        return 0
-    else:
+    if not stats or stats['hands_played'] == 0:
+        print("Evaluation failed")
         return 1
+    
+    n = stats['hands_played']
+    print(f"\n{'='*50}\nResults\n{'='*50}")
+    print(f"Hands: {n}")
+    print(f"Win Rate: {stats['hands_won'] / n * 100:.2f}%")
+    print(f"W/L/T: {stats['hands_won']}/{stats['hands_lost']}/{stats['hands_tied']}")
+    print(f"Total Profit: {stats['total_profit']}")
+    print(f"Avg Profit: {stats['total_profit'] / n:.2f}")
+    return 0
 
 
 if __name__ == "__main__":

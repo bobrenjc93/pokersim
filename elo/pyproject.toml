@@ -1,6 +1,6 @@
 [project]
 name = "pokersim-elo"
-version = "0.1.0"
+version = "0.1.1"
 description = "ELO rating simulation system for Poker AI models"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -13,7 +13,14 @@ dependencies = [
 ]
 
 [project.scripts]
-poker-elo = "elo:main"
+poker-elo = "server:main"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["engine", "server"]
 
 [tool.uv.sources]
 pokersim-common = { path = "../common" }

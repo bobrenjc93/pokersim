@@ -675,3 +675,4 @@ class RLStateEncoder:
         # Hand strength: 1
         return 34 + 85 + 5 + 5 + 6 + 5 + 26 + 1  # = 167
 
+

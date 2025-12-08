@@ -1,6 +1,6 @@
 [project]
 name = "pokersim-common"
-version = "0.1.0"
+version = "0.1.2"
 description = "Common utilities for Poker AI training and evaluation"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -16,4 +16,6 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = ["common"]
 package-dir = {"common" = "."}
+
+
 

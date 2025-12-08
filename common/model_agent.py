@@ -16,7 +16,7 @@ from pathlib import Path
 import random
 
 from .rl_state_encoder import RLStateEncoder
-from .rl_model import PokerActorCritic
+from .rl_model import PokerActorCritic, create_actor_critic
 
 
 # Unified action space - bet and raise consolidated into "raise" (contextually becomes bet or raise)
@@ -268,67 +268,18 @@ class ModelAgent:
     
     def _load_model(self, model_path: str) -> Tuple[PokerActorCritic, RLStateEncoder]:
         """Load trained model from checkpoint"""
-        # weights_only=False is required to load checkpoints with numpy scalars
-        checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
-        
-        # Get model configuration from checkpoint
-        # NOTE: RLStateEncoder produces 167 features, NOT 155!
-        input_dim = checkpoint.get('input_dim', 167)  # Must match RLStateEncoder._FEATURE_DIM
-        dropout = checkpoint.get('dropout', 0.1)
+        from .model_loading import load_model_from_path
 
-        # Try to infer model architecture from state_dict if not in checkpoint
-        state_dict = checkpoint.get('model_state_dict', {})
-        
-        if 'hidden_dim' in checkpoint:
-            hidden_dim = checkpoint['hidden_dim']
-            num_heads = checkpoint.get('num_heads', 8)
-            num_layers = checkpoint.get('num_layers', 4)
-        elif 'pos_encoding' in state_dict:
-            # Infer from state dict
-            # pos_encoding shape: [1, 14, hidden_dim]
-            hidden_dim = state_dict['pos_encoding'].shape[2]
-            
-            # Infer num_layers
-            max_layer = 0
-            for key in state_dict.keys():
-                if key.startswith('transformer.layers.'):
-                    try:
-                        layer_idx = int(key.split('.')[2])
-                        max_layer = max(max_layer, layer_idx)
-                    except (IndexError, ValueError):
-                        pass
-            num_layers = max_layer + 1
-            
-            # Default num_heads to 8 (standard for this project)
-            num_heads = 8
-            
-            # Ensure hidden_dim is divisible by num_heads
-            if hidden_dim % num_heads != 0:
-                # Try 4 heads if 8 doesn't work
-                if hidden_dim % 4 == 0:
-                    num_heads = 4
-        else:
-            # Fallback to defaults
-            hidden_dim = checkpoint.get('hidden_dim', 256)
-            num_heads = checkpoint.get('num_heads', 8)
-            num_layers = checkpoint.get('num_layers', 4)
-        
-        # Create model
-        model = PokerActorCritic(
-            input_dim=input_dim,
-            hidden_dim=hidden_dim,
-            num_heads=num_heads,
-            num_layers=num_layers,
-            dropout=dropout
+        model, _cfg, _raw = load_model_from_path(
+            model_path,
+            device=self.device,
+            override_config=None,
+            strict=True,
+            map_location=self.device,
         )
-        
-        # Load weights
-        model.load_state_dict(checkpoint['model_state_dict'])
-        model.to(self.device)
-        
+
         # Create encoder
         encoder = RLStateEncoder()
-        
         return model, encoder
     
     def reset_hand(self):
@@ -1210,4 +1161,48 @@ class AlwaysFoldAgent(SimpleAgent):
         if 'check' in legal_actions:
             return 'check'
         return 'fold'
+
+
+# =============================================================================
+# Agent Registry
+# =============================================================================
+
+AGENT_CLASSES = {
+    'random': RandomAgent,
+    'heuristic': HeuristicAgent,
+    'tight': TightAgent,
+    'loose_passive': LoosePassiveAgent,
+    'aggressive': AggressiveAgent,
+    'calling_station': CallingStationAgent,
+    'hero_caller': HeroCallerAgent,
+    'always_raise': AlwaysRaiseAgent,
+    'always_call': AlwaysCallAgent,
+    'always_fold': AlwaysFoldAgent,
+}
+
+
+def create_agent(agent_type: str, player_id: str, name: str = None):
+    """
+    Create an agent instance by type.
+    
+    Args:
+        agent_type: Type of agent (e.g., 'heuristic', 'random', 'tight')
+        player_id: Player ID
+        name: Optional name (defaults to formatted agent_type)
+    
+    Returns:
+        Agent instance, or None if agent_type is 'model' or 'past_model'
+    """
+    if agent_type in ('model', 'past_model'):
+        return None
+    
+    cls = AGENT_CLASSES.get(agent_type)
+    if cls is None:
+        return None
+    
+    if name is None:
+        name = agent_type.replace('_', ' ').title()
+    
+    return cls(player_id, name)
+
 

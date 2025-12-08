@@ -8,7 +8,7 @@ TEST_DIR = tests
 TARGET = $(BUILD_DIR)/poker_api
 
 # Source files
-POKER_SOURCES = $(SRC_DIR)/Card.cpp $(SRC_DIR)/Deck.cpp $(SRC_DIR)/Hand.cpp $(SRC_DIR)/Player.cpp $(SRC_DIR)/Pot.cpp $(SRC_DIR)/Game.cpp $(SRC_DIR)/JsonSerializer.cpp $(SRC_DIR)/HandStrength.cpp
+POKER_SOURCES = $(SRC_DIR)/Card.cpp $(SRC_DIR)/Deck.cpp $(SRC_DIR)/Hand.cpp $(SRC_DIR)/Player.cpp $(SRC_DIR)/Pot.cpp $(SRC_DIR)/Game.cpp $(SRC_DIR)/JsonSerializer.cpp $(SRC_DIR)/HandStrength.cpp $(SRC_DIR)/RLStateEncoder.cpp $(SRC_DIR)/ActionUtils.cpp $(SRC_DIR)/HeuristicAgents.cpp
 CORE_API_SOURCES = $(SRC_DIR)/PokerEngineAPI.cpp
 HTTP_SOURCES = $(SRC_DIR)/HTTPServer.cpp
 
@@ -34,7 +34,8 @@ endif
 PYTHON_INCLUDE = $(shell python3 -c "import sysconfig; print(sysconfig.get_path('include'))")
 PYTHON_SUFFIX = $(shell python3 -c "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))")
 MODULE_NAME = poker_api_binding
-MODULE_OUTPUT = ../training/$(MODULE_NAME)$(PYTHON_SUFFIX)
+MODULE_DEST ?= ../training
+MODULE_OUTPUT = $(MODULE_DEST)/$(MODULE_NAME)$(PYTHON_SUFFIX)
 
 all: check_json $(TARGET)
 
@@ -59,6 +60,7 @@ $(TARGET): $(SRC) | $(BUILD_DIR)
 
 # Build python module
 module: check_json check_pybind11
+	@mkdir -p $(MODULE_DEST)
 	$(CXX) $(CXXFLAGS) -shared -fPIC $(MODULE_FLAGS) \
 		-I$(PYBIND11_DIR)/include \
 		-I$(PYTHON_INCLUDE) \

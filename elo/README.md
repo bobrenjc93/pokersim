@@ -65,6 +65,13 @@ The server runs on port 5051 by default. Open http://localhost:5051 in your brow
   - Higher K = faster rating spread (use 40-60 to reach 4-5k top ratings quickly)
   - Lower K = more stable ratings (use 20-32 for slower convergence)
 
+### Reproducibility / variance control
+
+- **Deterministic hand seeding**: set `ELO_SEED` (default `0`). Disable with `ELO_SEED=none`.
+- **Pairing schedule**:
+  - `ELO_PAIRING=random`: random pairings each round (fast, higher variance)
+  - `ELO_PAIRING=round_robin` (default): every pair plays once per round (slower, lower variance)
+
 ## Hand Logging
 
 During matches, 1 in every 100 hands is logged to disk for analysis with the hand-viewer:

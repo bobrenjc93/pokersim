@@ -24,6 +24,9 @@ set(POKER_SOURCES
     src/Pot.cpp
     src/Game.cpp
     src/HandStrength.cpp
+    src/RLStateEncoder.cpp
+    src/ActionUtils.cpp
+    src/HeuristicAgents.cpp
 )
 
 # API sources

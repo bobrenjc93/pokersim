@@ -1,423 +1,206 @@
 #!/usr/bin/env python3
-"""
-Proximal Policy Optimization (PPO) Algorithm for Poker
-
-This module implements PPO with modern enhancements:
-- PopArt value normalization for stable learning
-- Adaptive entropy scheduling
-- Warmup + cosine annealing LR schedule
-- Improved advantage estimation
-- Mixed precision support
-
-Key features:
-- Clipped surrogate objective (prevents too large policy updates)
-- Generalized Advantage Estimation (GAE)
-- Value function learning with normalization
-- Entropy bonus for exploration
-"""
+"""PPO Trainer with PopArt normalization and adaptive entropy."""
 
 import math
 from contextlib import nullcontext
+from typing import Dict, Optional, Tuple
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from typing import List, Tuple, Dict, Optional
-import numpy as np
-
-# Mixed precision support
-try:
-    from torch.cuda.amp import autocast, GradScaler
-    AMP_AVAILABLE = torch.cuda.is_available()
-except ImportError:
-    AMP_AVAILABLE = False
-    autocast = None
-    GradScaler = None
-
-
-class PopArtValueNormalizer:
-    """
-    PopArt (Preserving Outputs Precisely, while Adaptively Rescaling Targets)
-    
-    Normalizes value function targets adaptively during training.
-    This helps stabilize training when reward scales vary significantly.
-    
-    Reference: "Learning values across many orders of magnitude" (DeepMind, 2016)
-    """
-    
-    def __init__(self, beta: float = 0.0003, epsilon: float = 1e-5):
-        """
-        Args:
-            beta: Update rate for running statistics (lower = more stable)
-            epsilon: Small constant for numerical stability
-        """
-        self.beta = beta
-        self.epsilon = epsilon
-        
-        # Running statistics
-        self.mu = 0.0  # Running mean
-        self.nu = 1.0  # Running second moment (E[x^2])
-        self.count = 0
-    
-    @property
-    def std(self) -> float:
-        """Compute standard deviation from running statistics."""
-        return max(self.epsilon, math.sqrt(self.nu - self.mu ** 2))
-    
-    def normalize(self, values: torch.Tensor) -> torch.Tensor:
-        """Normalize values using current statistics."""
-        return (values - self.mu) / self.std
-    
-    def denormalize(self, normalized_values: torch.Tensor) -> torch.Tensor:
-        """Convert normalized values back to original scale."""
-        return normalized_values * self.std + self.mu
-    
-    def update(self, values: torch.Tensor) -> Tuple[float, float]:
-        """
-        Update running statistics with new batch of values.
-        
-        Args:
-            values: Tensor of target values
-            
-        Returns:
-            Tuple of (old_mu, old_std) for potential weight rescaling
-        """
-        old_mu = self.mu
-        old_std = self.std
-        
-        # Compute batch statistics
-        batch_mean = values.mean().item()
-        batch_var = values.var().item() if values.numel() > 1 else 0.0
-        batch_count = values.numel()
-        
-        # Update running statistics with exponential moving average
-        self.count += batch_count
-        
-        # Welford's online algorithm with momentum
-        delta = batch_mean - self.mu
-        self.mu += self.beta * delta
-        
-        # Update second moment
-        batch_nu = batch_var + batch_mean ** 2
-        self.nu += self.beta * (batch_nu - self.nu)
-        
-        return old_mu, old_std
-
-
-class AdaptiveEntropyScheduler:
-    """
-    Adaptively adjusts entropy coefficient based on policy entropy.
-    
-    - If entropy is too low (policy too deterministic), increase coefficient
-    - If entropy is too high (policy too random), decrease coefficient
-    """
-    
-    def __init__(
-        self,
-        initial_coef: float = 0.01,
-        min_coef: float = 0.001,
-        max_coef: float = 0.1,
-        target_entropy_ratio: float = 0.5,  # Target as ratio of max entropy
-        adaptation_rate: float = 0.001
-    ):
-        """
-        Args:
-            initial_coef: Starting entropy coefficient
-            min_coef: Minimum allowed coefficient
-            max_coef: Maximum allowed coefficient  
-            target_entropy_ratio: Target entropy as ratio of maximum possible
-            adaptation_rate: How quickly to adapt the coefficient
-        """
-        self.coef = initial_coef
-        self.min_coef = min_coef
-        self.max_coef = max_coef
-        self.target_ratio = target_entropy_ratio
-        self.adaptation_rate = adaptation_rate
-        
-        # Track entropy history for smoothing
-        self.entropy_history: List[float] = []
-        self.history_size = 100
-    
-    def update(self, current_entropy: float, max_entropy: float) -> float:
-        """
-        Update entropy coefficient based on current vs target entropy.
-        
-        Args:
-            current_entropy: Current policy entropy
-            max_entropy: Maximum possible entropy (log(num_actions))
-            
-        Returns:
-            Updated entropy coefficient
-        """
-        # Add to history
-        self.entropy_history.append(current_entropy)
-        if len(self.entropy_history) > self.history_size:
-            self.entropy_history.pop(0)
-        
-        # Use smoothed entropy
-        smoothed_entropy = sum(self.entropy_history) / len(self.entropy_history)
-        
-        # Compute target entropy
-        target_entropy = self.target_ratio * max_entropy
-        
-        # Adjust coefficient
-        # If entropy < target, increase coefficient to encourage exploration
-        # If entropy > target, decrease coefficient
-        entropy_ratio = smoothed_entropy / max(target_entropy, 1e-8)
-        
-        if entropy_ratio < 0.8:
-            # Too deterministic, increase entropy bonus
-            self.coef *= (1 + self.adaptation_rate * 2)
-        elif entropy_ratio > 1.2:
-            # Too random, decrease entropy bonus
-            self.coef *= (1 - self.adaptation_rate)
-        
-        # Clamp to valid range
-        self.coef = max(self.min_coef, min(self.max_coef, self.coef))
-        
-        return self.coef
-
-
-def get_warmup_cosine_schedule(
-    optimizer: optim.Optimizer,
-    warmup_steps: int,
-    total_steps: int,
-    min_lr_ratio: float = 0.1
-):
-    """
-    Create a learning rate schedule with linear warmup followed by cosine annealing.
-    
-    Args:
-        optimizer: The optimizer to schedule
-        warmup_steps: Number of warmup steps
-        total_steps: Total training steps
-        min_lr_ratio: Minimum LR as ratio of initial LR
-        
-    Returns:
-        LambdaLR scheduler
-    """
-    def lr_lambda(current_step: int) -> float:
-        if current_step < warmup_steps:
-            # Linear warmup
-            return float(current_step) / float(max(1, warmup_steps))
-        else:
-            # Cosine annealing
-            progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
-            return max(min_lr_ratio, 0.5 * (1.0 + math.cos(math.pi * progress)))
-    
-    return optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
 class PPOTrainer:
-    """
-    PPO training algorithm for poker RL with modern enhancements.
-    
-    PPO maintains a balance between:
-    - Improving the policy (learn better actions)
-    - Staying close to old policy (stability)
-    - Estimating state values accurately
-    - Predicting hand strength (auxiliary task to improve hand evaluation)
-    
-    Enhancements over standard PPO:
-    - PopArt value normalization
-    - Adaptive entropy scheduling
-    - Warmup + cosine annealing LR
-    - Improved advantage normalization
-    """
+    """PPO trainer with PopArt normalization and adaptive entropy."""
     
     def __init__(
         self,
         model: nn.Module,
         learning_rate: float = 3e-4,
-        gamma: float = 0.99,  # Discount factor
-        gae_lambda: float = 0.95,  # GAE parameter
-        clip_epsilon: float = 0.2,  # PPO clip parameter
-        value_loss_coef: float = 0.5,  # Weight for value loss
-        entropy_coef: float = 0.01,  # Weight for entropy bonus
-        hand_strength_loss_coef: float = 0.1,  # Weight for hand strength prediction loss
-        max_grad_norm: float = 1.0,  # Gradient clipping
-        ppo_epochs: int = 4,  # Number of PPO epochs per update
-        mini_batch_size: int = 64,  # Mini-batch size for PPO
-        gradient_accumulation_steps: int = 4,  # Accumulate gradients
-        target_kl: Optional[float] = 0.02,  # Early stopping KL threshold
-        lr_schedule_steps: int = 5000,  # Total steps for LR scheduling
-        lr_warmup_steps: int = 100,  # Warmup steps for LR
-        use_popart: bool = True,  # Use PopArt value normalization
-        use_adaptive_entropy: bool = True,  # Use adaptive entropy scheduling
-        advantage_clip: float = 10.0,  # Clip extreme advantages
+        gamma: float = 0.99,
+        gae_lambda: float = 0.95,
+        clip_epsilon: float = 0.2,
+        value_loss_coef: float = 0.5,
+        entropy_coef: float = 0.01,
+        hand_strength_loss_coef: float = 0.1,
+        max_grad_norm: float = 1.0,
+        ppo_epochs: int = 4,
+        mini_batch_size: int = 64,
+        gradient_accumulation_steps: int = 4,
+        target_kl: Optional[float] = 0.02,
+        lr_schedule_steps: int = 5000,
+        lr_warmup_steps: int = 100,
+        use_popart: bool = True,
+        use_adaptive_entropy: bool = True,
+        advantage_clip: float = 10.0,
         device: torch.device = torch.device('cpu'),
         accelerator=None,
-        use_amp: bool = True,  # Use automatic mixed precision (GPU only)
+        use_amp: bool = True,
     ):
-        """
-        Args:
-            model: Actor-critic model
-            learning_rate: Learning rate
-            gamma: Discount factor for rewards
-            gae_lambda: Lambda parameter for GAE
-            clip_epsilon: PPO clipping parameter
-            value_loss_coef: Coefficient for value loss
-            entropy_coef: Coefficient for entropy bonus
-            hand_strength_loss_coef: Coefficient for auxiliary hand strength loss
-            max_grad_norm: Max gradient norm for clipping
-            ppo_epochs: Number of epochs to train on each batch
-            mini_batch_size: Size of mini-batches
-            gradient_accumulation_steps: Steps to accumulate gradients
-            target_kl: Target KL divergence for early stopping
-            lr_schedule_steps: Total training steps for LR schedule
-            lr_warmup_steps: Number of warmup steps
-            use_popart: Whether to use PopArt normalization
-            use_adaptive_entropy: Whether to use adaptive entropy scheduling
-            advantage_clip: Maximum absolute value for advantages
-            device: Device to train on
-            accelerator: Hugging Face Accelerator instance
-        """
         self.model = model
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.clip_epsilon = clip_epsilon
         self.value_loss_coef = value_loss_coef
         self.entropy_coef = entropy_coef
-        self.hand_strength_loss_coef = hand_strength_loss_coef
+        self.hs_loss_coef = hand_strength_loss_coef
         self.max_grad_norm = max_grad_norm
         self.ppo_epochs = ppo_epochs
         self.mini_batch_size = mini_batch_size
-        self.gradient_accumulation_steps = gradient_accumulation_steps
+        self.grad_accum_steps = gradient_accumulation_steps
         self.target_kl = target_kl
         self.advantage_clip = advantage_clip
         self.device = device
         self.accelerator = accelerator
+        self.step = 0
         
-        # Create optimizer with weight decay for regularization
-        self.optimizer = optim.AdamW(
-            model.parameters(), 
-            lr=learning_rate, 
-            eps=1e-5,
-            weight_decay=0.01
-        )
+        self.optimizer = optim.AdamW(model.parameters(), lr=learning_rate, eps=1e-5, weight_decay=0.01)
+        if accelerator:
+            self.model, self.optimizer = accelerator.prepare(model, self.optimizer)
         
-        # Prepare with accelerator if provided
-        if self.accelerator is not None:
-            self.model, self.optimizer = self.accelerator.prepare(self.model, self.optimizer)
+        # LR schedule: warmup + cosine annealing
+        self.scheduler = optim.lr_scheduler.LambdaLR(self.optimizer, lambda s: (
+            s / max(1, lr_warmup_steps) if s < lr_warmup_steps else
+            max(0.1, 0.5 * (1 + math.cos(math.pi * (s - lr_warmup_steps) / max(1, lr_schedule_steps - lr_warmup_steps))))
+        ))
         
-        # Learning rate scheduler with warmup
-        self.initial_lr = learning_rate
-        self.scheduler = get_warmup_cosine_schedule(
-            self.optimizer,
-            warmup_steps=lr_warmup_steps,
-            total_steps=lr_schedule_steps,
-            min_lr_ratio=0.1
-        )
-        
-        # PopArt value normalizer
+        # PopArt normalization state
         self.use_popart = use_popart
-        self.value_normalizer = PopArtValueNormalizer(beta=0.0003) if use_popart else None
+        self._pop_mu, self._pop_nu = 0.0, 1.0
         
-        # Adaptive entropy scheduler
-        self.use_adaptive_entropy = use_adaptive_entropy
-        self.entropy_scheduler = AdaptiveEntropyScheduler(
-            initial_coef=entropy_coef,
-            min_coef=0.001,
-            max_coef=0.1,
-            target_entropy_ratio=0.5
-        ) if use_adaptive_entropy else None
+        # Adaptive entropy state
+        self.use_adaptive_ent = use_adaptive_entropy
+        self._ent_coef = entropy_coef
+        self._ent_avg = 0.0
+        self._max_ent = math.log(13)  # log(num_actions)
         
-        # Maximum entropy for action space (log of num_actions)
-        # Unified action space: 13 actions (fold, check, call, 9 raise sizes, all_in)
-        self.max_entropy = math.log(13)
+        # AMP (CUDA only)
+        self.use_amp = use_amp and torch.cuda.is_available() and device.type == 'cuda'
+        self.scaler = torch.cuda.amp.GradScaler() if self.use_amp else None
+    
+    def _pop_normalize(self, x: torch.Tensor) -> torch.Tensor:
+        return (x - self._pop_mu) / max(1e-5, math.sqrt(self._pop_nu - self._pop_mu ** 2))
+    
+    def _pop_update(self, x: torch.Tensor, beta: float = 0.0003):
+        mean = x.mean().item()
+        self._pop_mu += beta * (mean - self._pop_mu)
+        self._pop_nu += beta * ((x.var().item() if x.numel() > 1 else 0.0) + mean ** 2 - self._pop_nu)
+    
+    def _update_entropy_coef(self, entropy: float) -> float:
+        """Adaptive entropy coefficient with anti-collapse safeguards.
         
-        # Mixed precision training (GPU only, provides ~30-50% speedup)
-        self.use_amp = use_amp and AMP_AVAILABLE and device.type == 'cuda'
-        self.scaler = GradScaler() if self.use_amp else None
+        The key insight: policy collapse to folding happens when entropy drops
+        too low (model becomes deterministic). We need to:
+        1. Keep a higher minimum entropy floor (0.02 instead of 0.001)
+        2. Slow down the decay rate
+        3. Aggressively boost entropy when it gets critically low
+        """
+        self._ent_avg = 0.99 * self._ent_avg + 0.01 * entropy
+        target_ratio = self._ent_avg / max(0.4 * self._max_ent, 1e-8)
         
-        # Training step counter
-        self.training_step = 0
+        # More conservative adjustment: slower decay, faster recovery
+        if target_ratio < 0.5:
+            # Entropy critically low - aggressively increase coefficient
+            self._ent_coef *= 1.01
+        elif target_ratio < 0.7:
+            # Entropy low - gently increase
+            self._ent_coef *= 1.003
+        elif target_ratio > 1.5:
+            # Entropy high - gentle decrease (but not too fast)
+            self._ent_coef *= 0.998
+        # else: keep stable
         
-        # Training statistics
-        self.stats = {
-            'policy_loss': [],
-            'value_loss': [],
-            'entropy': [],
-            'total_loss': [],
-            'kl_divergence': [],
-            'clip_fraction': [],
-            'explained_variance': [],
-            'learning_rate': [],
-            'grad_norm': [],
-            'value_mean': [],
-            'return_mean': [],
-            'hand_strength_loss': [],
-            'advantage_mean': [],
-            'advantage_std': [],
-        }
+        # Higher floor (0.02) prevents collapse; cap at 0.15 for stability
+        self._ent_coef = max(0.02, min(0.15, self._ent_coef))
+        return self._ent_coef
     
     def compute_gae(
-        self,
-        rewards: torch.Tensor,
-        values: torch.Tensor,
-        dones: torch.Tensor,
-        next_value: torch.Tensor
+        self, rewards: torch.Tensor, values: torch.Tensor,
+        dones: torch.Tensor, next_value: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Compute Generalized Advantage Estimation (GAE).
-        
-        GAE provides a good bias-variance tradeoff for advantage estimation.
-        
-        Args:
-            rewards: Rewards tensor of shape (num_steps,)
-            values: Value predictions of shape (num_steps,)
-            dones: Done flags of shape (num_steps,)
-            next_value: Value of next state of shape (1,)
-        
-        Returns:
-            Tuple of:
-            - advantages: Advantage estimates of shape (num_steps,)
-            - returns: Target returns of shape (num_steps,)
-        """
+        """Compute GAE advantages and returns."""
+        # Shape hygiene: callers sometimes provide (T, 1) tensors. If we don't
+        # flatten to 1D here, broadcasting can silently produce wrong shapes
+        # (e.g. (T,) + (T,1) -> (T,T)).
+        rewards = rewards.view(-1).to(dtype=torch.float32)
+        values = values.view(-1).to(dtype=torch.float32)
+        dones = dones.view(-1).to(dtype=torch.float32)
+        next_value = next_value.view(-1).to(dtype=torch.float32)
+        next_value = next_value.squeeze()
+
+        n = rewards.numel()
         advantages = torch.zeros_like(rewards)
-        last_gae = 0
+        gae = torch.tensor(0.0, dtype=rewards.dtype, device=rewards.device)
         
-        # Append next_value for easier computation
-        values_extended = torch.cat([values, next_value.unsqueeze(0)])
+        for t in reversed(range(n)):
+            next_v = next_value if t == n - 1 else values[t + 1]
+            mask = 1.0 - dones[t]
+            delta = rewards[t] + (self.gamma * next_v * mask) - values[t]
+            gae = delta + (self.gamma * self.gae_lambda * mask * gae)
+            advantages[t] = gae
         
-        # Compute advantages using GAE
-        for t in reversed(range(len(rewards))):
-            if t == len(rewards) - 1:
-                next_value_t = next_value
-            else:
-                next_value_t = values_extended[t + 1]
-            
-            # TD error: r + gamma * V(s') - V(s)
-            delta = rewards[t] + self.gamma * next_value_t * (1 - dones[t]) - values[t]
-            
-            # GAE: advantage = delta + gamma * lambda * advantage_next
-            advantages[t] = delta + self.gamma * self.gae_lambda * (1 - dones[t]) * last_gae
-            last_gae = advantages[t]
-        
-        # Returns = advantages + values
-        returns = advantages + values
-        
-        return advantages, returns
+        return advantages, advantages + values
     
-    def _normalize_advantages(self, advantages: torch.Tensor) -> torch.Tensor:
-        """
-        Normalize and clip advantages for stable training.
+    def _compute_losses(self, batch: Dict, use_hs: bool) -> Tuple[torch.Tensor, Dict]:
+        """Compute PPO losses for a mini-batch."""
+        states = batch['states']
+        # Ensure all 1D tensors stay 1D even for batch size 1. Using .squeeze()
+        # here is dangerous because it can turn (1,) into a scalar, triggering
+        # silent broadcasting and incorrect losses.
+        actions = batch['actions'].view(-1).long()
+        old_lp = batch['old_log_probs'].view(-1)
+        old_v = batch['old_values'].view(-1)
+        adv = batch['advantages'].view(-1)
+        ret = batch['returns'].view(-1)
+        mask, hs = batch.get('mask'), batch.get('hand_strengths')
         
-        Args:
-            advantages: Raw advantage estimates
-            
-        Returns:
-            Normalized and clipped advantages
-        """
-        # Normalize
-        adv_mean = advantages.mean()
-        adv_std = advantages.std()
-        normalized = (advantages - adv_mean) / (adv_std + 1e-8)
+        # Forward pass
+        if use_hs:
+            new_lp, vals, ent, hs_pred = self.model.evaluate_actions(states, actions, mask, return_hand_strength=True)
+        else:
+            new_lp, vals, ent = self.model.evaluate_actions(states, actions, mask)
+            hs_pred = None
+
+        new_lp = new_lp.view(-1)
+        vals = vals.view(-1)
+        ent = ent.view(-1)
         
-        # Clip extreme values
-        clipped = torch.clamp(normalized, -self.advantage_clip, self.advantage_clip)
+        # Policy loss (clipped surrogate)
+        ratio = torch.exp(new_lp - old_lp)
+        pi_loss = -torch.min(
+            ratio * adv,
+            torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon) * adv
+        ).mean()
         
-        return clipped
+        # Value loss (clipped)
+        v_pred = vals
+        v_pred_clipped = old_v + torch.clamp(v_pred - old_v, -self.clip_epsilon, self.clip_epsilon)
+        v_loss_unclipped = F.smooth_l1_loss(v_pred, ret, reduction='none')
+        v_loss_clipped = F.smooth_l1_loss(v_pred_clipped, ret, reduction='none')
+        v_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
+        
+        ent_mean = ent.mean()
+        if use_hs and hs_pred is not None and hs is not None:
+            hs_loss = F.mse_loss(hs_pred.view(-1), hs.view(-1))
+        else:
+            hs_loss = torch.tensor(0.0, device=self.device)
+        ent_coef = self._update_entropy_coef(ent_mean.item()) if self.use_adaptive_ent else self.entropy_coef
+        
+        total = pi_loss + self.value_loss_coef * v_loss - ent_coef * ent_mean + self.hs_loss_coef * hs_loss
+        
+        with torch.no_grad():
+            clip_frac = ((ratio < 1 - self.clip_epsilon) | (ratio > 1 + self.clip_epsilon)).float().mean().item()
+        
+        return total, {
+            'policy_loss': pi_loss.item(),
+            'value_loss': v_loss.item(),
+            'entropy': ent_mean.item(),
+            'kl_divergence': (old_lp - new_lp).mean().item(),
+            'clip_fraction': clip_frac,
+            'hand_strength_loss': hs_loss.item() if hasattr(hs_loss, 'item') else 0,
+        }
     
     def update(
         self,
@@ -431,284 +214,137 @@ class PPOTrainer:
         hand_strengths: Optional[torch.Tensor] = None,
         verbose: bool = False
     ) -> Dict[str, float]:
-        """
-        Update policy using PPO algorithm with modern enhancements.
+        """Run PPO update on collected trajectories."""
+        # Make sure we're in train mode during the optimization step.
+        # Rollout collection sets eval() for inference; leaving the model in eval()
+        # can silently change training dynamics (dropout off, checkpointing off).
+        was_training = bool(getattr(self.model, "training", False))
+        self.model.train()
+        self.step += 1
+        n = states.size(0)
+        use_hs = hand_strengths is not None and self.hs_loss_coef > 0
         
-        Args:
-            states: State tensor of shape (num_samples, state_dim)
-            actions: Action tensor of shape (num_samples,)
-            old_log_probs: Old log probabilities of shape (num_samples,)
-            old_values: Old value predictions of shape (num_samples,)
-            advantages: Advantage estimates of shape (num_samples,)
-            returns: Target returns of shape (num_samples,)
-            legal_actions_masks: Legal action masks of shape (num_samples, num_actions)
-            hand_strengths: Target hand strengths of shape (num_samples,) for auxiliary loss
-            verbose: Whether to print detailed progress
-        
-        Returns:
-            Dictionary with training statistics
-        """
-        # Increment training step
-        self.training_step += 1
-        
-        # Update PopArt statistics and normalize returns
-        if self.use_popart and self.value_normalizer is not None:
-            self.value_normalizer.update(returns)
-            normalized_returns = self.value_normalizer.normalize(returns)
-        else:
-            normalized_returns = returns
+        # PopArt (IMPORTANT)
+        # ------------------
+        # Proper PopArt requires keeping the critic's outputs and the advantage/GAE
+        # computation in a *consistent* scale, typically by adjusting the value head
+        # parameters when the running (mu, sigma) changes.
+        #
+        # A previous implementation normalized the return targets for the value loss,
+        # while leaving rollouts/GAE in raw reward units. That silently corrupts
+        # advantages over time and can make later iterations perform worse.
+        #
+        # For now, keep training targets in the raw reward scale for correctness.
+        # We still track PopArt stats (mu/nu) for potential future use / debugging.
+        ret_for_value = returns
+        if self.use_popart:
+            self._pop_update(returns)
         
         # Normalize and clip advantages
-        advantages = self._normalize_advantages(advantages)
+        adv = torch.clamp(
+            (advantages - advantages.mean()) / (advantages.std() + 1e-8),
+            -self.advantage_clip, self.advantage_clip
+        )
         
-        num_samples = states.size(0)
+        # Collect per-minibatch stats so we never end up with empty aggregates
+        # (which would otherwise yield NaNs via np.mean([])).
+        all_stats = []
+        last_grad_norm: Optional[float] = None
+        ctx = torch.amp.autocast(device_type='cuda') if self.use_amp else nullcontext()
         
-        # Check if we have hand strength targets for auxiliary loss
-        use_hand_strength_loss = hand_strengths is not None and self.hand_strength_loss_coef > 0
-        
-        # Track statistics
-        epoch_stats = {
-            'policy_loss': [],
-            'value_loss': [],
-            'entropy': [],
-            'total_loss': [],
-            'kl_divergence': [],
-            'clip_fraction': [],
-            'hand_strength_loss': [],
-            'advantage_mean': [],
-            'advantage_std': [],
-        }
-        
-        # Record advantage statistics
-        epoch_stats['advantage_mean'].append(advantages.mean().item())
-        epoch_stats['advantage_std'].append(advantages.std().item())
-        
-        # PPO epochs with gradient accumulation
         for epoch in range(self.ppo_epochs):
-            # Generate random indices (on CPU to match input tensors)
-            indices = torch.randperm(num_samples)
-            
-            # Track accumulation steps
-            accumulation_step = 0
+            indices = torch.randperm(n)
+            accum, epoch_kl = 0, []
             self.optimizer.zero_grad()
             
-            for start in range(0, num_samples, self.mini_batch_size):
-                end = start + self.mini_batch_size
-                if end > num_samples:
-                    end = num_samples
+            for start in range(0, n, self.mini_batch_size):
+                idx = indices[start:min(start + self.mini_batch_size, n)]
                 
-                mb_indices = indices[start:end]
+                batch = {
+                    'states': states[idx].to(self.device),
+                    'actions': actions[idx].to(self.device),
+                    'old_log_probs': old_log_probs[idx].to(self.device),
+                    'old_values': old_values[idx].to(self.device),
+                    'advantages': adv[idx].to(self.device),
+                    'returns': ret_for_value[idx].to(self.device),
+                    'mask': legal_actions_masks[idx].to(self.device) if legal_actions_masks is not None else None,
+                    'hand_strengths': hand_strengths[idx].to(self.device) if use_hs else None,
+                }
                 
-                # Mini-batch data - Move to device (GPU) here for offloading
-                mb_states = states[mb_indices].to(self.device)
-                mb_actions = actions[mb_indices].to(self.device)
-                mb_old_log_probs = old_log_probs[mb_indices].to(self.device)
-                mb_old_values = old_values[mb_indices].to(self.device)
-                mb_advantages = advantages[mb_indices].to(self.device)
-                mb_returns = normalized_returns[mb_indices].to(self.device)
+                with ctx:
+                    loss, stats = self._compute_losses(batch, use_hs)
+                    loss = loss / self.grad_accum_steps
                 
-                mb_legal_masks = None
-                if legal_actions_masks is not None:
-                    mb_legal_masks = legal_actions_masks[mb_indices].to(self.device)
-                
-                mb_hand_strengths = None
-                if use_hand_strength_loss:
-                    mb_hand_strengths = hand_strengths[mb_indices].to(self.device)
-                
-                # Use autocast for mixed precision if enabled
-                amp_context = autocast() if self.use_amp else nullcontext()
-                
-                with amp_context:
-                    # Evaluate actions with current policy
-                    if use_hand_strength_loss:
-                        new_log_probs, values, entropy, hand_strength_pred = self.model.evaluate_actions(
-                            mb_states, mb_actions, mb_legal_masks, return_hand_strength=True
-                        )
-                    else:
-                        new_log_probs, values, entropy = self.model.evaluate_actions(
-                            mb_states, mb_actions, mb_legal_masks, return_hand_strength=False
-                        )
-                    
-                    # PPO clipped surrogate loss
-                    ratio = torch.exp(new_log_probs - mb_old_log_probs)
-                    surr1 = ratio * mb_advantages
-                    surr2 = torch.clamp(ratio, 1.0 - self.clip_epsilon, 1.0 + self.clip_epsilon) * mb_advantages
-                    policy_loss = -torch.min(surr1, surr2).mean()
-                    
-                    # Value loss with clipping - use Huber loss for robustness
-                    values = values.squeeze()
-                    
-                    # Unclipped value loss
-                    v_loss_unclipped = F.smooth_l1_loss(values, mb_returns, reduction='none')
-                    
-                    # Clipped value loss
-                    v_clipped = mb_old_values + torch.clamp(
-                        values - mb_old_values,
-                        -self.clip_epsilon,
-                        self.clip_epsilon
-                    )
-                    v_loss_clipped = F.smooth_l1_loss(v_clipped, mb_returns, reduction='none')
-                    
-                    # Max of clipped and unclipped (conservative update)
-                    v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
-                    value_loss = 0.5 * v_loss_max.mean()
-                    
-                    # Entropy bonus (encourages exploration)
-                    entropy_mean = entropy.mean()
-                    entropy_loss = -entropy_mean
-                    
-                    # Hand strength prediction loss (auxiliary task)
-                    hand_strength_loss = torch.tensor(0.0, device=self.device)
-                    if use_hand_strength_loss and mb_hand_strengths is not None:
-                        hand_strength_loss = F.mse_loss(hand_strength_pred, mb_hand_strengths)
-                    
-                    # Get current entropy coefficient
-                    current_entropy_coef = self.entropy_coef
-                    if self.use_adaptive_entropy and self.entropy_scheduler is not None:
-                        current_entropy_coef = self.entropy_scheduler.update(
-                            entropy_mean.item(), self.max_entropy
-                        )
-                    
-                    # Total loss - scale by accumulation steps for proper gradient averaging
-                    loss = (
-                        policy_loss +
-                        self.value_loss_coef * value_loss +
-                        current_entropy_coef * entropy_loss +
-                        self.hand_strength_loss_coef * hand_strength_loss
-                    ) / self.gradient_accumulation_steps
-                
-                # Backward pass (accumulate gradients)
-                if self.accelerator is not None:
+                if self.accelerator:
                     self.accelerator.backward(loss)
-                elif self.use_amp and self.scaler is not None:
+                elif self.use_amp and self.scaler:
                     self.scaler.scale(loss).backward()
                 else:
                     loss.backward()
                 
-                accumulation_step += 1
+                accum += 1
+                epoch_kl.append(stats['kl_divergence'])
+                all_stats.append(stats)
                 
-                # Step optimizer after accumulating enough gradients
-                if accumulation_step >= self.gradient_accumulation_steps:
-                    if self.use_amp and self.scaler is not None:
-                        # Unscale gradients for clipping
-                        self.scaler.unscale_(self.optimizer)
-                        grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
-                        self.scaler.step(self.optimizer)
-                        self.scaler.update()
-                    else:
-                        # Gradient clipping and tracking
-                        grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
-                        self.optimizer.step()
-                    self.optimizer.zero_grad()
-                    accumulation_step = 0
-                else:
-                    grad_norm = 0.0
-                
-                # Track statistics (use unscaled loss values)
-                with torch.no_grad():
-                    # KL divergence (approximate)
-                    kl_div = (mb_old_log_probs - new_log_probs).mean()
-                    
-                    # Clip fraction
-                    clip_fraction = ((ratio < 1.0 - self.clip_epsilon) | 
-                                   (ratio > 1.0 + self.clip_epsilon)).float().mean()
-                    
-                    unscaled_loss = loss.item() * self.gradient_accumulation_steps
-                    
-                    epoch_stats['policy_loss'].append(policy_loss.item())
-                    epoch_stats['value_loss'].append(value_loss.item())
-                    epoch_stats['entropy'].append(entropy_mean.item())
-                    epoch_stats['total_loss'].append(unscaled_loss)
-                    epoch_stats['kl_divergence'].append(kl_div.item())
-                    epoch_stats['clip_fraction'].append(clip_fraction.item())
-                    epoch_stats['hand_strength_loss'].append(
-                        hand_strength_loss.item() if hasattr(hand_strength_loss, 'item') else hand_strength_loss
-                    )
-                    if 'grad_norm' not in epoch_stats: 
-                        epoch_stats['grad_norm'] = []
-                    epoch_stats['grad_norm'].append(grad_norm.item() if hasattr(grad_norm, 'item') else grad_norm)
+                if accum >= self.grad_accum_steps:
+                    last_grad_norm = self._optimizer_step()
+                    accum = 0
             
-            # Handle remaining accumulated gradients at end of epoch
-            if accumulation_step > 0:
-                if self.use_amp and self.scaler is not None:
-                    self.scaler.unscale_(self.optimizer)
-                    grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                else:
-                    grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
-                    self.optimizer.step()
-                self.optimizer.zero_grad()
+            if accum > 0:
+                last_grad_norm = self._optimizer_step()
             
-            # Early stopping based on KL divergence
-            if self.target_kl is not None:
-                recent_kls = epoch_stats['kl_divergence'][-max(1, num_samples//self.mini_batch_size):]
-                mean_kl = np.mean(recent_kls) if recent_kls else 0
-                if mean_kl > self.target_kl * 1.5:
-                    if verbose:
-                        print(f"  Early stopping at epoch {epoch + 1} due to KL divergence: {mean_kl:.4f}")
-                    break
+            # Early stopping on high KL
+            if self.target_kl and epoch_kl and np.mean(epoch_kl) > self.target_kl * 1.5:
+                if verbose:
+                    print(f"  Early stop epoch {epoch+1}: KL={np.mean(epoch_kl):.4f}")
+                break
         
-        # Step LR scheduler
         self.scheduler.step()
         
-        # Compute explained variance
-        with torch.no_grad():
-            all_values_list = []
-            for start in range(0, num_samples, self.mini_batch_size):
-                end = min(start + self.mini_batch_size, num_samples)
-                mb_states = states[start:end].to(self.device)
-                mb_actions = actions[start:end].to(self.device)
-                mb_legal_masks = None
-                if legal_actions_masks is not None:
-                    mb_legal_masks = legal_actions_masks[start:end].to(self.device)
-                
-                _, values, _ = self.model.evaluate_actions(mb_states, mb_actions, mb_legal_masks)
-                all_values_list.append(values.cpu())
-            
-            all_values = torch.cat(all_values_list).squeeze()
-            returns_cpu = returns.cpu()
-            var_returns = returns_cpu.var()
-            explained_var = 1 - (returns_cpu - all_values).var() / (var_returns + 1e-8)
-            epoch_stats['explained_variance'] = [explained_var.item()]
-            epoch_stats['value_mean'] = [all_values.mean().item()]
-            epoch_stats['return_mean'] = [returns_cpu.mean().item()]
-        
-        # Average statistics
-        avg_stats = {
-            key: np.mean(values) for key, values in epoch_stats.items()
-        }
-        
-        # Update global statistics
-        for key, value in avg_stats.items():
-            if key not in self.stats:
-                self.stats[key] = []
-            self.stats[key].append(value)
-        
-        # Track learning rate and entropy coefficient
-        current_lr = self.optimizer.param_groups[0]['lr']
-        self.stats['learning_rate'].append(current_lr)
-        avg_stats['learning_rate'] = current_lr
-        
-        # Track adaptive entropy coefficient
-        if self.use_adaptive_entropy and self.entropy_scheduler:
-            avg_stats['entropy_coef'] = self.entropy_scheduler.coef
-        
-        return avg_stats
+        # Aggregate stats
+        keys = ['policy_loss', 'value_loss', 'entropy', 'kl_divergence', 'clip_fraction', 'hand_strength_loss', 'grad_norm']
+        avg = {k: float(np.mean([s.get(k, 0) for s in all_stats])) for k in keys}
+        if last_grad_norm is not None:
+            avg['grad_norm'] = float(last_grad_norm)
+        avg['learning_rate'] = self.optimizer.param_groups[0]['lr']
+        avg['total_loss'] = avg['policy_loss'] + self.value_loss_coef * avg['value_loss']
+        if self.use_adaptive_ent:
+            avg['entropy_coef'] = self._ent_coef
+        # Restore previous mode (avoid surprising callers).
+        if not was_training:
+            self.model.eval()
+        return avg
     
-    def get_stats(self) -> Dict[str, List[float]]:
-        """Get training statistics"""
-        return self.stats
+    def _optimizer_step(self) -> float:
+        """Optimizer step with gradient clipping."""
+        if self.use_amp and self.scaler:
+            self.scaler.unscale_(self.optimizer)
+            grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+        else:
+            grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+            self.optimizer.step()
+        self.optimizer.zero_grad()
+        return grad_norm.item() if hasattr(grad_norm, 'item') else grad_norm
     
     def save_checkpoint(self, path: str, epoch: int, **kwargs):
-        """Save training checkpoint"""
-        checkpoint = {
+        """Save training checkpoint."""
+        # If we're under Accelerate, unwrap the model so checkpoints are loadable
+        # outside the training process (e.g. ELO server, eval scripts).
+        model_for_save = self.model
+        try:
+            if self.accelerator is not None and hasattr(self.accelerator, "unwrap_model"):
+                model_for_save = self.accelerator.unwrap_model(self.model)
+        except Exception:
+            model_for_save = self.model
+
+        ckpt = {
             'epoch': epoch,
-            'training_step': self.training_step,
-            'model_state_dict': self.model.state_dict(),
+            'training_step': self.step,
+            'model_state_dict': model_for_save.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
-            'stats': self.stats,
             'hyperparameters': {
                 'gamma': self.gamma,
                 'gae_lambda': self.gae_lambda,
@@ -718,48 +354,25 @@ class PPOTrainer:
             },
             **kwargs
         }
-        
-        # Save PopArt state if used
-        if self.use_popart and self.value_normalizer:
-            checkpoint['popart'] = {
-                'mu': self.value_normalizer.mu,
-                'nu': self.value_normalizer.nu,
-                'count': self.value_normalizer.count,
-            }
-        
-        # Save entropy scheduler state if used
-        if self.use_adaptive_entropy and self.entropy_scheduler:
-            checkpoint['entropy_scheduler'] = {
-                'coef': self.entropy_scheduler.coef,
-                'entropy_history': self.entropy_scheduler.entropy_history,
-            }
-        
-        torch.save(checkpoint, path)
+        if self.use_popart:
+            ckpt['popart'] = {'mu': self._pop_mu, 'nu': self._pop_nu}
+        if self.use_adaptive_ent:
+            ckpt['adaptive_entropy'] = {'coef': self._ent_coef, 'avg': self._ent_avg}
+        torch.save(ckpt, path)
     
     def load_checkpoint(self, path: str) -> Dict:
-        """Load training checkpoint"""
-        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        """Load training checkpoint."""
+        ckpt = torch.load(path, map_location=self.device, weights_only=False)
+        self.model.load_state_dict(ckpt['model_state_dict'])
+        self.optimizer.load_state_dict(ckpt['optimizer_state_dict'])
         
-        if 'scheduler_state_dict' in checkpoint:
-            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        
-        if 'training_step' in checkpoint:
-            self.training_step = checkpoint['training_step']
-        
-        if 'stats' in checkpoint:
-            self.stats = checkpoint['stats']
-        
-        # Load PopArt state
-        if self.use_popart and 'popart' in checkpoint and self.value_normalizer:
-            self.value_normalizer.mu = checkpoint['popart']['mu']
-            self.value_normalizer.nu = checkpoint['popart']['nu']
-            self.value_normalizer.count = checkpoint['popart']['count']
-        
-        # Load entropy scheduler state
-        if self.use_adaptive_entropy and 'entropy_scheduler' in checkpoint and self.entropy_scheduler:
-            self.entropy_scheduler.coef = checkpoint['entropy_scheduler']['coef']
-            self.entropy_scheduler.entropy_history = checkpoint['entropy_scheduler'].get('entropy_history', [])
-        
-        return checkpoint
+        if 'scheduler_state_dict' in ckpt:
+            self.scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+        if 'training_step' in ckpt:
+            self.step = ckpt['training_step']
+        if self.use_popart and 'popart' in ckpt:
+            self._pop_mu, self._pop_nu = ckpt['popart']['mu'], ckpt['popart']['nu']
+        if self.use_adaptive_ent and 'adaptive_entropy' in ckpt:
+            self._ent_coef = ckpt['adaptive_entropy']['coef']
+            self._ent_avg = ckpt['adaptive_entropy'].get('avg', 0.0)
+        return ckpt

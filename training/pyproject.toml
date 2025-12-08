@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
     "pokersim-common",
+    "pokersim-elo",
     "requests>=2.31.0",      # HTTP library for API calls
     "torch>=2.0.0",          # PyTorch for neural network training
     "accelerate>=0.24.0",    # Hugging Face Accelerate for efficient hardware usage
@@ -19,13 +20,16 @@ dependencies = [
 [project.scripts]
 train-poker = "train:main"
 eval-poker = "eval:main"
+verify-checkpoints = "verify_checkpoints:main"
+elo-head-to-head = "elo_head_to_head:main"
 
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["eval", "train", "ppo", "env", "batched_rollouts", "parallel_rollouts", "monte_carlo", "benchmark_rollouts"]
+py-modules = ["train", "ppo", "agents", "episode_collector", "parallel_rollouts", "eval", "verify_checkpoints", "elo_head_to_head"]
 
 [tool.uv.sources]
 pokersim-common = { path = "../common" }
+pokersim-elo = { path = "../elo" }

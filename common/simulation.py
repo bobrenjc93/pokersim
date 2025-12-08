@@ -20,12 +20,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 
-# Import poker_api_binding - must be installed via `make module` in api/
-try:
-    import poker_api_binding
-    _BINDING_AVAILABLE = True
-except ImportError:
-    _BINDING_AVAILABLE = False
+# Import poker_api_binding (native extension).
+# Use the robust loader so console-script entrypoints can still find local builds.
+from .binding_loader import load_poker_api_binding
+
+poker_api_binding = load_poker_api_binding()
+_BINDING_AVAILABLE = poker_api_binding is not None
 
 from .model_agent import extract_state, convert_action_label
 
@@ -423,7 +423,16 @@ class PokerSimulator:
             })
         
         # Get initial game state
+        #
+        # IMPORTANT (correctness):
+        # PokerSimulator uses the *stateless* API by repeatedly replaying `history`.
+        # Therefore the RNG seed must be **stable across all API calls for this hand**.
+        # If the seed changes between calls, the same history could replay with a
+        # different deck, producing invalid transitions and biased eval results.
         config_override = {'startingChips': effective_stack}
+        if 'seed' not in config_override or config_override.get('seed') is None:
+            # Use a single seed for the entire hand.
+            config_override['seed'] = self.config.seed if self.config.seed is not None else random.randint(0, 1_000_000)
         response = self._call_api(history, config_override)
         
         if not response.get('success'):
@@ -873,6 +882,124 @@ class DirectGameSimulator:
         """
         pid = game.get_current_player_id()
         return pid if pid else None
+
+
+def play_hand_direct(
+    agents: Dict[str, Any],
+    config: Optional[Union[GameConfig, Dict[str, Any]]] = None,
+    starting_chips: Optional[Union[int, Dict[str, int]]] = None,
+    seed: Optional[int] = None,
+    max_steps: int = 500,
+) -> Dict[str, Any]:
+    """
+    Play a single hand using the *direct* C++ Game binding.
+
+    This is the correct way to simulate hands when you need **per-player**
+    starting stacks (e.g. freezeout / tournament-style matches). The stateless
+    API-based `PokerSimulator.play_hand()` only supports a single global
+    `startingChips`, so it cannot represent unequal stacks faithfully.
+
+    Args:
+        agents: Dict[player_id -> agent], where agent.select_action returns
+                (action_type, amount, action_label) or (action_type, amount).
+        config: GameConfig or dict (smallBlind/bigBlind/startingChips...). Defaults to GameConfig().
+        starting_chips: Either a single int (same for all players) or a dict of per-player stacks.
+        seed: Optional RNG seed for the C++ game.
+        max_steps: Safety cap on actions.
+
+    Returns:
+        Dict with keys: success, profits, hands_played, final_state, error (optional).
+    """
+    if not _BINDING_AVAILABLE:
+        return {"success": False, "error": "poker_api_binding not available", "hands_played": 0, "profits": {}}
+
+    cfg = GameConfig.from_dict(config) if isinstance(config, dict) else (config or GameConfig())
+    gc = cfg.to_binding_config(seed=seed)
+    game = poker_api_binding.Game(gc)
+
+    player_ids = list(agents.keys())
+    # Resolve per-player starting stacks.
+    if isinstance(starting_chips, dict):
+        stacks = {pid: int(starting_chips.get(pid, cfg.starting_chips)) for pid in player_ids}
+    else:
+        chips = int(starting_chips or cfg.starting_chips)
+        stacks = {pid: chips for pid in player_ids}
+
+    # Reset agents for new hand.
+    for agent in agents.values():
+        if hasattr(agent, "reset_hand"):
+            agent.reset_hand()
+
+    for pid in player_ids:
+        agent = agents[pid]
+        game.add_player(pid, getattr(agent, "name", pid), stacks[pid])
+
+    game.start_hand()
+
+    for _ in range(max_steps):
+        stage = game.get_stage_name().lower()
+        if stage in {"complete", "showdown"}:
+            break
+
+        pid = game.get_current_player_id()
+        if not pid:
+            if not game.advance_game():
+                break
+            continue
+
+        gs = game.get_state_dict()
+        legal_actions = gs.get("actionConstraints", {}).get("legalActions", [])
+        if not legal_actions:
+            break
+
+        agent = agents.get(pid)
+        if agent is None:
+            break
+
+        state_dict = extract_state(gs, pid)
+
+        try:
+            result = agent.select_action(state_dict, legal_actions)
+            if isinstance(result, tuple) and len(result) >= 3:
+                action_type, amount, _ = result[:3]
+            else:
+                action_type, amount = result[:2]
+        except Exception:
+            action_type, amount = "fold", 0
+
+        # Clamp to all-in if agent oversizes.
+        player_chips = state_dict.get("player_chips", 0)
+        to_call = state_dict.get("to_call", 0)
+        if action_type in ("bet", "raise") and amount >= player_chips > 0:
+            action_type, amount = "all_in", 0
+        elif action_type == "call" and to_call >= player_chips > 0:
+            action_type, amount = "all_in", 0
+
+        # Notify agents (opponent modeling hooks).
+        pot = state_dict.get("pot", 0)
+        for other_agent in agents.values():
+            if hasattr(other_agent, "observe_action"):
+                try:
+                    other_agent.observe_action(pid, action_type, amount, pot, stage)
+                except Exception:
+                    pass
+
+        ok = game.process_action(pid, action_type, int(amount))
+        if not ok:
+            # Best-effort fallback to fold.
+            try:
+                game.process_action(pid, "fold", 0)
+            except Exception:
+                break
+
+    final_state = game.get_state_dict()
+    profits: Dict[str, int] = {}
+    for p in final_state.get("players", []):
+        pid = p.get("id")
+        if pid in stacks:
+            profits[pid] = int(p.get("chips", stacks[pid])) - int(stacks[pid])
+
+    return {"success": True, "hands_played": 1, "profits": profits, "final_state": final_state}
 
 
 def check_binding_available() -> bool:

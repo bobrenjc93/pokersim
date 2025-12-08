@@ -7,6 +7,7 @@ dependencies = []
 
 [project.scripts]
 test-stateless-api = "tests.test_stateless_api:main"
+test-stateful-api = "tests.test_stateful_api:main"
 
 [build-system]
 requires = ["setuptools"]
