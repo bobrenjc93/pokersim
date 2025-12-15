@@ -13,7 +13,7 @@ import torch.optim as optim
 
 
 class PPOTrainer:
-    """PPO trainer with PopArt normalization and adaptive entropy."""
+    """PPO trainer with PopArt normalization, adaptive entropy, and anchor KL regularization."""
     
     def __init__(
         self,
@@ -38,6 +38,9 @@ class PPOTrainer:
         device: torch.device = torch.device('cpu'),
         accelerator=None,
         use_amp: bool = True,
+        # Anchor KL regularization parameters
+        anchor_model: Optional[nn.Module] = None,
+        kl_anchor_coef: float = 0.1,
     ):
         self.model = model
         self.gamma = gamma
@@ -79,6 +82,26 @@ class PPOTrainer:
         # AMP (CUDA only)
         self.use_amp = use_amp and torch.cuda.is_available() and device.type == 'cuda'
         self.scaler = torch.cuda.amp.GradScaler() if self.use_amp else None
+        
+        # Anchor KL regularization: prevents policy collapse by penalizing
+        # deviation from a frozen anchor policy (e.g., an early successful checkpoint)
+        self.anchor_model: Optional[nn.Module] = anchor_model
+        self.kl_anchor_coef = kl_anchor_coef
+        if self.anchor_model is not None:
+            self.anchor_model.eval()
+            for p in self.anchor_model.parameters():
+                p.requires_grad = False
+    
+    def set_anchor_model(self, anchor_model: nn.Module) -> None:
+        """Set or update the anchor model for KL regularization.
+        
+        The anchor model is frozen and used to compute KL divergence loss
+        that prevents the current policy from deviating too far.
+        """
+        self.anchor_model = anchor_model
+        self.anchor_model.eval()
+        for p in self.anchor_model.parameters():
+            p.requires_grad = False
     
     def _pop_normalize(self, x: torch.Tensor) -> torch.Tensor:
         return (x - self._pop_mu) / max(1e-5, math.sqrt(self._pop_nu - self._pop_mu ** 2))
@@ -188,7 +211,26 @@ class PPOTrainer:
             hs_loss = torch.tensor(0.0, device=self.device)
         ent_coef = self._update_entropy_coef(ent_mean.item()) if self.use_adaptive_ent else self.entropy_coef
         
-        total = pi_loss + self.value_loss_coef * v_loss - ent_coef * ent_mean + self.hs_loss_coef * hs_loss
+        # Anchor KL regularization: penalize deviation from anchor policy
+        # This prevents catastrophic forgetting by keeping the policy close
+        # to a frozen anchor checkpoint that exhibited good performance.
+        kl_anchor_loss = torch.tensor(0.0, device=self.device)
+        if self.anchor_model is not None and self.kl_anchor_coef > 0:
+            with torch.no_grad():
+                # Get anchor policy logits
+                anchor_logits, _ = self.anchor_model(states, mask)
+                anchor_probs = F.softmax(anchor_logits, dim=-1)
+            
+            # Get current policy logits (need fresh forward pass for logits)
+            current_logits, _ = self.model(states, mask)
+            current_log_probs = F.log_softmax(current_logits, dim=-1)
+            
+            # KL(anchor || current) - penalize current for deviating from anchor
+            # Using sum over actions, mean over batch
+            kl_anchor_loss = (anchor_probs * (torch.log(anchor_probs + 1e-8) - current_log_probs)).sum(dim=-1).mean()
+        
+        total = (pi_loss + self.value_loss_coef * v_loss - ent_coef * ent_mean 
+                 + self.hs_loss_coef * hs_loss + self.kl_anchor_coef * kl_anchor_loss)
         
         with torch.no_grad():
             clip_frac = ((ratio < 1 - self.clip_epsilon) | (ratio > 1 + self.clip_epsilon)).float().mean().item()
@@ -200,6 +242,7 @@ class PPOTrainer:
             'kl_divergence': (old_lp - new_lp).mean().item(),
             'clip_fraction': clip_frac,
             'hand_strength_loss': hs_loss.item() if hasattr(hs_loss, 'item') else 0,
+            'kl_anchor_loss': kl_anchor_loss.item() if hasattr(kl_anchor_loss, 'item') else 0,
         }
     
     def update(
@@ -302,7 +345,7 @@ class PPOTrainer:
         self.scheduler.step()
         
         # Aggregate stats
-        keys = ['policy_loss', 'value_loss', 'entropy', 'kl_divergence', 'clip_fraction', 'hand_strength_loss', 'grad_norm']
+        keys = ['policy_loss', 'value_loss', 'entropy', 'kl_divergence', 'clip_fraction', 'hand_strength_loss', 'kl_anchor_loss', 'grad_norm']
         avg = {k: float(np.mean([s.get(k, 0) for s in all_stats])) for k in keys}
         if last_grad_norm is not None:
             avg['grad_norm'] = float(last_grad_norm)
@@ -351,6 +394,7 @@ class PPOTrainer:
                 'clip_epsilon': self.clip_epsilon,
                 'value_loss_coef': self.value_loss_coef,
                 'entropy_coef': self.entropy_coef,
+                'kl_anchor_coef': self.kl_anchor_coef,
             },
             **kwargs
         }

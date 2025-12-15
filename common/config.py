@@ -21,7 +21,7 @@ import torch
 # - Set POKERSIM_MODEL_VERSION=17 to use /tmp/pokersim/rl_models_v17
 # - Or set POKERSIM_MODELS_DIR=/path/to/models to force a specific directory
 #
-MODEL_VERSION = int(os.environ.get("POKERSIM_MODEL_VERSION", "20"))
+MODEL_VERSION = int(os.environ.get("POKERSIM_MODEL_VERSION", "26"))
 
 # Default directory for saving/loading models
 DEFAULT_MODELS_DIR = os.environ.get("POKERSIM_MODELS_DIR", f"/tmp/pokersim/rl_models_v{MODEL_VERSION}")

@@ -1279,6 +1279,9 @@
                     
                 case 'match_complete':
                     addMatchToFeed(data);
+                    if (data.leaderboard) {
+                        updateLeaderboard(data.leaderboard);
+                    }
                     break;
                     
                 case 'round_complete':

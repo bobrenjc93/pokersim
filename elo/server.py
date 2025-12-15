@@ -285,6 +285,7 @@ class EloSimulation:
                 'type': 'match_complete', 'match_num': match_num, 'round': round_num,
                 'player_a': pid_a, 'player_b': pid_b,
                 'name_a': cfg_a['name'], 'name_b': cfg_b['name'], 'winner': winner,
+                'leaderboard': self._get_leaderboard(),
                 **{k: result[k] for k in [
                     'rounds_played', 'round_wins_a', 'round_wins_b', 'hands_played',
                     'hand_wins_a', 'hand_wins_b', 'score_a', 'old_rating_a', 'old_rating_b',
